@@ -1,0 +1,47 @@
+name: tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    # Agent PRs open as drafts; tests run once they are marked ready, and on main.
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get install -y tmux
+      - run: uv run -q --with pytest --with pytest-timeout --with-editable . python -m pytest -q --timeout 20 tests --ignore=tests/test_live.py
+
+  package:
+    # The wheel and the source archive build, pass the metadata check, and a clean install runs the command.
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv build
+      - run: uvx twine check dist/*
+      - name: Install the wheel in a clean environment
+        run: |
+          uv venv /tmp/wheel-check
+          uv pip install --python /tmp/wheel-check/bin/python dist/*.whl
+          /tmp/wheel-check/bin/harnessgram --version
+          /tmp/wheel-check/bin/python -c "import importlib.resources as r; assert r.files('ctb.studio').joinpath('app.js').is_file()"

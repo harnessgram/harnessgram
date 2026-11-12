@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   /private/tmp/ctlab/lab/proj
+
+
+❯ please go
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Database  ☐ Cache  ✔ Submit  →
+
+Which database should the notes feature use?
+
+❯ 1. SQLite
+     Local
+  2. Postgres
+     Server
+  3. Type something.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                            
+
+
+
+                                                    

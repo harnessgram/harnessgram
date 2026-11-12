@@ -1,0 +1,18 @@
+{
+ "home": ["new-video", "series-filter", "slate-actions", "slate-preview", "waiting-stack", "working-job"],
+ "empty-home": ["empty-desk", "new-video"],
+ "loading-home": ["loading-line", "skeleton"],
+ "error-offline": ["offline-banner"],
+ "error-expired": ["expired"],
+ "bridge-off": ["bridge-off"],
+ "error-desk": ["error-actions", "error-card", "plain-reason"],
+ "no-permission": ["no-permission"],
+ "coming-next": ["back", "coming-next", "primary-dock"],
+ "desk": ["back", "cue-answers", "cue-stack", "desk-modes", "hear", "map", "new-length", "player", "primary-dock", "to-map"],
+ "desk-scenes": ["back", "desk-modes", "map", "player", "primary-dock", "scene-card", "storyboard"],
+ "desk-done": ["back", "map", "no-suggestions", "player", "primary-dock"],
+ "words": ["back", "hear", "legend", "map", "primary-dock", "runtime", "scene-group", "sentence", "sentence-list"],
+ "loading-desk": ["back", "poster-first"],
+ "offline-desk": ["back", "map", "offline-banner", "player"],
+ "error-project": ["back", "error-actions", "error-card", "plain-reason"]
+}

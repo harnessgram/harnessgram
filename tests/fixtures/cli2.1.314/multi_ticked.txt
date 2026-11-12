@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   /private/tmp/ctlab/lab/proj
+
+
+❯ please go
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Toppings  ✔ Submit  →
+
+Which toppings do you want?
+
+  1. [✔] Cheese
+         Mozzarella
+  2. [ ] Olives
+         Black
+  3. [✔] Mushrooms
+         Fresh
+  4. [ ] Type something
+❯    Submit
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in VS Code · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                            
+
+
+
+                                                    

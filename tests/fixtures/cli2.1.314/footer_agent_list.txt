@@ -1,0 +1,18 @@
+● Waiting for the review to finish.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · 2 shells · ← 47 agents
+  ◯ general-purpose  Saving review…  48m 41s
+  ◯ general-purpose  Reading diff…  47m 02s
+  ◯ general-purpose  Running tests…  46m 10s
+  ◯ general-purpose  Checking docs…  45m 33s
+  ◯ general-purpose  Fixing lint…  44m 59s
+  ◯ general-purpose  Reading logs…  44m 12s
+  ◯ general-purpose  Summarising…  43m 40s
+  ◯ general-purpose  Planning…  42m 18s
+  ◯ general-purpose  Searching…  41m 05s
+  ◯ general-purpose  Comparing…  40m 51s
+  ◯ general-purpose  Drafting…  39m 20s
+  ◯ general-purpose  Reviewing…  38m 07s

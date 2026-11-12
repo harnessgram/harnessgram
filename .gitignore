@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+# Never commit local configuration or state: they hold the bot token.
+config.json
+*.bak-ctb-*
+.ref/

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harnessgram"
+version = "0.1.0"
+description = "Telegram remote control for Claude Code: one topic per session, voice, approvals, quota dashboard, translation."
+authors = [{ name = "Harnessgram contributors" }]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = ["claude-code", "telegram", "remote-control", "hooks", "translation"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Communications :: Chat",
+  "Topic :: Software Development",
+]
+# The core is standard library only. Everything below is optional.
+dependencies = []
+
+[project.optional-dependencies]
+# Offline translation with Google TranslateGemma on Apple silicon (MLX).
+mlx = ["mlx-lm; sys_platform == 'darwin'"]
+# Offline translation with NLLB-200 (needs a converted CTranslate2 model dir).
+nllb = ["ctranslate2", "sentencepiece"]
+test = ["pytest"]
+
+# The public repository (the harnessgram organization).
+[project.urls]
+Homepage = "https://github.com/harnessgram/harnessgram"
+Repository = "https://github.com/harnessgram/harnessgram"
+Issues = "https://github.com/harnessgram/harnessgram/issues"
+Changelog = "https://github.com/harnessgram/harnessgram/blob/main/CHANGELOG.md"
+
+# `harnessgram` is the command; `lingoline` and `ctb` are aliases of it.
+[project.scripts]
+harnessgram = "ctb.cli:main"
+lingoline = "ctb.cli:main"
+ctb = "ctb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"ctb.studio" = ["*.css", "*.js", "*.svg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["new_install: use the real defaults and empty-state detection"]
