@@ -6,8 +6,8 @@ context-size footer, then the original folded in one expandable message. If the 
 original goes out first, unfolded, as before (config `original`). Messages are silent. Runs in its own detached process, started by the Stop hook, so it survives
 the hook being cancelled when the next prompt arrives.
 
-A bad part never drops the rest: HTML Telegram cannot parse is retried as plain text, and if that fails
-too only that part is dropped. Failures go to <state>/mirror.log WITHOUT message content.
+A bad part never drops the rest: HTML Telegram cannot parse is retried as plain text. Undelivered
+owner parts are saved in the private outbox. Failures go to <state>/mirror.log WITHOUT message content.
 
 Shared sessions (see team.py) are also posted to the team group: always redacted, and any part matching
 `team.block_patterns` is replaced by "(part withheld)".
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fcntl
 import copy
+import hashlib
 import html
 import io
 import json
@@ -199,24 +200,6 @@ def reason_he(exc: BaseException) -> str:
     return reason_str(exc, lang="he")
 
 
-def reply_keyboard(cfg: Config) -> dict:
-    """The fixed one-time keyboard under a topic (also re-sent by /keyboard), rows listed so an
-    RTL chat lays them out left to right."""
-    ui_lang = getattr(cfg, "ui_language", "en")
-    s = L.strings(ui_lang)
-    row1 = [{"text": s["btn_continue"]}, {"text": s["btn_stop"]}, {"text": s["btn_escape"]}]
-    row2 = [{"text": s["btn_status"]}, {"text": s["btn_screen"]}, {"text": s["btn_compact"]}]
-    row3 = [{"text": s["btn_permissions"]}, {"text": s["btn_context"]}, {"text": s["btn_model"]}]
-    if ui_lang == "he":
-        row1, row2, row3 = list(reversed(row1)), list(reversed(row2)), list(reversed(row3))
-    return {
-        "keyboard": [row1, row2, row3],
-        "is_persistent": False,
-        "one_time_keyboard": True,
-        "resize_keyboard": True,
-    }
-
-
 def fixed_keyboard(lang: str) -> dict:
     """The fixed keyboard under the typing box, phone first. Above it, live_keyboard adds the info row
     (context, quota, account). Its first row is the session's settings, each button showing its current
@@ -235,8 +218,28 @@ def fixed_keyboard(lang: str) -> dict:
     }
 
 
-KEYBOARD = fixed_keyboard("he")
-KEYBOARD_EN = fixed_keyboard("en")
+def current_keyboard(lang: Optional[str] = "en") -> dict:
+    """THE layout of the reply keyboard under every topic, built fresh from fixed_keyboard on every call: the
+    one place a sender asks for it (live_keyboard, and through it the replies, the status card, the
+    keyboard_back repost, /keyboard and the wake refresh). Nothing reads a layout from a constant or a state
+    file, so a layout that changes is the layout every sender sends from the next call on."""
+    return fixed_keyboard("he" if (lang or "").startswith("he") else "en")
+
+
+def layout_id() -> str:
+    """A short id of the layout now in force (both languages, every row and flag). It changes by itself
+    whenever fixed_keyboard changes, so state kept about an older layout (the card's data key and label
+    signature, the topics that already got the keyboard) is seen as stale without anyone bumping a number."""
+    shape = json.dumps([current_keyboard(lang) for lang in ("he", "en")], ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(shape.encode("utf-8")).hexdigest()[:8]
+
+
+def __getattr__(name: str):
+    """KEYBOARD and KEYBOARD_EN stay importable (tests and old callers), but are the builder's output at the
+    time of the lookup, never a copy kept at import."""
+    if name in ("KEYBOARD", "KEYBOARD_EN"):
+        return current_keyboard("he" if name == "KEYBOARD" else "en")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 QUOTA_LINE = re.compile(r"\n?⏳[^\n]*")
@@ -333,7 +336,7 @@ def restamp_footer(footer: str, session: Optional[str], lang: str) -> str:
 
 
 def get_keyboard(lang: str = "en") -> dict:
-    return KEYBOARD if (lang or "").startswith("he") else KEYBOARD_EN
+    return current_keyboard(lang)
 
 
 def context_numbers(session: Optional[str], footer: str = "") -> tuple:
@@ -500,10 +503,10 @@ def sent_labels(session: Optional[str] = None) -> dict:
     return out
 
 
-def live_keyboard(footer: str, base_kb: Optional[dict] = None, lang: str = "he",
-                  thread: Optional[int] = None, fresh: bool = False, session: Optional[str] = None,
-                  chat: Optional[int] = None) -> dict:
-    """The fixed keyboard with a live info row on top ("context and quota always in view"): the context size
+def live_keyboard(footer: str, lang: str = "he", thread: Optional[int] = None, fresh: bool = False,
+                  session: Optional[str] = None, chat: Optional[int] = None) -> dict:
+    """The only constructor of a reply keyboard that is sent: the layout of current_keyboard(lang), the one
+    source of the layout (a caller cannot hand it another), with a live info row on top ("context and quota always in view"): the context size
     (and how full the window is), Claude's weekly use and, when there is more than one account, the account
     of this topic. The settings buttons show their current values (state_labels).
     `fresh`: the footer is an OLD saved text (a card re-posted later, a restored keyboard): its quota numbers
@@ -564,7 +567,7 @@ def live_keyboard(footer: str, base_kb: Optional[dict] = None, lang: str = "he",
         except Exception:
             pass
 
-    base = base_kb or (KEYBOARD if (lang or "").startswith("he") else KEYBOARD_EN)
+    base = current_keyboard(lang)
     rows = [list(r) for r in base.get("keyboard", [])]
     live = state_labels(session, lang)
     if live:
@@ -583,6 +586,19 @@ def live_keyboard(footer: str, base_kb: Optional[dict] = None, lang: str = "he",
 
 # Context and quota numbers on the live info row change with almost every reply; they are not labels.
 _NUMBER_BUTTONS = ("📏", "⏱️", "📅")
+
+
+SIG_FAILED = "sigfail"  # in status-card-pace.json: when a card's signature could not be saved (0 = it can again)
+
+
+def _sig_failed(thread, chat: Optional[int]) -> bool:
+    """A card's signature could not be saved lately: its stored signature is stale for a reason that posting
+    another card would not cure, so the card is only edited in place until a save works again."""
+    try:
+        entry = _read_map(state_dir() / CARD_PACE_FILE).get(thread_key(thread or 0, chat))
+        return isinstance(entry, dict) and bool(entry.get(SIG_FAILED))
+    except Exception:
+        return False
 
 
 def keyboard_signature(markup: Optional[dict]) -> str:
@@ -652,6 +668,9 @@ def status_message(cfg: Config, thread: int, footer: str, keyboard: Optional[dic
     `repost` forces a new card at the bottom (bringing the keyboard back under a newer message).
     `optional` is for background callers: every send and edit goes through the flood gate and budget, and
     a real Telegram error is raised to the caller (a flooded chat still returns None quietly).
+    `keyboard` only switches the card's reply keyboard on (None = none): what the card carries is always
+    live_keyboard, i.e. the current layout, never the dict a caller passes. A card whose recorded layout id
+    is not today's is posted again, whatever its labels were.
     `chat`: the project group the thread belongs to (None = the home chat)."""
     if chat == home_chat(cfg):
         chat = None
@@ -689,9 +708,9 @@ def status_message(cfg: Config, thread: int, footer: str, keyboard: Optional[dic
         if thread:
             params["message_thread_id"] = thread
         if keyboard is not None:
-            params["reply_markup"] = live_keyboard(footer, base_kb=keyboard, lang=ui_lang, thread=thread, fresh=True,
+            params["reply_markup"] = live_keyboard(footer, lang=ui_lang, thread=thread, fresh=True,
                                                   session=session, chat=chat)
-        sig = keyboard_signature(params.get("reply_markup"))
+        sig = layout_id() + ":" + keyboard_signature(params.get("reply_markup"))
         bot = bot or Bot.from_config(cfg)
 
         def remember(texts_key_value: str) -> None:
@@ -700,7 +719,9 @@ def status_message(cfg: Config, thread: int, footer: str, keyboard: Optional[dic
             write_private(tp, json.dumps(dict(list(texts.items())[-200:]), ensure_ascii=False))
 
         sigs = _read_map(sigs_path)
-        if previous and not asked and not repost and sigs.get(key) == sig and not setting_on(STATUS_REPOST):
+        sig_failed = _sig_failed(thread, chat)
+        if previous and not asked and not repost and (sigs.get(key) == sig or sig_failed) \
+                and not setting_on(STATUS_REPOST):
             if _read_map(tp).get(key) == footer:
                 return {"message_id": previous}
             try:
@@ -731,10 +752,23 @@ def status_message(cfg: Config, thread: int, footer: str, keyboard: Optional[dic
             if optional and not getattr(exc, "skipped", False):
                 raise
         if msg and isinstance(msg, dict) and msg.get("message_id"):
+            # The signature first: a card whose signature could not be saved must not leave the old card
+            # undeleted with a stale signature that makes every turn-end refresh post another card. When the
+            # save fails, SIG_FAILED is noted (status-card-pace.json) and the card is edited in place, never
+            # re-posted, until a later save works.
+            sigs[key] = sig
+            try:
+                write_private(sigs_path, json.dumps(dict(list(sigs.items())[-200:]), ensure_ascii=False))
+                if sig_failed:
+                    _pace(thread, chat=chat, **{SIG_FAILED: 0})
+            except Exception as exc:
+                log(f"card signature not saved: {type(exc).__name__}")
+                try:
+                    _pace(thread, chat=chat, **{SIG_FAILED: time.time()})
+                except Exception:
+                    pass
             ids[key] = msg["message_id"]
             write_private(path, json.dumps(ids))
-            sigs[key] = sig
-            write_private(sigs_path, json.dumps(dict(list(sigs.items())[-200:]), ensure_ascii=False))
             try:  # kept so the inbox can bring the keyboard back after a button message
                 remember(footer)
             except Exception:
@@ -789,6 +823,7 @@ def card_data_key(session: str) -> str:
         live += f"~{usage.context_window(session)}~{int(accounts.multiple())}"
     except Exception:
         pass
+    live += "~k" + layout_id()  # a card drawn under another layout is stale, even when nothing else moved
     return f"{acct}|{label}|{quota}|{session_context(session) // CONTEXT_STEP}{live}"
 
 
@@ -891,35 +926,70 @@ def refresh_card(cfg: Config, bot, session: str, topics: Optional[TopicMap] = No
         return False
 
 
-def keyboard_once(thread: int, chat: Optional[int] = None) -> bool:
-    """The fixed keyboard is sent once per topic and then stays behind the keyboard icon
-    (open only when tapped). `chat`: the project group of the topic (None = the home chat)."""
-    if not thread:
-        return False
+KEYBOARD_MARKS_FILE = "keyboard-topics.json"  # {"layout": layout_id(), "topics": [...]} in ONE file (older builds: a bare list, void)
+
+
+def _keyboard_marks(base: Path) -> list:
+    """The topics that got the keyboard of the layout in force. One file holds the list and the layout it was
+    made for, so the two can never disagree after a crash. A list that is not stamped with today's layout id
+    (a bare list from an older build, or one stamped with another layout) is void: every topic is due the
+    keyboard again. That costs no extra message, the keyboard rides on the topic's next reply."""
+    try:
+        data = json.loads((base / KEYBOARD_MARKS_FILE).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(data, dict) and data.get("layout") == layout_id() and isinstance(data.get("topics"), list):
+        return data["topics"]
+    return []
+
+
+def _write_keyboard_marks(base: Path, topics: list) -> None:
+    write_private(base / KEYBOARD_MARKS_FILE, json.dumps({"layout": layout_id(), "topics": topics}))
+
+
+def _keyboard_mark(thread, chat: Optional[int]):
     try:
         thread = int(thread)
     except (ValueError, TypeError):
         pass
-    mark = thread if chat is None else thread_key(thread, chat)
-    base = private_dir(state_dir())
-    path = base / "keyboard-topics.json"
-    lock_path = base / "keyboard-topics.lock"
-    with open(lock_path, "a") as lock_fh:
-        try:
+    return thread if chat is None else thread_key(thread, chat)
+
+
+def keyboard_due(thread: int, chat: Optional[int] = None) -> bool:
+    """Whether this topic is still owed the fixed keyboard: it rides on one reply per topic and then stays
+    behind the keyboard icon. Read only, and it fails open: whatever goes wrong while reading the marks (an
+    unreadable file, a bad path) the topic is due, so the keyboard is sent and the reply is never blocked.
+    `chat`: the topic's project group (None = the home chat)."""
+    if not thread:
+        return False
+    try:
+        base = private_dir(state_dir())
+        with open(base / "keyboard-topics.lock", "a") as lock_fh:
             fcntl.flock(lock_fh, fcntl.LOCK_EX)
-        except OSError:
-            pass
-        try:
-            done = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(done, list):
-                done = []
-        except Exception:
-            done = []
-        if mark in done:
-            return False
-        done.append(mark)
-        write_private(path, json.dumps(done))
+            return _keyboard_mark(thread, chat) not in _keyboard_marks(base)
+    except Exception as exc:
+        log(f"keyboard marks not read: {type(exc).__name__}")
         return True
+
+
+def keyboard_sent(thread: int, chat: Optional[int] = None) -> None:
+    """Mark the topic as having the keyboard, called only AFTER Telegram confirmed a send that carried it. No
+    claim is taken before the send, so a crash, a rate limit or a dropped part leaves no mark and the next
+    reply carries the keyboard again. The one trade-off: two replies sent at the very same moment may both
+    carry it. A duplicate keyboard is harmless, a lost one is not. Best effort: any failure (a full disk, a
+    bad path) is logged and swallowed, it never costs the send. Never raises."""
+    if not thread:
+        return
+    try:
+        mark = _keyboard_mark(thread, chat)
+        base = private_dir(state_dir())
+        with open(base / "keyboard-topics.lock", "a") as lock_fh:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            done = _keyboard_marks(base)
+            if mark not in done:
+                _write_keyboard_marks(base, done + [mark])
+    except Exception as exc:
+        log(f"keyboard mark not saved: {type(exc).__name__}")
 
 
 def drop_topic_state(found) -> Optional[int]:
@@ -945,12 +1015,9 @@ def drop_topic_state(found) -> Optional[int]:
             fcntl.flock(lock_fh, fcntl.LOCK_EX)
         except OSError:
             pass
-        try:
-            done = json.loads((base / "keyboard-topics.json").read_text(encoding="utf-8"))
-        except Exception:
-            done = []
-        if isinstance(done, list) and mark in done:
-            write_private(base / "keyboard-topics.json", json.dumps([x for x in done if x != mark]))
+        done = _keyboard_marks(base)
+        if mark in done:
+            _write_keyboard_marks(base, [x for x in done if x != mark])
     return card
 
 
@@ -961,7 +1028,7 @@ def log(line: str) -> None:
         with open(path, "a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
         os.chmod(path, 0o600)
-    except OSError:
+    except Exception:  # a log line never costs the caller anything
         pass
 
 
@@ -989,9 +1056,13 @@ class Mirror:
         self.cfg, self.bot, self.topics, self.team_topics = cfg, bot, topics, team_topics
         self.rtl = L.is_rtl(cfg.target_language)
         self.dropped = 0  # parts the OWNER did not receive: a reply that failed to arrive
+        self.queued = 0  # owner parts safely retained, without a Telegram message id yet
+        self._queued_first = None  # first indexed part of the current reply retained in the outbox
+        self._pending_index = None
         self.team_dropped = 0  # parts the team group did not receive (the owner's copy arrived)
         self._held: list = []  # (placeholder, owner-only link) of the reply being sent: see send_reply
         self.last_error: Optional[TelegramError] = None  # the last error that dropped a part
+        self.last_error_plain = False  # its rejected request was already the plain-text fallback
         self.first_reply_id: Optional[int] = None  # the first reply message delivered since it was reset
         # While a list: every message _post delivers is added as {chat, id, text, html, team}, so an
         # instant reply can later be edited in place to its translation (see _send_instant).
@@ -1005,11 +1076,23 @@ class Mirror:
         found = self.topics.place_of(session) if session else None
         return found.chat if found and not found.home else home_chat(self.cfg)
 
+    def _reply_chat(self, session: str, title: str, fallback: int) -> int:
+        """Resolve the same new-topic destination as TopicMap before checking its flood gate."""
+        found = self.topics.place_of(session)
+        if found:
+            return found.chat if not found.home else fallback
+        if self.topics.cfg is not None and self.topics.cfg.projects:
+            from .projects import resolve
+            project, _ = resolve(self.topics.cfg, session, title)
+            if project:
+                return project.chat_id
+        return fallback
+
     def _reply_keyboard(self, footer: str = "", session: str = "") -> dict:
         # The same keyboard as the status card (account, mode, thinking, model labels): two layouts
         # side by side made topics look different from each other.
         found = self.topics.place_of(session) if session else None
-        return live_keyboard(footer, base_kb=get_keyboard(self.cfg.ui_language), lang=self.cfg.ui_language,
+        return live_keyboard(footer, lang=self.cfg.ui_language,
                              thread=found.thread if found else None, session=session or None,
                              chat=found.chat if found and not found.home else None)
 
@@ -1020,78 +1103,149 @@ class Mirror:
                                     {"text": s["btn_yes"], "callback_data": "say:yes"}],
                                    menus.unbuttons_row(getattr(self.cfg, "ui_language", None), later=True)]}
 
+    @staticmethod
+    def _keyboard_went_out(params: dict, thread, found) -> None:
+        """Telegram confirmed the send: if it carried the reply keyboard, the topic now has it."""
+        if thread and "keyboard" in (params.get("reply_markup") or {}):
+            keyboard_sent(thread, chat=found.away if found else None)
+
     def _post(self, chat_id: int, topics: TopicMap, session: str, title: str, html_text: str,
               main_chat_fallback: bool = True, reply_markup: Optional[dict] = None,
               reply_parameters: Optional[dict] = None, footer: str = "", record_reply: bool = False) -> bool:
-        """One silent message into the session's topic. On HTTP 429 Telegram's retry_after is
-        honoured once (capped); a plain-text retry happens ONLY for an HTML parse error, so
-        nothing is ever sent twice; a deleted topic is re-created and the send retried once.
-        A session placed in a project group is sent there, whatever `chat_id` says.
-        Room for the footer is reserved, so the final part never crosses the 4096 limit and
-        cuts it. Never raises for a Telegram problem."""
-        waited = False  # one 429 wait per part
-        attempt = 0
-        while attempt < 2:
+        """Deliver now or durably retain an owner part. False means it was not sent now;
+        a part not retained counts as dropped for the Stop dedupe ledger."""
+        options = dict(main_chat_fallback=main_chat_fallback, reply_markup=reply_markup,
+                       reply_parameters=reply_parameters, footer=footer, record_reply=record_reply)
+        from .harness import legacy_topic_supported
+        if topics is not self.topics or not legacy_topic_supported(session):
+            # Codex's persisted event cursor owns retries; never give the same part two retry owners.
+            return self._post_now(chat_id, topics, session, title, html_text, **options)
+        from . import reply_outbox
+        with reply_outbox.session_locked(session):
+            with reply_outbox.locked() as path:
+                entries = reply_outbox.load(path)
+            before = self.dropped
+            where = self._reply_chat(session, title, chat_id)
+            # A later part must not overtake an earlier queued part of this session.
+            pending = any(e["session"] == session for e in entries)
+            if not pending and flood.remaining(where) <= 0:
+                try:
+                    if self._post_now(chat_id, topics, session, title, html_text, **options):
+                        return True
+                except (TelegramError, OSError) as exc:
+                    self.last_error = exc if isinstance(exc, TelegramError) else TelegramError("network error")
+            found = topics.place_of(session)
+            entry = {"session": session, "title": title, "text": html_text,
+                     "thread": found.thread if found else None,
+                     "chat": found.chat if found else where,
+                     "answer_to": ({"chat": where, "id": reply_parameters["message_id"]}
+                                   if reply_parameters else None),
+                     "created": time.time(), "language": self.cfg.target_language, "options": options}
+            if record_reply and self.first_reply_id is None and self._queued_first is None and self._pending_index:
+                entry["index"] = self._pending_index
+            with reply_outbox.locked() as path:
+                entries = reply_outbox.load(path)
+                retained = reply_outbox.append(path, entries, entry)
+            if not retained:
+                self.dropped = max(self.dropped, before + 1)
+                return False
+            if record_reply and self._queued_first is None:
+                self._queued_first = entry
+            self.dropped = before
+            self.queued += 1
+            log("reply part queued for redelivery")
+            return False
+
+    def _post_now(self, chat_id: int, topics: TopicMap, session: str, title: str, html_text: str,
+                  main_chat_fallback: bool = True, reply_markup: Optional[dict] = None,
+                  reply_parameters: Optional[dict] = None, footer: str = "", record_reply: bool = False) -> bool:
+        """Bounded retries, shared flood waits, plain fallback and one topic recreation."""
+        from .harness import legacy_topic_supported
+        if not legacy_topic_supported(session):
+            main_chat_fallback = False
+        waits = failures = 0
+        recreated = plain = False
+        while True:
+            where = self._reply_chat(session, title, chat_id) if topics is self.topics else chat_id
+            if flood.remaining(where) > 0:
+                break  # even the first attempt and topic creation must respect another sender's gate
             thread = topics.ensure(session, title)
             if not thread and not main_chat_fallback:
-                return False
+                break
             found = topics.place_of(session) if thread else None
             where = found.chat if found and not found.home else chat_id
+            if flood.remaining(where) > 0:
+                break
             body = html_text if thread else f"\U0001F916 <b>{html.escape(title, quote=False)}</b>\n\n" + html_text
             mark = L.RLM if self.rtl else ""
             text = mark + body + footer
             params = {"chat_id": where, "disable_notification": True, "text": text,
                       "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}}
+            if plain:
+                params.pop("parse_mode")
+                params["text"] = _plain(text)[:TELEGRAM_LIMIT]
             if reply_parameters:
                 params["reply_parameters"] = reply_parameters
             if thread:
                 params["message_thread_id"] = thread
                 if reply_markup:
                     if "keyboard" in reply_markup:
-                        if keyboard_once(thread, chat=found.away if found else None):
+                        if keyboard_due(thread, chat=found.away if found else None):
                             params["reply_markup"] = reply_markup
                     else:
                         params["reply_markup"] = reply_markup
             try:
                 result = self.bot.call("sendMessage", params)
-                if record_reply and thread:
+            except TelegramError as exc:
+                self.last_error = exc
+                if exc.code not in (401, 403) and _is_thread_error(exc) and thread and not recreated:
+                    topics.forget(session, chat=found.chat if found else None)
+                    recreated = True
+                    continue
+                if exc.code not in (401, 403) and _is_parse_error(exc) and not plain:
+                    log(f"html send failed (code {exc.code}); retrying as plain text")
+                    plain = True
+                    continue
+                if exc.code == 429 and waits < 3:
+                    delay = exc.retry_after if isinstance(exc.retry_after, (int, float)) and exc.retry_after > 0 else 1.0
+                    waits += 1
+                    time.sleep(min(max(delay, flood.remaining(where)), RETRY_AFTER_CAP))
+                    while flood.remaining(where) > 0 and waits < 3:
+                        waits += 1
+                        time.sleep(min(flood.remaining(where), RETRY_AFTER_CAP))
+                    continue
+                if (exc.code is None or 500 <= exc.code < 600) and failures < 2:
+                    time.sleep((1.0, 3.0)[failures])
+                    failures += 1
+                    continue
+                self.last_error_plain = plain
+                log(f"send failed (code {exc.code}); retaining part for redelivery")
+                break
+            except OSError:
+                if failures < 2:
+                    time.sleep((1.0, 3.0)[failures])
+                    failures += 1
+                    continue
+                log("send failed (network); retaining part for redelivery")
+                break
+            # Telegram accepted this part. Local bookkeeping must never trigger a resend.
+            if record_reply and thread and self.first_reply_id is None:
+                self.first_reply_id = result.get("message_id")
+            try:
+                self._keyboard_went_out(params, thread, found)
+            except Exception:
+                log("delivered reply keyboard bookkeeping failed")
+            if record_reply and thread:
+                try:
                     from .topics import record_reply as remember_reply
                     remember_reply(where, thread, result.get("message_id"))
-                    if self.first_reply_id is None:
-                        self.first_reply_id = result.get("message_id")
+                except Exception:
+                    log("delivered reply bookkeeping failed")
+            try:
                 self._note_sent(where, result, params, topics)
-                return True
-            except TelegramError as e:
-                if _is_thread_error(e) and thread and attempt == 0:
-                    topics.forget(session, chat=found.chat if found else None)  # the topic was deleted: make a new one and retry
-                    attempt += 1
-                    continue
-                if e.code == 429 and not waited:
-                    waited = True
-                    delay = e.retry_after if isinstance(e.retry_after, (int, float)) and e.retry_after > 0 else 1.0
-                    delay = max(delay, flood.remaining(where))  # the shared gate may know a longer pause
-                    time.sleep(min(delay, RETRY_AFTER_CAP))
-                    continue  # the send is retried once; the thread retry stays available
-                if not _is_parse_error(e):
-                    log(f"send failed (code {e.code}); part dropped")
-                    self.last_error = e
-                    break
-                log(f"html send failed (code {e.code}); retrying as plain text")
-                params.pop("parse_mode", None)
-                params["text"] = _plain(text)[:TELEGRAM_LIMIT]
-                try:
-                    result = self.bot.call("sendMessage", params)
-                    if record_reply and thread:
-                        from .topics import record_reply as remember_reply
-                        remember_reply(where, thread, result.get("message_id"))
-                        if self.first_reply_id is None:
-                            self.first_reply_id = result.get("message_id")
-                    self._note_sent(where, result, params, topics)
-                    return True
-                except TelegramError as e2:
-                    log(f"plain send failed too (code {e2.code}); part dropped")
-                    self.last_error = e2
-                    break
+            except Exception:
+                log("delivered reply tracking failed")
+            return True
         self.dropped += 1
         return False
 
@@ -1189,6 +1343,9 @@ class Mirror:
         part became (owner and team copies), its inline keyboard and whether it carries the footer."""
         if quick_buttons is not None:
             reply_keyboard = quick_buttons
+        from .harness import legacy_topic_supported
+        if not legacy_topic_supported(session):
+            reply_keyboard = False  # native harness approvals and Claude controls stay closed
         footer = footer[:1000]
         parts = fmt.layout(md, self.cfg.target_language, pin_last=pin)
         # Escape expansion and a large footer can exceed Telegram's limit. Re-split
@@ -1303,6 +1460,8 @@ class Mirror:
         lang = self.cfg.target_language
         pin = summary is not None
         self.first_reply_id = None
+        self._queued_first = None
+        self._pending_index = {"text": hide_links(prepared, held), "has_summary": pin}
         if not (translate_fn and needs_translation(prepared, lang)):
             sent = self._send_layout(session, title, prepared, pin, footer, reply_keyboard=True,
                                      reply_parameters=reply_params)
@@ -1432,6 +1591,7 @@ class Mirror:
         box = self._translate_in_thread(prepared, translate_fn, lang)
         slots: list = []
         self.first_reply_id = None
+        queued_before = self.queued
         sent = self._send_layout(session, title, prepared, pin, footer, reply_keyboard=True,
                                  reply_parameters=reply_params, slots=slots)
         first = self.first_reply_id
@@ -1439,6 +1599,11 @@ class Mirror:
         th = box["thread"]
         th.join(TRANSLATE_TIMEOUT)
         took = time.monotonic() - box["t0"]
+        if self.queued > queued_before:
+            # Queued originals have no edit target. Keep the complete original instead of
+            # queuing a second copy of the answer as translated follow-ups.
+            self._index_reply(session, first, hide_links(prepared, held), pin)
+            return sent
         shown: Optional[str] = None if th.is_alive() else box["shown"]
         failed = th.is_alive() or box["error"] is not None
         if shown is not None:  # an engine can alter a placeholder: what is left of one becomes "[redacted]"
@@ -1622,10 +1787,13 @@ class Mirror:
             footer = "\n".join(filter(None, (by, footer)))
         self.first_reply_id = None
         dropped_before = self.dropped
+        queued_before = self.queued
+        self._pending_index = {"text": hide_links(shown, held), "has_summary": pin}
         sent_he = self._send_layout(session, title, shown, pin, footer, reply_keyboard=True,
                                     reply_parameters=reply_params)
         first = self.first_reply_id
-        he_failed = hebrew_first and (first is None or self.dropped > dropped_before)
+        he_failed = hebrew_first and ((first is None and self.queued == queued_before)
+                                     or self.dropped > dropped_before)
         if he_failed:  # the Hebrew did not (fully) arrive: the original goes out whole, never folded
             self.first_reply_id = None
             sent += self._send_original(session, title, prepared, folded=False, reply_keyboard=False,
@@ -1637,7 +1805,7 @@ class Mirror:
             self.first_reply_id = first
         if sent_he and not he_failed and L.base(lang) == "he":
             voice_summary(self.cfg, self.bot, session, hide_links(shown, held), topics=self.topics)
-        if first is None:  # the translated part did not arrive: the index points to the original
+        if first is None and self.queued == queued_before:
             first, shown = original_id, prepared
         self._index_reply(session, first, hide_links(shown, held), pin)
         return sent + sent_he
@@ -1945,8 +2113,8 @@ def stage_upload(cfg: Config, path: str, limit: int):
     return job, str(staged)
 
 
-def build(cfg: Config) -> Mirror:
-    bot = Bot.from_config(cfg)
+def build(cfg: Config, bot=None) -> Mirror:
+    bot = bot or Bot.from_config(cfg)
     team = TopicMap(state_dir() / "topics-team.json", bot, cfg.team.chat_id) if cfg.team.enabled else None
     return Mirror(cfg, bot, TopicMap(state_dir() / "topics.json", bot, home_chat(cfg), cfg=cfg), team)
 
@@ -2094,6 +2262,24 @@ def _cached_translation(text: str, cfg: Config) -> str:
         return ""
 
 
+def _translate_agent_task(cfg: Config, session: str, thread, agent_id: str, task: str, bot) -> None:
+    """The agents card shows each agent's task in the owner's language: the cached translation when there is
+    one, else a fresh one; the card keeps the original when translation is off or fails."""
+    if not task or not agent_id or not cfg.translate or not L.needs_translation(task, cfg.target_language):
+        return
+    he = _cached_translation(task, cfg)
+    if not he:
+        try:
+            he = translate_text(task, cfg, fast=True).strip()
+        except Exception:
+            he = ""
+    if he and he != task:
+        try:
+            agents_card.agent_task_text(cfg, session, thread, agent_id, he, bot, source=task)
+        except Exception:
+            pass
+
+
 def subagent_report(cfg: Config, agent_type: str, description: str, agent_transcript: str = "",
                     transcript: str = "", translate: bool = True) -> dict:
     """What the agents card shows for a finished agent: name, model (with effort), a one-line result translated
@@ -2175,6 +2361,7 @@ def run_lifecycle(cfg: Config, session: str, kind: str, agent_type: str = "", de
                 agents_topic.agent_started(cfg, session, agent_id, agent_type, bot, found=task)
             else:
                 agents_card.agent_started(cfg, session, thread, agent_id, agent_type, bot, chat=found.chat, found=task)
+                _translate_agent_task(cfg, session, thread, agent_id, str(task.get("task") or ""), bot)
             return 0
         elif agents_topic.enabled():  # the explicit separate topic is the place for these notices
             text = subagent_text(cfg, agent_type, description, agent_transcript, transcript)
@@ -2189,6 +2376,7 @@ def run_lifecycle(cfg: Config, session: str, kind: str, agent_type: str = "", de
             if known:
                 report["summary"] = known
             agents_card.agent_finished(cfg, session, thread, agent_id, report, bot, chat=found.chat)
+            _translate_agent_task(cfg, session, thread, agent_id, agent_task.clean_task(report.get("name") or ""), bot)
             if original and not known and cfg.translate and L.needs_translation(original, cfg.target_language):
                 try:
                     he = translate_text(original, cfg, fast=False).strip()
@@ -2272,6 +2460,8 @@ def run_reply(cfg: Config, title: str, session: str, text: str, translate: bool,
     except Exception:
         log("card refresh after the reply failed")
     if not m.dropped:
+        # Durable acceptance also settles the turn. Quota recovery must continue while
+        # Telegram is unavailable; queued replies follow the session's current topic.
         try:
             limit_offer(cfg, m.bot, session, text)
         except Exception:
@@ -2408,8 +2598,8 @@ def send_essential(cfg: Config, bot, session: str, fields: dict) -> Optional[dic
 
 
 def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = None, bot=None) -> None:
-    """Report a failed delivery in the existing owner topic, without transcript content. The
-    Hebrew reason for the failure (reason_he) is appended to the alert."""
+    """Delivery notices share the durable outbox, including when the alert is flooded."""
+    from . import reply_outbox
     try:
         bot = bot or Bot.from_config(cfg)
         ui_lang = getattr(cfg, "ui_language", "en")
@@ -2420,9 +2610,27 @@ def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = N
         else:
             body = text
         mark = L.RLM if ui_lang == "he" else ""
-        send_essential(cfg, bot, session, {"text": mark + "⚠️ " + body, "disable_notification": True})
+        body = mark + "⚠️ " + body
+        with reply_outbox.session_locked(session):
+            with reply_outbox.locked() as path:
+                entries = reply_outbox.load(path)
+            found = place(cfg, session)
+            chat = found.chat if found else home_chat(cfg)
+            if not any(e["session"] == session for e in entries) and flood.remaining(chat) <= 0:
+                try:
+                    if send_essential(cfg, bot, session, {"text": body, "disable_notification": True}) is not None:
+                        return
+                except (TelegramError, OSError):
+                    pass
+            with reply_outbox.locked() as path:
+                entries = reply_outbox.load(path)
+                retained = reply_outbox.append(path, entries, {
+                    "session": session, "title": "", "text": html.escape(body, quote=False),
+                    "thread": found.thread if found else None, "chat": chat, "answer_to": None,
+                    "created": time.time(), "language": ui_lang, "options": {"record_reply": False}})
+            log("delivery alert queued" if retained else "delivery alert not delivered or retained; outbox full")
     except Exception:
-        log("delivery alert failed")
+        log("delivery alert could not be queued")
 
 
 def voice_summary(cfg: Config, bot, session: str, he_body: str, topics: Optional[TopicMap] = None) -> None:

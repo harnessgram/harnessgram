@@ -1255,6 +1255,7 @@ class StaffStation:
             return False  # switched off while the voice was being made: dropped, never queued
         self.mixer.add(radio_voice.intro() + pcm)
         log(f"speak: {radio_voice.seconds_of(pcm):.0f} s")
+        radio_voice.spoken_log(folder() / "spoken.log", "say", text)
         return True
 
     def update(self) -> None:

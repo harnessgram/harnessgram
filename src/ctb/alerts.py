@@ -417,9 +417,23 @@ def _header(cfg: Config, session: str) -> str:
     return f"{mark}💬 {name}" if name else ""
 
 
-def _button(chan: dict, ui_lang: str, url: str, label: str = "alerts_open_reply") -> Optional[dict]:
+def topic_link(cfg: Config, session: str) -> str:
+    """The session's topic in the group, else the group's General topic; "" when there is no group."""
+    from .panel_view import topic_url
+    try:
+        entry = TopicMap(state_dir() / "topics.json", None, 0).all().get(session or "") or {}
+    except Exception:
+        entry = {}
+    chat = entry.get("chat") if type(entry.get("chat")) is int else home_chat(cfg)
+    thread = entry.get("thread")
+    return (topic_url(chat, thread) if type(thread) is int else "") or topic_url(home_chat(cfg), 1)
+
+
+def _button(chan: dict, ui_lang: str, url: str, label: str = "alerts_open_reply", topic: str = "") -> Optional[dict]:
     if url:  # a summary links straight to its reply in the topic
         return {"inline_keyboard": [[{"text": t(label, lang=ui_lang), "url": url}]]}
+    if topic:  # no reply link: open the session's topic (or the group), never the bot's private chat
+        return {"inline_keyboard": [[{"text": t("alerts_open_chat", lang=ui_lang), "url": topic}]]}
     if re.fullmatch(r"[A-Za-z0-9_]{3,64}", chan.get("bot") or ""):  # the channel is one-way: a button opens the bot chat to answer
         return {"inline_keyboard": [[{"text": t("alerts_open_chat", lang=ui_lang), "url": "https://t.me/" + chan["bot"]}]]}
     return None
@@ -446,7 +460,7 @@ def alert(cfg: Config, text: str, session: str = "", bot=None, silent: bool = Fa
             params["disable_notification"] = True
         if html:
             params["parse_mode"] = "HTML"
-        markup = _button(chan, ui_lang, url, label)
+        markup = _button(chan, ui_lang, url, label, "" if url else topic_link(cfg, session))
         if markup:
             params["reply_markup"] = markup
         flood.optional_call(bot, "sendMessage", params, timeout=5)

@@ -74,4 +74,6 @@ def main(stdin=None, stdout=None, folder=None) -> int:
 
 
 if __name__ == "__main__":
+    from . import adapter
+    adapter.limit_memory()
     sys.exit(main())

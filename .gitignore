@@ -11,3 +11,4 @@ venv/
 config.json
 *.bak-ctb-*
 .ref/
+.private/

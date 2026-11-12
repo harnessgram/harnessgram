@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harnessgram"
-version = "0.1.0"
+version = "0.2.0"
 description = "Telegram remote control for Claude Code: one topic per session, voice, approvals, quota dashboard, translation."
 authors = [{ name = "Harnessgram contributors" }]
 readme = "README.md"

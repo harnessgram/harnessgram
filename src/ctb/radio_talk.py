@@ -228,6 +228,16 @@ def on_reply(cfg: Config, session: str, title: str, reply: str, now: Optional[fl
     record = {"text": line, "name": name, "say": say, "session": session[:8], "voice": bool(mark.get("voice")),
               "sent_at": mark.get("sent_at"), "queued_at": mark.get("queued_at"), "taken_at": mark.get("taken_at"), "replied_at": now,
               "line_secs": round(time.time() - started, 2)}
+    # The spool is durable: scrub every owner-controlled string even when the
+    # general outgoing redactor is disabled.
+    from . import radio_script as R
+    sensitive = []
+    for value in record.values():
+        if isinstance(value, str):
+            for address in R._EMAIL.findall(value):
+                sensitive.extend((address, address.split("@", 1)[0]))
+    record = {key: R.private_speech(value, sensitive) if isinstance(value, str) else value
+              for key, value in record.items()}
     spool = private_dir(radio.folder() / "replies")
     write_private(spool / f"{time.time():.6f}-{SAFE.sub('_', session[:8])}.json", json.dumps(record, ensure_ascii=False))
     return record
@@ -238,11 +248,19 @@ MERGE_MAX = 25.0     # the longest the first reply of a bulletin waits for other
 BULLETIN_INTRO = "עדכונים מהצוות."
 
 
-def bulletin(records: List[dict]) -> str:
+def bulletin(records: List[dict], private_accounts=()) -> str:
     """Several replies that came close together as one flowing segment."""
+    from . import radio_script as R
+    sensitive = list(private_accounts)
+    for record in records:
+        for value in record.values():
+            if isinstance(value, str):
+                for address in R._EMAIL.findall(value):
+                    sensitive.extend((address, address.split("@", 1)[0]))
     lines = [" ".join(str(r.get("text") or "").split()) for r in records]
     lines = [line if line.endswith((".", "!", "?")) else line + "." for line in lines if line]
-    return lines[0] if len(lines) == 1 else " ".join([BULLETIN_INTRO] + lines)
+    text = lines[0] if len(lines) == 1 else " ".join([BULLETIN_INTRO] + lines)
+    return R.whole(R.private_speech(text, sensitive), R.MAX_SCRIPT)
 
 
 def ready(records: List[dict], arrived: List[float], now: float) -> bool:

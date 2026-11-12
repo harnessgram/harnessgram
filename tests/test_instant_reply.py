@@ -134,16 +134,23 @@ def test_closed_flood_gate_is_waited_out_once(tmp_path, monkeypatch):
 
 
 def test_long_flood_limit_never_sends_around_the_gate(tmp_path, monkeypatch):
-    # Review of #143: a flood wait over the cap fell through to an essential send. Now the edit waits as
-    # Telegram asks, up to EDIT_FLOOD_WAIT in all, then leaves the original as it is.
+    # A pre-existing gate blocks even the original; retain it without a translated duplicate.
     bot = FakeBot()
     slept = []
     monkeypatch.setattr(M.time, "sleep", lambda s: slept.append(s))
     flood.record_429(OWNER, 60)  # the shared gate stays closed (the mocked sleep does not move time)
     m = mk(tmp_path, bot)
-    assert m.send_reply("P", "s", TEXT, lambda t: "תרגום") == 1
-    assert edits(bot) == [] and len(sends(bot)) == 1 and TEXT in sends(bot)[0]["text"]
-    assert slept and sum(slept) <= M.EDIT_FLOOD_WAIT and m.dropped == 0
+    assert m.send_reply("P", "s", TEXT, lambda t: "תרגום") == 0
+    assert edits(bot) == [] and sends(bot) == [] and slept == [] and m.dropped == 0
+    from ctb import reply_outbox
+    with reply_outbox.locked() as path:
+        entries = reply_outbox.load(path)
+    assert len(entries) == 1 and TEXT in entries[0]["text"] and "תרגום" not in entries[0]["text"]
+    assert reply_outbox.drain(m.cfg, bot) == 0 and sends(bot) == []
+    (state_dir() / flood.STATE_FILE).unlink()
+    assert reply_outbox.drain(m.cfg, bot) == 1
+    assert len(sends(bot)) == 1 and TEXT in sends(bot)[0]["text"]
+    assert reply_outbox.drain(m.cfg, bot) == 0
 
 
 def test_yes_no_buttons_survive_the_edit(tmp_path):
@@ -395,13 +402,23 @@ def test_index_points_at_the_follow_up_that_replaced_a_refused_edit(tmp_path):
 
 def test_index_keeps_the_original_when_the_translation_did_not_arrive(tmp_path, monkeypatch):
     monkeypatch.setattr(M.time, "sleep", lambda s: None)
-    flood.record_429(OWNER, 600)
     bot = FakeBot()
+    real = bot.call
+    def close_after_original(method, params=None, **kw):
+        result = real(method, params, **kw)
+        if method == "sendMessage":
+            flood.record_429(OWNER, 600)
+        return result
+    monkeypatch.setattr(bot, "call", close_after_original)
     m = mk(tmp_path, bot)
     indexed = []
     m._index_reply = lambda session, mid, text, has_summary: indexed.append((mid, text))
     m.send_reply("P", "s", "Did it.\n\nSummary: done", lambda t: "עשיתי.\n\nבוצע")
     assert indexed == [(sends(bot)[0]["message_id"], "Did it.\n\ndone")]
+    assert len(sends(bot)) == 1 and edits(bot) == []
+    from ctb import reply_outbox
+    with reply_outbox.locked() as path:
+        assert reply_outbox.load(path) == []  # the delivered original needs no second copy
 
 
 def test_long_interim_translation_is_split_into_complete_parts():

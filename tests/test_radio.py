@@ -39,6 +39,37 @@ def snap(**kw):
 NAMES = {"orbit": "מסלול", "lumen": "אורה"}
 
 
+def test_bulletin_names_work_waiting_and_finished_without_account_identity():
+    sessions = [{"id": "a", "name": "מסלול", "state": "working", "age": 20,
+                 "now": "בודק את מסך הבית"},
+                {"id": "b", "name": "אורה", "state": "working", "age": 5,
+                 "summary": "מכין את הדוח"}]
+    state = {"sessions": sessions, "decisions": [{"id": "d", "title": "לבחור צבע", "age": 10}],
+             "quota": [{"account": "privateuser@example.com", "label": "privateuser", "weekly": 81}]}
+    s = R.snapshot(state, [], ([], [{"key": "1", "project": "orbit", "text": "המסך הושלם",
+                                   "updated": 999950}], 0), [], 1000000)
+    text = R.build_script(s, {"attention": ["d:d"]}, NAMES, when=time.localtime(0))
+    assert "לבחור צבע" in text and "המסך הושלם" in text
+    assert "מסלול: בודק את מסך הבית" in text and "אורה: מכין את הדוח" in text
+    assert text.index("אורה: מכין") < text.index("מסלול: בודק")
+    assert "@" not in text and "privateuser" not in text
+    assert len(text) <= 600
+
+
+def test_bulletin_stays_bounded_with_many_long_items():
+    sessions = [{"id": str(i), "name": "נושא " + str(i), "state": "working", "age": i,
+                 "now": "בודק את התקדמות המשימה הארוכה " * 8} for i in range(8)]
+    s = R.snapshot({"sessions": sessions, "quota": []}, [], ([], [], 0), [], 1000000)
+    assert len(R.build_script(s, {}, {}, when=time.localtime(0))) <= 600
+
+
+def test_since_last_update_includes_a_finished_turns_reply():
+    before = only(sessions=[{"id": "a", "name": "מסלול", "state": "working"}])
+    after = only(sessions=[{"id": "a", "name": "מסלול", "state": "idle", "summary": "המסך החדש מוכן"}])
+    text = R.build_script(after, R.remember(before, NOW - 60), NAMES, when=time.localtime(0))
+    assert "מאז העדכון הקודם, מסלול: המסך החדש מוכן" in text
+
+
 # --- words ---------------------------------------------------------------------------------------
 
 def test_numbers_in_hebrew_words():
@@ -387,12 +418,12 @@ def test_progress_speaks_only_after_the_interval():
     assert R.decide(busier, last, 1_000_000.0 + 1200, 1200) == "periodic"
 
 
-def test_said_items_are_not_repeated_one_by_one():
+def test_periodic_update_repeats_waiting_titles_but_not_finished_items():
     s = snap()
     last = R.remember(s, 1_000_000.0)
     again = R.build_script(s, last, NAMES, "he", when=time.localtime(0))
     assert "הושלם" not in again  # the done item was already announced
-    assert "החדשים" not in again and "חדש:" not in again and "למזג" not in again  # nothing new: no item repeated
+    assert "החדשים" not in again and "חדש:" not in again and "למזג" in again
     more = snap(state={"decisions": [{"id": "a1", "title": "x"}, {"id": "b2", "title": "לפרסם את הפרק?", "age": 5}]})
     text = R.build_script(more, last, NAMES, "he", when=time.localtime(0))
     assert "חדש: החלטה בקוקפיט, לפרסם את הפרק?" in text and "x" not in text
@@ -474,6 +505,18 @@ def test_mixer_fades_the_bed_out_plays_the_voice_and_fades_back():
     for _ in range(int((radio.Mixer.GAP + radio.Mixer.FADE_IN) * radio.RATE / radio.FRAME) + 5):
         last = m.next()
     assert last == b"\x10\x27" * radio.FRAME and m.pending() == 0
+
+
+def test_mixer_keeps_a_short_pause_between_two_lines():
+    m = radio.Mixer(b"\x10\x27" * radio.RATE)
+    a, b = b"\x01\x00" * radio.FRAME, b"\x02\x00" * radio.FRAME
+    m.add(a)
+    m.add(b)
+    frames = [m.next() for _ in range(int((radio.Mixer.FADE_OUT + radio.Mixer.GAP) * radio.RATE / radio.FRAME) + 10)]
+    first, second = frames.index(a), frames.index(b)
+    silent = frames[first + 1:second]
+    assert len(silent) >= int(radio.Mixer.GAP * radio.RATE / radio.FRAME)  # the lines never run into each other
+    assert all(f == bytes(2 * radio.FRAME) for f in silent)  # and the bed stays down in between
 
 
 # --- the panel switch ------------------------------------------------------------------------------
@@ -998,9 +1041,11 @@ def test_news_counts_the_done_items_it_did_not_read_even_when_some_were_read():
     last = R.remember(before, NOW - 600)
     after = only(done=[(1, "הסרטון עלה", FRESH), (2, "Shipped", FRESH - 1), (3, "Merged", FRESH - 2)])
     text = R.build_news(after, last, NAMES, "he")
-    assert "הושלם: מסלול: הסרטון עלה." in text and "ועוד שניים הושלמו." in text
+    # the unsayable English title is not read, nor dropped: the project is named, and the rest is counted
+    assert "הושלם: מסלול: הסרטון עלה." in text and "הושלם: משימה בפרויקט מסלול." in text
+    assert "ועוד אחד הושלם." in text and "Shipped" not in text
     one = only(done=[(1, "הסרטון עלה", FRESH), (2, "Shipped", FRESH - 1)])
-    assert "ועוד אחד הושלם." in R.build_news(one, last, NAMES, "he")
+    assert "ועוד" not in R.build_news(one, last, NAMES, "he")  # both are said: one by its words, one by its project
     allread = only(done=[(1, "הסרטון עלה", FRESH), (2, "עוד משימה", FRESH - 1)])
     assert "ועוד" not in R.build_news(allread, last, NAMES, "he")
     assert "And 1 more done." in R.build_news(after, last, NAMES, "en")  # English titles can all be read
@@ -1020,3 +1065,284 @@ def test_a_huge_integer_age_or_time_never_raises(big):
     s["at"] = big  # even the snapshot's own clock
     assert R.waiting_split(s)[1] >= 0 and R.recent_done(s) == [] and R._num(big) is None
     R.build_script(s, {}, NAMES, "he", when=time.localtime(0))
+
+
+# --- the audio chain: nothing may sound between updates ----------------------------------------------
+
+def _samples(pcm):
+    import array
+    return array.array("h", pcm)
+
+
+def test_default_bed_is_off_and_the_default_mixer_is_digital_silence():
+    assert radio.DEFAULTS["bed"] == "off"
+    m = radio.Mixer(radio.make_bed(radio.DEFAULTS["bed"], radio.DEFAULTS["bed_db"]))
+    assert any(radio.make_bed("off", -30)) is False
+    idle = b"".join(m.next() for _ in range(100))
+    assert not any(idle)  # exactly zero: no floor, no hiss, no dither
+    clip = b"\x00\x10" * (radio.FRAME * 2)
+    m.add(clip)
+    out = b"".join(m.next() for _ in range(int(2.5 * radio.RATE / radio.FRAME)))
+    tail = out[out.index(clip) + len(clip):]
+    assert tail and not any(tail)  # silence again right after the clip, never a decaying tail or a click
+
+
+def test_bed_graph_has_no_noise_source_and_matches_the_stream_rate(monkeypatch):
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=bytes(2 * radio.RATE), stderr=b"")
+    monkeypatch.setattr(radio.subprocess, "run", fake_run)
+    radio.make_bed("pad", -30)
+    graph = " ".join(seen[0])
+    for noise in ("anoisesrc", "random", "randomize", "dither", "crackle", "vinyl", "aevalsrc=random"):
+        assert noise not in graph
+    assert f"s={radio.RATE}" in graph and "-ac 1" in graph and "-f s16le" in graph  # the speech format exactly
+    assert radio.RATE == V.RATE == 48000
+
+
+def test_pad_bed_is_a_clean_quiet_drone():
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is not installed")
+    pcm = radio.make_bed("pad", -30)
+    assert len(pcm) == 2 * radio.RATE * 40
+    peak = max(abs(v) for v in _samples(pcm))
+    assert 0 < peak < 32768 * 10 ** (-30 / 20)  # well under the voice (peaks near full scale)
+    s = _samples(pcm)
+    assert abs(s[0]) < 64 and abs(s[-1] - s[0]) < 700  # seamless loop point, no click
+
+
+def test_encoder_audio_is_not_resampled_noisily_and_has_no_audio_filter():
+    args = radio.encoder_args("libx264")
+    first = args.index("-ar")
+    assert args[first + 1] == str(radio.RATE) and args[first + 2:first + 4] == ["-ac", "1"]  # raw input as sent
+    assert "-af" not in args and "-filter:a" not in args and "-af" not in " ".join(args)
+    assert args[args.index("-c:a") + 1] == "aac"
+    assert args[args.index("-ar", args.index("-c:a")) + 1] == str(radio.RATE)  # output rate = input rate: no resampler
+
+
+# --- the live feed: a stall must leave a trace ------------------------------------------------------
+
+def test_feed_behind_is_zero_while_ahead_and_counts_seconds_when_late():
+    assert radio.feed_behind(100.0, int(10.3 * radio.RATE), 110.0) == 0.0  # LEAD ahead: the normal state
+    assert radio.feed_behind(100.0, 9 * radio.RATE, 110.0) == pytest.approx(1.0)
+
+
+def test_writer_notes_one_stall_per_episode_and_never_touches_the_filesystem(monkeypatch):
+    def boom(line):
+        raise AssertionError("the real-time writer must not write a log line")
+    monkeypatch.setattr(radio, "log", boom)
+    monkeypatch.setattr(radio.time, "sleep", lambda s: None)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(radio.time, "monotonic", lambda: clock["t"])
+    pipe = radio.Pipeline("rtmp://x/", "k", None, "libx264", radio.Mixer(bytes(4)), lambda pid: None)
+    failed = threading.Event()
+    wakes = {"n": 0}
+
+    class Stdin:
+        def write(self, data):
+            pass
+
+        def flush(self):
+            wakes["n"] += 1
+            clock["t"] += 3.0 if wakes["n"] == 1 else 0.02  # one 3 s stall, then normal wakes
+            if wakes["n"] >= 60:
+                failed.set()
+
+    pipe.proc = type("P", (), {"stdin": Stdin()})()
+    pipe._writer(failed)
+    assert list(pipe.stalls) == [pytest.approx(2.7)]
+    lines = []
+    monkeypatch.setattr(radio, "log", lines.append)
+    pipe.report_stalls()  # the supervising loop writes it
+    assert len(lines) == 1 and "2.7 s behind real time" in lines[0] and not pipe.stalls
+
+
+# --- what the voice is given: whole sentences, no symbols or unsayable tokens ----------------------------
+
+def test_whole_ends_at_a_sentence_never_inside_a_word():
+    from ctb import radio_script as RS
+    text = " ".join(f"זה משפט מספר {n} ברדיו." for n in range(1, 40))
+    for limit in (60, 130, 600):
+        out = RS.whole(text, limit)
+        assert len(out) <= limit and out.endswith(".") and "…" not in out
+        assert text.startswith(out)
+    assert RS.whole("קצר.", 600) == "קצר."
+
+
+def test_for_voice_drops_symbols_isolates_and_unsayable_tokens():
+    from ctb import radio_script as RS
+    out = RS.for_voice("בדיקה⁨ PR 267⁩ → הקובץ radio_voice.py ‏ו-flag --force, hash 3f2a9c1b7d… עלות $5 + מס ~20 דקות = סוף @")
+    for bad in ("⁨", "⁩", "→", "…", "=", "@", "$", "~", "+", "radio_voice", "--force", "3f2a9c1b7d"):
+        assert bad not in out
+    assert "פי אר 267" in out and "5 דולר ועוד מס בערך 20 דקות" in out
+    assert RS.for_voice("הסשן של Claude ו-Codex עם Opus") == "הסשן של קלוד ו-קודקס עם אופוס"
+    assert RS.for_voice("שלום. זה משפט שלם, עם פסיק.") == "שלום. זה משפט שלם, עם פסיק."  # clean text is untouched
+
+
+def test_the_voice_receives_the_normalised_text(monkeypatch, tmp_path):
+    got = []
+    monkeypatch.setattr(V, "vertex", lambda text, *a, **k: (got.append(text) or b"\x01\x00" * 100, 1.0))
+    s = _settings(tts_daily_minutes=30)
+    cfg = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER)
+    pcm, route = V.speak("עדכון⁨ PR 5⁩ → סיום…", cfg, s, tmp_path / "cache", V.Usage(tmp_path / "u.json"))
+    assert route == "vertex" and got == ["עדכון פי אר 5, סיום."]
+
+
+def test_a_manual_say_is_cut_at_a_sentence_not_in_a_word(monkeypatch, tmp_path):
+    monkeypatch.setattr(radio, "job_pid", lambda: 1)
+    monkeypatch.setattr(radio, "folder", lambda: tmp_path)
+    said = []
+    monkeypatch.setattr(radio, "write_private", lambda path, text: said.append(text))
+    radio.say(" ".join("משפט ארוך מספר %d ברדיו הצוות." % n for n in range(1, 60)))
+    assert said and len(said[0]) <= radio.MAX_SAY and said[0].endswith(".") and "…" not in said[0]
+
+
+# --- telegraphic notes are phrased whole or not read, never translated word for word ---------------------
+
+# The shape of the notes the owner heard as word salad: telegraphic, with plus signs, semicolons and brackets.
+SALAD = [
+    "agents card task lines not translated + result cut mid-sentence; all-clear check drawn backwards (see #12)",
+    "Root fix: every tool migration rewrites the full tool lists (constraints + helper), so parallel branches "
+    "conflict and can silently drop tools",
+    "Guard: contract test that every switch is registered in the preview (3 writers missed it); in fix round",
+]
+
+
+def test_telegraphic_notes_are_not_plain_titles_but_a_short_clause_is():
+    for note in SALAD:
+        assert not R.plain_title(note)
+    assert R.plain_title("Fix the broken login button")
+    assert R.plain_title("הסרטון עלה")
+
+
+def test_translate_one_never_translates_a_telegraphic_note_word_for_word():
+    calls = []
+
+    def translate(text):
+        calls.append(text)
+        return "מחכות לך את תקלות תרגום ואת יצוגה בכרטיסי הסוכנים ובמערכת"
+    for note in SALAD:
+        assert radio.translate_one(note, translate) == ""
+    assert calls == []  # not even asked
+    assert radio.translate_one("Fix the broken login button", lambda t: "תקן את כפתור ההתחברות השבור") != ""
+
+
+def test_an_unreadable_done_item_is_said_as_a_task_of_its_project_not_as_its_title():
+    names = {"harnessgram": "גשר"}
+    item = {"key": "x:1", "project": "harnessgram", "text": SALAD[0], "updated": FRESH}
+    assert R.done_fallback(item, names, "he") == "משימה בפרויקט גשר"
+    assert R.done_fallback({"key": "x:2", "project": "", "text": SALAD[0]}, names, "he") is None
+    assert R.done_fallback({"key": "x:3", "project": "alpha", "text": "x"}, {}, "he") is None  # no Hebrew name
+    last = R.remember(only(), NOW - 600)
+    snap = only(done=[(1, SALAD[0], FRESH)])
+    snap["done"][0]["project"] = "harnessgram"
+    text = R.build_news(snap, last, names, "he")
+    assert "הושלם: משימה בפרויקט גשר." in text
+    for word in ("agents", "translated", "+", ";"):
+        assert word not in text
+
+
+def test_spoken_log_keeps_the_final_text_private_redacted_and_capped(tmp_path):
+    path = tmp_path / "spoken.log"
+    V.spoken_log(path, "vertex", "עדכון⁨ PR 5⁩ → סיום… https://claude.ai/code/session_abc123", now=0)
+    line = path.read_text(encoding="utf-8")
+    assert "[vertex]" in line and "עדכון פי אר 5, סיום." in line and "session_abc123" not in line
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    V.spoken_log(path, "say", "שלום " * 40_000, now=0)  # past the cap: the next write rotates
+    V.spoken_log(path, "say", "אחרי", now=0)
+    assert path.with_name("spoken.log.1").exists() and path.read_text(encoding="utf-8").count("\n") == 1
+    V.spoken_log(tmp_path / "no" / "such" / "dir" / "x.log", "say", "x")  # never raises
+
+
+# --- review fixes: redact first, dates and fractions, whole() never over its limit ---------------------------
+
+SECRETS = ["api_key=Zq83kLm20PxRt77vB", "secret: hello+world", "token: ab_cd-ef~gh12345", "password=Ab3$dE5@fG"]
+
+
+@pytest.mark.parametrize("secret", SECRETS)
+def test_credentials_are_redacted_before_the_text_is_normalised(secret, tmp_path):
+    value = secret.replace("=", " ").replace(":", " ").split(None, 1)[1]
+    text = f"עדכון קצר {secret} ועוד משפט."
+    for out in (V.clean_for_voice(text),):
+        assert value not in out and value.replace("+", " ") not in out and "hello world" not in out
+    path = tmp_path / "spoken.log"
+    V.spoken_log(path, "vertex", text, now=0)
+    logged = path.read_text(encoding="utf-8")
+    assert value not in logged and "hello world" not in logged and "עדכון קצר" in logged
+
+
+def test_the_voice_is_given_the_redacted_text(monkeypatch, tmp_path):
+    got = []
+    monkeypatch.setattr(V, "vertex", lambda text, *a, **k: (got.append(text) or b"\x01\x00" * 100, 1.0))
+    cfg = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER)
+    V.speak("שלום secret: hello+world סוף.", cfg, _settings(tts_daily_minutes=30), tmp_path / "c", V.Usage(tmp_path / "u.json"))
+    assert got and "hello" not in got[0] and "world" not in got[0]
+
+
+def test_dates_fractions_and_alternatives_are_spoken_not_deleted():
+    from ctb import radio_script as RS
+    assert RS.for_voice("נשארה 1/2 שעה") == "נשארה חצי שעה"
+    assert RS.for_voice("הפגישה ב-12/11/2026 בבוקר") == "הפגישה ב-12 בנובמבר 2026 בבוקר"
+    assert RS.for_voice("עד 2026-11-12 לכל המאוחר") == "עד 12 בנובמבר 2026 לכל המאוחר"
+    assert RS.for_voice("בדקנו 3/5 מהמקרים") == "בדקנו 3 מתוך 5 מהמקרים"  # a < b: a fraction
+    assert RS.for_voice("הציון 7/10") == "הציון 7 מתוך 10"
+    for bare in ("24/7", "10/10", "12/11", "25/12", "40/5", "5/0"):  # no year: never a date, left as digits
+        assert RS.for_voice(f"פתוח {bare} כל השבוע") == f"פתוח {bare} כל השבוע", bare
+    assert RS.for_voice("כן/לא וגם ו/או עוד") == "כן או לא וגם או עוד"
+    assert RS.for_voice("3/4 מהדרך") == "שלושה רבעים מהדרך"
+
+
+def test_only_real_paths_are_removed():
+    from ctb import radio_script as RS
+    for path in ("/Users/me/work/app.py", "~/code/app", "src/pkg/module.py", "a/b/c", "./run.sh", "../x/y"):
+        out = RS.for_voice(f"הקובץ {path} עודכן")
+        assert out == "הקובץ עודכן", (path, out)
+    assert RS.for_voice("מהירות 5/10 קילומטר") == "מהירות 5 מתוך 10 קילומטר"
+    assert RS.for_voice("הקובץ /tmp/x עודכן ב-12/11") == "הקובץ עודכן ב-12/11"
+
+
+def test_whole_never_exceeds_its_limit_even_for_one_long_sentence():
+    from ctb import radio_script as RS
+    long_first = "זה משפט אחד ארוך מאוד " * 8 + "והוא נגמר כאן. ועוד משפט."
+    for limit in (40, 100, 150, 200):
+        out = RS.whole(long_first, limit)
+        assert len(out) <= limit, (limit, len(out))
+    assert RS.whole("משפט קצר. ועוד.", 8) != "" and len(RS.whole("משפט קצר. ועוד.", 8)) <= 8
+
+
+def test_an_invisible_character_inside_a_label_cannot_hide_a_credential(tmp_path):
+    text = "שלום api\u200b_key=hello+world סוף."
+    out = V.clean_for_voice(text)
+    assert "hello" not in out and "world" not in out and "\u200b" not in out
+    for sneaky in ("api\u202e_key=hello+world", "sec\u2068ret: hello+world", "token\ufeff=hello+world"):
+        assert "hello" not in V.clean_for_voice(sneaky) and "world" not in V.clean_for_voice(sneaky), sneaky
+    path = tmp_path / "spoken.log"
+    V.spoken_log(path, "vertex", text, now=0)
+    assert "hello" not in path.read_text(encoding="utf-8")
+
+
+def test_stalls_are_written_by_the_log_thread_not_the_supervisor(monkeypatch):
+    seen = []
+    monkeypatch.setattr(radio, "log", lambda line: seen.append((threading.current_thread().name, line)))
+    pipe = radio.Pipeline("rtmp://x/", "k", None, "libx264", radio.Mixer(bytes(4)), lambda pid: None)
+    t = threading.Thread(target=pipe._stall_logger, name="stall-log", daemon=True)
+    t.start()
+    pipe.stalls.append(1.5)
+    pipe.stalled.set()  # what the writer does: append and set, nothing else
+    for _ in range(100):
+        if seen:
+            break
+        time.sleep(0.05)
+    assert seen and seen[0][0] == "stall-log" and "1.5 s behind real time" in seen[0][1]
+    pipe.stop.set()
+    pipe.stalled.set()
+    t.join(2)
+    assert not t.is_alive()
+
+
+def test_encoder_caps_the_interleave_wait_so_audio_is_not_held_back_for_video():
+    args = radio.encoder_args("libx264")
+    i = args.index("-max_interleave_delta")
+    assert args[i + 1] == "100000" and args.index("-f", i) > i  # an output option, before the FLV output

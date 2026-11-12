@@ -127,7 +127,7 @@ def test_state_shape_from_state_dirs(server, tmp_path):
     assert {s["id"] for s in body["sessions"]} == {"abcd1234", "zzzz9999"}
     s = body["sessions"][0]
     assert set(s) == {"id", "name", "state", "age", "context", "compact", "model", "account", "bg", "now", "summary", "url", "here",
-                      "waiting", "folder", "branch", "left"}
+                      "waiting", "folder", "branch", "left", "usage"}
     assert "topic" not in body
     assert s["state"] in ("working", "idle", "ended")
     q = body["quota"][0]

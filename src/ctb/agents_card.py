@@ -385,6 +385,27 @@ def _clean(text, limit: int) -> str:
     return redact(" ".join(str(text or "").split()))[:limit]
 
 
+# A value written after a strong secret label ("password: hunter2", "api key = x1"): redact() misses short ones.
+# Free text keeps ordinary labelled numbers ("exit code: 1234"), so only these labels hide what follows.
+_STRONG_LABEL = re.compile(r"(?i)\b(pass(?:word|phrase)?|passwd|pwd|pw|secret|token|api[ _-]?key|סיסמה|סיסמא)"
+                           r"(\s*[:=]\s*|\s+is\s+)([\"'`]?)([^\s\"'`,;]+)")
+
+
+def _hide_labelled(text: str) -> str:
+    def hide(m: re.Match) -> str:
+        if "=" not in m.group(2) and ":" not in m.group(2) and not re.search(r"\d", m.group(4)):
+            return m.group()  # prose: "the token is expired"
+        return m.group(1) + m.group(2) + m.group(3) + "[redacted]"
+    return _STRONG_LABEL.sub(hide, redact(text))
+
+
+def _clean_summary(text) -> str:
+    """The one-line result: whole sentences that fit, else a clause or word cut marked with "…", never a
+    sentence that just stops in the middle."""
+    from .radio_script import short
+    return short(_hide_labelled(" ".join(str(text or "").split())), SUMMARY_LIMIT)
+
+
 def _update(cfg, session: str, thread, bot, mutate: Callable, now: Optional[float], sleep: Callable) -> None:
     """Apply `mutate(st, now)` (returns the card to show) under the lock, then show it, at most once per THROTTLE
     (the first post of a card included, so parallel starts make exactly one card)."""
@@ -520,8 +541,8 @@ def agent_finished(cfg, session: str, thread, agent_id: str, report: dict, bot, 
             card["agents"].append(mine)
         mine.update(status="failed" if report.get("failed") else "done", ended=at,
                     model=agent_task.clean_label(report.get("model"), 40) or mine.get("model", ""),
-                    summary=_clean(report.get("summary"), SUMMARY_LIMIT),
-                    full=redact(str(report.get("full") or "").strip())[:FULL_LIMIT])
+                    summary=_clean_summary(report.get("summary")),
+                    full=_hide_labelled(str(report.get("full") or "").strip())[:FULL_LIMIT])
         label = _clean(report.get("name"), NAME_LIMIT)
         if mine.get("type"):  # the line keeps the agent type; what the report calls it is the task
             if not mine.get("task") and label and label != mine["type"]:
@@ -546,7 +567,37 @@ def agent_summary(cfg, session: str, thread, agent_id: str, summary: str, bot, n
         if not done:
             return None
         card, mine = max(done, key=lambda p: p[1].get("ended", 0))  # no id: the agent that finished last
-        mine["summary"] = _clean(summary, SUMMARY_LIMIT)
+        mine["summary"] = _clean_summary(summary)
+        found.append(card)
+        return card
+
+    _update(cfg, session, thread, bot, mutate, now, sleep)
+    return bool(found)
+
+
+def agent_task_text(cfg, session: str, thread, agent_id: str, task: str, bot, now: Optional[float] = None,
+                    sleep: Callable = time.sleep, source: Optional[str] = None) -> bool:
+    """Replace one agent's task line with its translation (made after the card was shown with the original):
+    the newest line of that agent, running or finished, is edited in place. With `source` (the text that was
+    translated) only a line still showing exactly that text changes, so a slow translation never overwrites a
+    later run's task or a better task the line already has. False when nothing changed."""
+    found = []
+    text = agent_task.clean_task(task)
+    if not agent_id or not text:
+        return False
+    original = agent_task.clean_task(source) if source is not None else None
+
+    def mutate(st, at):
+        mine = [(card, a) for card in st["cards"].values() for a in card["agents"]
+                if a.get("id") == agent_id and not a.get("moved")]
+        if not mine:
+            return None
+        card, line = max(mine, key=lambda p: p[1].get("started", 0))
+        if line.get("task") == text:
+            return None
+        if original is not None and agent_task.clean_task(line.get("task") or "") != original:
+            return None
+        line["task"] = text
         found.append(card)
         return card
 

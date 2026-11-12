@@ -228,6 +228,24 @@ def _bot_id(cfg: Config) -> Optional[int]:
         return None
 
 
+def drop_rename_notice(m: dict, cfg: Config, bot) -> bool:
+    """Best effort: delete the "changed the topic name" service message that our own bot's rename caused (a state
+    icon added or removed, a new task name). Each one would otherwise sit in the topic as noise. A rename by anyone
+    else (the owner) is left alone. True when the message was ours."""
+    sender = m.get("from") or {}
+    mine = _bot_id(cfg)
+    if not (m.get("forum_topic_edited") is not None and sender.get("is_bot") and mine is not None
+            and sender.get("id") == mine and (m.get("chat") or {}).get("id") in owner_chats(cfg)
+            and m["chat"]["id"] < 0 and _id(m.get("message_id"))):
+        return False
+    try:
+        flood.optional_call(bot, "deleteMessage", {"chat_id": m["chat"]["id"], "message_id": m["message_id"]},
+                            budget=False, timeout=_CALL_TIMEOUT)
+    except Exception:
+        pass  # skipped or already gone: a leftover notice is harmless
+    return True
+
+
 def drop_pin_notice(m: dict, cfg: Config, bot) -> bool:
     """Best effort: delete the "pinned a message" service message that our own bot's pin caused in the
     home group or a project group (it comes once per topic, when the index is first pinned, if Telegram delivers it to

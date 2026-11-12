@@ -4,6 +4,7 @@ queue, no state changes, the update cursor stays. On again: everything resumes w
 import argparse
 import io
 import json
+import os
 import time
 import urllib.error
 from types import SimpleNamespace
@@ -626,7 +627,7 @@ def test_a_cockpit_media_stream_stops_between_blocks_once_off(switch, monkeypatc
     handler.headers, handler.wfile, handler.request_version = {}, Out(), "HTTP/1.1"
     handler.send_response = handler.send_header = handler.end_headers = lambda *a, **k: None
     handler._extend = lambda seconds: None
-    handler._media(str(clip), "application/octet-stream")
+    handler._media(os.open(clip, os.O_RDONLY), "application/octet-stream")
     assert written == [b"0123"]
 
 

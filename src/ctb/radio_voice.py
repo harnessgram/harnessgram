@@ -21,6 +21,7 @@ import fcntl
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -303,6 +304,7 @@ def system_voice(text: str, voice: str) -> bytes:
     say = shutil.which("say")
     if not say:
         return b""
+    text = clean_for_voice(text)  # the staff edition and the free fallback read the same clean text as the paid voice
     with tempfile.TemporaryDirectory(prefix="ctb-radio-say-") as d:
         src, out = Path(d) / "text.txt", Path(d) / "out.wav"
         src.write_text(text, encoding="utf-8")
@@ -316,6 +318,37 @@ def system_voice(text: str, voice: str) -> bytes:
             return b""
 
 
+SPOKEN_LOG_MAX = 100_000   # bytes; at the limit the file moves to ".1" (one older copy is kept)
+
+
+def clean_for_voice(text: str) -> str:
+    """What the voice may be given. Invisible and bidi characters go FIRST (one inside a label such as "api_key=" would
+    hide it from the redaction); then credentials and owner-only links are redacted on the text as written (the
+    label is still there to recognise its value), then the text is normalised for speech, then redacted once more
+    in case normalising exposed a shape."""
+    from .creds import for_outside
+    from .radio_script import for_voice, strip_invisible
+    return for_outside(for_voice(for_outside(strip_invisible(text))))
+
+
+def spoken_log(path: Path, route: str, text: str, now: Optional[float] = None) -> None:
+    """One private line per spoken text, exactly as the voice was given it (after `for_voice`, through the one
+    outbound sanitizer, so no credential or owner-only link): the next "it cut a word" report can be matched
+    against what was really fed in. Rotated and size-capped; never raises."""
+    try:
+        line = " ".join(clean_for_voice(text).split())
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > SPOKEN_LOG_MAX:
+            path.replace(path.with_name(path.name + ".1"))
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(f"{stamp} [{route or '-'}] {len(line)} chars: {line}\n")
+        os.chmod(path, 0o600)
+    except Exception:  # noqa: BLE001 - a log line must never stop the radio
+        pass
+
+
 def speak(text: str, cfg: Config, settings: dict, cache: Path, usage: Usage,
           now: Optional[float] = None) -> Tuple[bytes, str]:
     """(PCM, route) with route "cache", "vertex", "say" or "" when nothing could speak. Why the paid voice was
@@ -323,6 +356,7 @@ def speak(text: str, cfg: Config, settings: dict, cache: Path, usage: Usage,
     global last_reason, last_cap_out
     last_reason, last_cap_out = "", False
     why: list = []
+    text = clean_for_voice(text)  # the voice reads the text verbatim: no symbols or unsayable Latin tokens reach it
     model, voice = settings["tts_model"], settings["voice"]
     style = settings.get("style") or DEFAULT_STYLE
     key = hashlib.sha256(json.dumps([model, voice, style, text]).encode()).hexdigest()

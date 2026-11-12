@@ -253,8 +253,8 @@ def bg_transcript(tmp_path, agents=1, extra=()):
     return str(p)
 
 
-def test_footer_has_model_without_the_claude_prefix(tmp_path):
-    assert usage.footer(cfg(), bg_transcript(tmp_path, agents=0)).startswith("\U0001F9E0 1k · model-x")
+def test_footer_preserves_unknown_model_name(tmp_path):
+    assert usage.footer(cfg(), bg_transcript(tmp_path, agents=0)).startswith("\U0001F9E0 1k · claude-model-x")
 
 
 def write_quota(**kw):
@@ -267,11 +267,12 @@ def test_quota_line_rules(tmp_path):
     assert "⏳" not in usage.footer(cfg(), p)                                   # no file: hidden
     write_quota(five_hour=28, weekly=96, at=time.time() - 1200)
     f = usage.footer(cfg(), p)
-    assert "⏳ 5h 28% · weekly 96% ⚠️ · 20 min ago" in f
+    assert "⏳ weekly 96% ⚠️ · 20 min ago" in f
+    assert "5h" not in f
     write_quota(five_hour=10, weekly=20, at=time.time() - 60)
     assert "⚠" not in usage.footer(cfg(), p)
     write_quota(five_hour=80, weekly=20, at=time.time() - 60)
-    assert "⚠" in usage.footer(cfg(), p)
+    assert "⚠" not in usage.footer(cfg(), p)  # only the weekly window is displayed
     write_quota(five_hour=10, weekly=96, at=time.time() - 13 * 3600)               # older than 12 h
     assert "⏳" not in usage.footer(cfg(), p)
 
@@ -388,9 +389,9 @@ def test_mode_menu_sends_the_five_buttons(tmp_path, bot):
         assert msg["chat_id"] == OWNER and msg["message_thread_id"] == thread
         rows = msg["reply_markup"]["inline_keyboard"]
         assert [r[0]["callback_data"] for r in rows] == ["mode:plan", "mode:default", "mode:acceptEdits",
-                                                        "mode:auto", "mode:bypassPermissions"]
-        assert [r[0]["text"] for r in rows] == ["📝 תכנון בלבד", "✋ שואל לפני כל פעולה",
-                                                "✏️ עריכות בלי לשאול", "🤖 אוטומטי", "⚠️ בלי הגבלות"]
+                                                        "mode:auto", "mode:bypassPermissions", "more:dismiss"]
+        assert [r[0]["text"] for r in rows[:5]] == ["📝 Plan only", "✋ Ask before every action",
+                                                    "✏️ Edit without asking", "🤖 Automatic", "⚠️ Bypass permissions"]
     assert box.take("sess") == []  # a command is not a message to the session
 
 
@@ -440,12 +441,8 @@ def test_keyboard_sent_only_on_the_first_reply_in_a_topic(tmp_path):
     assert markup["is_persistent"] is False
     assert markup["one_time_keyboard"] is True
     assert markup["resize_keyboard"] is True
-    # In RTL (Hebrew), rows are listed reversed
-    assert markup["keyboard"] == [
-        [{"text": "⏹️ עצור מיד"}, {"text": "✋ עצור"}, {"text": "▶️ המשך"}],
-        [{"text": "🗜️ דחיסה"}, {"text": "🖥️ מסך"}, {"text": "📋 מצב"}],
-        [{"text": "🧠 מודל"}, {"text": "📊 הקשר"}, {"text": "🔐 הרשאות"}],
-    ]
+    # The one layout in force (mirror.current_keyboard), under the live info row
+    assert markup["keyboard"][-2:] == M.current_keyboard("he")["keyboard"]
 
     # Second reply in the same topic: keyboard is not sent
     m.send_reply("Topic 1", "sess-1", "Second reply in topic 1")
@@ -459,7 +456,7 @@ def test_keyboard_sent_only_on_the_first_reply_in_a_topic(tmp_path):
     assert len(sent3) == 3
     assert "reply_markup" in sent3[2]
 
-    # In LTR (English), rows are not reversed. A fresh bot reuses thread ids, so forget the
+    # A fresh bot reuses thread ids, so forget the
     # topics that already got the keyboard.
     from ctb.config import state_dir
     (state_dir() / "keyboard-topics.json").unlink(missing_ok=True)
@@ -470,14 +467,10 @@ def test_keyboard_sent_only_on_the_first_reply_in_a_topic(tmp_path):
     m_en.send_reply("Topic EN", "sess-en", "First reply in EN")
     sent_en = bot_en.methods("sendMessage")
     assert len(sent_en) == 1
-    assert sent_en[0]["reply_markup"]["keyboard"] == [
-        [{"text": "▶️ Continue"}, {"text": "✋ Stop"}, {"text": "⏹️ Stop now"}],
-        [{"text": "📋 Status"}, {"text": "🖥️ Screen"}, {"text": "🗜️ Compact"}],
-        [{"text": "🔐 Permissions"}, {"text": "📊 Context"}, {"text": "🧠 Model"}],
-    ]
+    assert sent_en[0]["reply_markup"]["keyboard"][-2:] == M.current_keyboard("en")["keyboard"]
 
 
-def test_each_keyboard_label_maps_correctly(tmp_path):
+def test_each_keyboard_label_maps_correctly(tmp_path, monkeypatch):
     bot = FakeBot()
     topics = TopicMap(tmp_path / "state" / "topics.json", bot, OWNER)
     thread = topics.ensure("sess", "Session")
@@ -503,12 +496,17 @@ def test_each_keyboard_label_maps_correctly(tmp_path):
     assert run_he("🔐 Permissions") == "mode"
     assert "inline_keyboard" in bot.methods("sendMessage")[-1]["reply_markup"]
 
-    # 3. Stop (Hebrew & English) maps to first stop word
-    bot.calls.clear()
-    assert run_he("✋ עצור") == "queued"
-    assert [m["text"] for m in box.take("sess")] == [c_he.stop_words[0]]
-    assert run_he("✋ Stop") == "queued"
-    assert [m["text"] for m in box.take("sess")] == [c_he.stop_words[0]]
+    # Old stop labels remain recognised; idle sessions must not start a new turn.
+    monkeypatch.setattr(I, "pane_for_session", lambda session: None)
+    monkeypatch.setattr(I, "session_busy", lambda session: False)
+    for label in ("✋ עצור", "✋ Stop", "⏹️ עצור", "⏹️ Stop"):
+        assert run_he(label) == "stop-idle"
+        assert box.take("sess") == []
+    # A busy session receives the configured stop word for either label.
+    monkeypatch.setattr(I, "session_busy", lambda session: True)
+    for label in ("✋ עצור", "✋ Stop", "⏹️ עצור", "⏹️ Stop"):
+        assert run_he(label) == "stop-soft"
+        assert [m["text"] for m in box.take("sess")] == [c_he.stop_words[0]]
 
     # 4. Continue (Hebrew & English) maps to continue word
     bot.calls.clear()
@@ -526,7 +524,7 @@ def test_say_stop_from_a_non_owner_is_ignored(tmp_path, bot):
     assert run(u_stranger, tmp_path, bot, topics) == "ignored"
     assert box.take("sess") == []
     assert len(bot.methods("answerCallbackQuery")) == 1
-    assert bot.methods("answerCallbackQuery")[0]["text"] == "לא זמין כאן"
+    assert bot.methods("answerCallbackQuery")[0]["text"] == "Not available here"
 
     # Stranger chat id is ignored
     bot.calls.clear()
@@ -540,7 +538,7 @@ def test_say_stop_from_a_non_owner_is_ignored(tmp_path, bot):
     u_owner = button(thread, sender=OWNER, chat=OWNER, data="say:stop")
     assert run(u_owner, tmp_path, bot, topics) == "queued"
     assert box.take("sess")[0]["text"] == "stop"
-    assert bot.methods("answerCallbackQuery")[0]["text"] == "נשלח"
+    assert bot.methods("answerCallbackQuery")[0]["text"] == "Sent"
 
 
 def test_reply_to_earlier_message_adds_prefix_but_topic_root_does_not(tmp_path, bot):

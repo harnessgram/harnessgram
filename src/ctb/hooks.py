@@ -1,10 +1,12 @@
-"""Claude Code hooks: Stop (hook-stop) and UserPromptSubmit (hook-prompt).
+"""Claude Code hooks, including PreToolUse AskUserQuestion proof (hook-ask).
 
-Both read the hook's JSON from stdin, print a JSON answer on stdout, and always
-exit 0: a bridge problem must never break the Claude Code session.
+Handlers read the hook's JSON from stdin and may print JSON context on stdout.
+The question-proof handler prints nothing and exits 0 even when recording fails:
+a bridge problem must never break the Claude Code session.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import fcntl
 import json
@@ -411,6 +413,28 @@ def telegram_messages(session: str, midturn: bool = False, only=None, data: Opti
 _UNSET = object()
 
 
+_NO_NEWS = re.compile(r"(?i)^\W*(?:nothing new(?: for you)?|no (?:news|change|update)s?(?: for you)?|still (?:waiting|running)|"
+                      r"אין (?:חדש|שינוי|חדשות)(?: בשבילך| עבורך)?)\W*$")
+
+
+def live_card(session: str, reply: str, cfg: Config) -> None:
+    """Use only assistant reply text already selected for the mirror; no transcript/tool-result reads.
+    A cached translation is cheap; otherwise keep the original. Card contention never blocks a turn."""
+    try:
+        body = fmt.FENCE.sub("\n", reply)
+        _, summary = fmt.split_summary(body)
+        if not summary:
+            summary = re.split(r"(?<=[.!?。！？])\s+|\n", body.strip(), maxsplit=1)[0]
+        if not summary or _NO_NEWS.match(summary.strip()):
+            return  # a no-news line keeps the card's last real outcome
+        if cfg.translate and summary:
+            from .translate import cached
+            summary = cached(summary, cfg) or summary
+        cards.update_live(session, summary, until=time.monotonic() + CARD_LOCK_WAIT)
+    except (cards.CardError, OSError):
+        pass
+
+
 def stop_output(data: dict, lines: List[str], cfg: Config, answer_to=_UNSET) -> dict:
     out: dict = {}
     session = data.get("session_id") or ""
@@ -427,6 +451,7 @@ def stop_output(data: dict, lines: List[str], cfg: Config, answer_to=_UNSET) -> 
         has_summary = fmt.split_summary(reply)[1] is not None
         wants = cfg.translate and (has_summary or is_not_target(reply, cfg.target_language))
         if cfg.mirror and cfg.ready and not (cfg.quiet_background_turns and background_only_turn(lines, answer_to)):
+            live_card(session, reply, cfg)  # only a reply the topic shows reaches the card
             # Detached first: the app cancels a running Stop hook when the next prompt is sent.
             args = ["mirror", f"--title={title}", f"--session={session or title}"] + (
                 ["--translate"] if wants else ["--no-translate"])
@@ -729,12 +754,14 @@ def _finish_stop(data: dict) -> int:
                                       is_not_target(reply, cfg.target_language))
             title = session_title(data.get("transcript_path"), session) or os.path.basename(data.get("cwd") or "") or "Claude"
             _mark_started(session, hashlib.sha1("\n".join(k for k, _ in unseen).encode()).hexdigest())
+            live_card(session, reply, cfg)  # only a reply the topic shows reaches the card
             code = mirror.run_reply(cfg, title, session or title, reply, wants,
                                     data.get("transcript_path") or "" if cfg.context_footer else "",
                                     answer_to=data.get("_answer_to"))
             if code:
                 mirror.alert(cfg, session, "Reply delivery failed; the reply is available in the app.", mirror.last_reply_failure())
             else:
+                # run_reply succeeds only after every part was delivered or durably queued.
                 _mark(session, [k for k, _ in unseen])
                 default_inbox().ack_answer_to(session, data.get("_answer_to"))
                 if not scheduled.suppressed(session, "radio", reply):
@@ -1018,7 +1045,11 @@ def hook_prompt(stdin_text: str) -> int:
                         pass
         try:
             if not data.get("agent_id"):
-                turn_started(data.get("session_id") or "")
+                path, sid = data.get("transcript_path"), data.get("session_id") or ""
+                last = float((_turn_state(sid) or {}).get("nudged") or 0) if sid else 0
+                # the transcript is searched only when a reminder could follow (the rate limit allows one)
+                check = isinstance(path, str) and path and not (last and 0 <= time.time() - last < PROGRESS_EVERY)
+                turn_started(sid, background=background_soon(path) if check else 0)
         except Exception:
             pass
         out = prompt_output(data, cfg)
@@ -1126,49 +1157,169 @@ def periodic_reminder(session: str, transcript: str, cfg: Config, now: Optional[
     return text
 
 
-PROGRESS_AFTER = 7 * 60     # a turn this long with no progress card gets one nudge to show one
+PROGRESS_AFTER = 3 * 60     # a turn this long counts as a long task
+PROGRESS_TOOLS = 25         # so does a turn with this many tool calls
+PROGRESS_EVERY = 10 * 60    # at most one "show a progress card" reminder per session this often
 PROGRESS_STALE = cards.PROGRESS_STALE_AFTER    # a progress card not touched this long while the session works gets a nudge to update it
-PROGRESS_NUDGE = ('The owner follows this work on a phone and this turn has run for several minutes with no progress '
-                  'card. Show one now: `ctb card progress "<short title>" --step "<name>" --step "<name>" ... --at '
-                  "<finished steps> --percent <n>` (3 to 6 short steps, in the owner's language), then keep it current "
-                  "with `ctb card progress --id <id> --at <n> --percent <n>` as each step finishes. Skip it only if "
-                  "the work ends within a minute or two.")
+PROGRESS_NUDGE = ('The owner follows this work on a phone and this session is on a long task with no progress '
+                  'card of its own. Show one now: `ctb card progress "<short title>" --step "<name>" --step "<name>" '
+                  "... --at <finished steps> --percent <n>` (3 to 6 short steps, in the owner's language), then keep "
+                  "it current with `ctb card progress --id <id> --at <n> --percent <n>` as each step finishes. Skip it "
+                  "only if the work ends within a minute or two.")
 PROGRESS_UPDATE = ("Your progress card {id} has not changed for a while. Update it to where the work really is: "
-                   "`ctb card progress --id {id} --at <finished steps> --percent <n>`.")
+                   "`ctb card progress --id {id} --at <finished steps> --percent <n>`. If the work has moved on "
+                   "to something else, rewrite the steps too with `--step <name> --step <name> ...` "
+                   "and set --at to match the new steps; do not just bump --at.")
+BACKGROUND_TOOLS = ("Agent", "Task", "Workflow")
 
 
 def _turn_mark(session: str):
     return state_dir() / "turn" / (re.sub(r"[^A-Za-z0-9._-]", "_", session) or "_")
 
 
-def turn_started(session: str, now: Optional[float] = None) -> None:
-    """A new prompt reached the session: the progress nudge counts from here."""
+def _turn_state(session: str) -> Optional[dict]:
+    try:
+        state = json.loads(_turn_mark(session).read_text(encoding="utf-8"))
+        float(state["start"])
+        return state if isinstance(state, dict) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+TURN_LOCK_WAIT = 0.25  # seconds a hook waits for another hook of the same session; then it skips its update
+CARD_LOCK_WAIT = 0.25  # seconds a hook waits for the card lock; then it skips (a hook never blocks a turn)
+
+
+class TurnBusy(Exception):
+    """Another hook of the same session holds its turn state: this one skips, it never waits long."""
+
+
+@contextlib.contextmanager
+def _turn_locked(session: str, wait: float = TURN_LOCK_WAIT):
+    """The session's turn state, held for one read-modify-write: parallel tool calls of one session run their
+    hooks at the same time, and without this two of them could both claim the same reminder or overwrite each
+    other's count. Raises TurnBusy after `wait` seconds instead of slowing the turn."""
+    mark = _turn_mark(session)
+    private_dir(mark.parent)
+    with open(str(mark) + ".lock", "a") as lock:
+        until = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= until:
+                    raise TurnBusy() from None
+                time.sleep(0.01)
+        try:
+            yield mark
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def turn_started(session: str, now: Optional[float] = None, background: int = 0) -> None:
+    """A new prompt reached the session: the turn's clock and tool count start here. The last reminder's time
+    is kept (the rate limit is per session, not per turn); `background` says background tasks still run."""
     if not session:
         return
     now = time.time() if now is None else now
-    mark = _turn_mark(session)
-    private_dir(mark.parent)
-    write_private(mark, json.dumps({"start": now, "nudged": 0}))
+    try:
+        with _turn_locked(session) as mark:
+            old = _turn_state(session) or {}
+            write_private(_tools_file(session), "")  # the count starts again with the turn
+            write_private(mark, json.dumps({"start": now, "nudged": float(old.get("nudged") or 0),
+                                            "bg": bool(background)}))
+    except TurnBusy:
+        pass
+
+
+def launches_background(data: dict) -> bool:
+    """This tool call started work that keeps running in the background: a command asked to, or an agent or
+    workflow whose structured result says it was launched (status "async_launched", or isAsync true). A
+    foreground agent has already finished when this runs, so the request alone proves nothing, and the result's
+    text is never read for it (an agent's report may quote any phrase)."""
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    name = data.get("tool_name")
+    if name == "Bash":
+        return inp.get("run_in_background") is True
+    if name not in BACKGROUND_TOOLS or inp.get("run_in_background") is False:
+        return False
+    resp = data.get("tool_response")
+    if not isinstance(resp, dict):
+        return False
+    return resp.get("status") == "async_launched" or resp.get("isAsync") is True
+
+
+def _tools_file(session: str) -> Path:
+    return Path(str(_turn_mark(session)) + ".tools")
+
+
+def tool_called(session: str, background: bool = False) -> None:
+    """One more tool call in the session's main turn (PostToolUse): one byte appended with O_APPEND, "b" for a
+    call that started background work, "." for any other. The file's size is the count, so parallel hooks
+    lose no call and none of them waits for a lock."""
+    if not session or _turn_state(session) is None:
+        return
+    path = _tools_file(session)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    except OSError:
+        return
+    try:
+        os.write(fd, b"b" if background else b".")
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def tool_count(session: str) -> Tuple[int, bool]:
+    """(tool calls in this turn, whether one of them started background work), from the per-turn file."""
+    try:
+        with open(_tools_file(session), "rb") as f:
+            data = f.read(1 << 16)
+    except OSError:
+        return 0, False
+    return len(data), b"b" in data
+
+
+def long_task(state: dict, now: float, tools: int = 0, background: bool = False) -> bool:
+    """A turn that runs background tasks, has run PROGRESS_AFTER or made PROGRESS_TOOLS tool calls."""
+    return (bool(state.get("bg")) or background or now - float(state["start"]) >= PROGRESS_AFTER
+            or tools >= PROGRESS_TOOLS)
 
 
 def progress_nudge(session: str, now: Optional[float] = None) -> str:
-    """One sentence asking a long-running turn for a progress card (once per turn), or for an update of a
-    card left untouched (at most once per PROGRESS_STALE). "" when it is too soon, when the owner chose the
-    quiet activity level, or when the card is fresh. One small read per tool call until the turn is old."""
+    """_progress_nudge under the session's turn lock, so a reminder is claimed once however many hooks of the
+    session run at the same time. "" when another hook holds the lock (it decides for both)."""
+    if not session:
+        return ""
+    try:
+        with _turn_locked(session):
+            return _progress_nudge(session, now)
+    except TurnBusy:
+        return ""
+
+
+def _progress_nudge(session: str, now: Optional[float] = None) -> str:
+    """One sentence asking a session on a long task (long_task) that has no progress card of its own for one,
+    at most once per PROGRESS_EVERY, or asking for an update of its card left untouched (at most once per
+    PROGRESS_STALE). The bridge's automatic card does not count as the session's own. "" when it is too soon,
+    when the owner chose the quiet activity level, or when the card is fresh. One small read per tool call
+    until the turn is long."""
     from . import cards
     from .config import activity_level
     now = time.time() if now is None else now
     mark = _turn_mark(session)
-    try:
-        state = json.loads(mark.read_text(encoding="utf-8"))
-        start, nudged = float(state["start"]), float(state.get("nudged") or 0)
-    except (OSError, ValueError, KeyError, TypeError):
+    state = _turn_state(session)
+    if state is None:
         return ""
+    start, nudged = float(state["start"]), float(state.get("nudged") or 0)
     if now < start:  # wall clock moved backwards; start a new observation window
-        state.update(start=now, nudged=0)
-        start, nudged = now, 0
+        state.update(start=now)
+        start = now
         write_private(mark, json.dumps(state))
-    if activity_level() == "quiet" or now - start < PROGRESS_AFTER:
+    if activity_level() == "quiet" or not long_task(state, now, *tool_count(session)):
         return ""
     # A changed atomic state file invalidates the cheap per-turn check marker.
     try:
@@ -1177,13 +1328,17 @@ def progress_nudge(session: str, now: Optional[float] = None) -> str:
         stamp = 0
     if state.get("cards_stamp") == stamp and start <= now < state.get("cards_next", 0):
         return ""
-    mine = [c for c in cards.open_cards() if c["session"] == session and c["kind"] == "progress"]
+    mine = [c for c in cards.open_cards() if c["session"] == session and c["kind"] == "progress"
+            and not c.get("automatic")]
     if mine:
         last = max((c.get("nudged_at", 0) for c in mine), default=0)
         eligible = [c for c in mine if cards.is_stale(c, now) and
                     (not c.get("nudged_at") or c["nudged_at"] < c["updated"] or now < c["nudged_at"])]
         if eligible and (not last or now < last or now - last >= cards.PROGRESS_STALE_AFTER):
-            ident = cards.stale_reminder(session, now)
+            try:  # a hook never waits long on the card lock: busy now, asked again on a later call
+                ident = cards.stale_reminder(session, now, until=time.monotonic() + CARD_LOCK_WAIT)
+            except cards.CardError:
+                return ""
             if ident:
                 return PROGRESS_UPDATE.format(id=ident)
         deadlines = [c["updated"] + cards.PROGRESS_STALE_AFTER + 1 for c in mine
@@ -1193,11 +1348,11 @@ def progress_nudge(session: str, now: Optional[float] = None) -> str:
         state.update(cards_stamp=stamp, cards_next=max(now + 1, min(deadlines, default=now + cards.PROGRESS_STALE_AFTER)))
         write_private(mark, json.dumps(state))
         return ""
-    if nudged:
-        state.update(cards_stamp=stamp, cards_next=now + cards.PROGRESS_STALE_AFTER)
+    if nudged and 0 <= now - nudged < PROGRESS_EVERY:
+        state.update(cards_stamp=stamp, cards_next=max(start, nudged + PROGRESS_EVERY))
         write_private(mark, json.dumps(state))
         return ""
-    state.update(nudged=now, cards_stamp=stamp, cards_next=now + cards.PROGRESS_STALE_AFTER)
+    state.update(nudged=now, cards_stamp=stamp, cards_next=now + PROGRESS_EVERY)
     write_private(mark, json.dumps(state))
     return PROGRESS_NUDGE
 
@@ -1252,7 +1407,8 @@ def hook_post(stdin_text: str) -> int:
                     from .decisions import _place_of
                     from .i18n import t
                     chat, thread = _place_of(cfg, session)
-                    cards.sync_todos(session, chat, thread, inp["todos"], t("todo_plan", lang=cfg.target_language))
+                    cards.sync_todos(session, chat, thread, inp["todos"], t("todo_plan", lang=cfg.target_language),
+                                     until=time.monotonic() + CARD_LOCK_WAIT)  # busy: skipped, the next list syncs
         except Exception:
             pass
         try:
@@ -1270,6 +1426,8 @@ def hook_post(stdin_text: str) -> int:
             reminder = ""
         out = post_output(data, cfg, stop_only=not main) if default_inbox().pending(session) else None
         try:
+            if main:
+                tool_called(session, launches_background(data))
             nudge = progress_nudge(session) if main and cfg.ready else ""
         except Exception:
             nudge = ""
@@ -1286,11 +1444,13 @@ def hook_post(stdin_text: str) -> int:
 
 def hook_ask(stdin_text: str) -> int:
     """PreToolUse for AskUserQuestion only (matcher in the registration): record the call's questions and
-    options, so the bridge can prove that a numbered dialog on the pane is this question. It never blocks,
+    options with full-text hashes and a thirty-minute expiry, so the bridge can prove that a numbered
+    dialog on the pane is this question. It never blocks,
     denies or comments on the tool: it prints nothing and always exits 0, whatever happens."""
     try:
         data = json.loads(stdin_text or "{}")
-        if (isinstance(data, dict) and data.get("tool_name") == "AskUserQuestion" and not data.get("agent_id")
+        if (isinstance(data, dict) and data.get("hook_event_name") == "PreToolUse"
+                and data.get("tool_name") == "AskUserQuestion" and not data.get("agent_id")
                 and isinstance(data.get("session_id"), str)):
             from . import asks
             asks.record(data["session_id"], data.get("tool_input"))
@@ -1311,6 +1471,27 @@ def _clear_ask(session: str) -> None:
 # --- Notification -----------------------------------------------------------------------
 
 NOTIFY_EVERY = 600  # seconds: at most one ring per session per 10 minutes
+
+
+BACKGROUND_WAIT = 0.2  # seconds the prompt hook gives the background-task search before it goes on without it
+
+
+def background_soon(transcript: str, wait: float = BACKGROUND_WAIT) -> int:
+    """background_running, given at most `wait` seconds (a large transcript or slow disk never holds up a
+    prompt): 0 when it did not finish in time. The search goes on in a daemon thread that dies with the hook."""
+    import threading
+    box: list = []
+
+    def run():
+        try:
+            box.append(background_running(transcript))
+        except Exception:
+            box.append(0)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(wait)
+    return box[0] if box else 0
 
 
 def background_running(transcript: str, now: Optional[float] = None) -> int:

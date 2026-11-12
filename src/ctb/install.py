@@ -55,7 +55,8 @@ def desired_hooks(wake: bool = True) -> dict:
             **{event: [{"hooks": [{"type": "command", "command": command("hook-lifecycle"), "timeout": 5}]}]
                for event in ("PreCompact", "SessionEnd", "SubagentStart", "SubagentStop", "PostModelSwitch")},
             "Notification": [{"hooks": [{"type": "command", "command": command("hook-notify"), "timeout": 15}]}],
-            # Only AskUserQuestion pays the startup cost: it records the question as proof for answer buttons.
+            # Synchronous: record expiring question hashes before the tool can show its dialog.
+            # Existing installs acquire this registration by running install again (merge is idempotent).
             "PreToolUse": [{"matcher": "AskUserQuestion",
                             "hooks": [{"type": "command", "command": command("hook-ask"), "timeout": 5}]}],
             "PostToolUse": [{"hooks": [{"type": "command", "command": command("hook-post"), "timeout": 30}]}],
@@ -104,6 +105,9 @@ def remove_settings(settings: dict) -> Tuple[dict, List[str]]:
                 del new["hooks"][event]
     if "hooks" in new and not new["hooks"]:
         del new["hooks"]
+    if statusline_wired(new):
+        del new["statusLine"]
+        changes.append("Removed the Harnessgram status line")
     return new, changes
 
 
@@ -232,17 +236,61 @@ def plist_bytes(svc="listener") -> bytes:
     return plistlib.dumps(data)
 
 
+def _systemd_word(value: str, *, exec_arg: bool = False) -> str:
+    """Encode a systemd word, not a shell word."""
+    value = str(value).replace("%", "%%")
+    if exec_arg:
+        value = value.replace("$", "$$")
+    if re.fullmatch(r"[A-Za-z0-9_./:%+@=-]+", value):
+        return value
+    escaped = (value.replace("\\", "\\\\").replace('"', '\\"')
+               .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+    return '"' + escaped + '"'
+
+
+def _systemd_directory(path: str) -> str:
+    # WorkingDirectory is a path directive, not a systemd word list.
+    if (not os.path.isabs(path) or path != path.rstrip() or path.endswith("\\")
+            or any(ord(c) < 32 or ord(c) == 127 for c in path)):
+        raise ValueError("WorkingDirectory cannot be represented in a systemd unit")
+    return path.replace("%", "%%")
+
+
+def statusline_wired(settings: dict) -> bool:
+    line = settings.get("statusLine")
+    if not isinstance(line, dict) or line.get("type") != "command" or not isinstance(line.get("command"), str):
+        return False
+    try:
+        args = shlex.split(line["command"])
+        return (args == launch.argv() + ["statusline"] or
+                (len(args) == 2 and Path(args[0]).name in ("harnessgram", "lingoline", "ctb")
+                 and args[1] == "statusline"))
+    except ValueError:
+        return False
+
+
+def statusline_check(settings: dict, path: Optional[Path] = None) -> Tuple[str, str]:
+    if statusline_wired(settings):
+        return "ok", "Claude Code status line is wired for quota display."
+    fix = "harnessgram install --wire-statusline"
+    if path is not None and path != settings_path():
+        fix += " --settings " + shlex.quote(str(path))
+    return "warn", "Claude Code status line is not wired for quota display. To replace it, run: " + fix
+
+
 def unit_text(svc="listener") -> str:
     svc = _service(svc)
-    env = "".join(f"Environment={n}={v}\n" for n, v in _env().items())
-    exec_start = " ".join(shlex.quote(a) for a in launch.argv() + list(svc.args))
+    env = "".join(f"Environment={_systemd_word(n + '=' + v)}\n" for n, v in _env().items())
+    exec_start = " ".join(_systemd_word(a, exec_arg=i > 0)
+                          for i, a in enumerate(launch.argv() + list(svc.args)))
+    directory = _systemd_directory(str(state_dir()))
     if svc.timed:
         return (f"[Unit]\nDescription={svc.description}\n\n[Service]\nType=oneshot\n"
-                f"ExecStart={exec_start}\nWorkingDirectory={state_dir()}\n{env}")
+                f"ExecStart={exec_start}\nWorkingDirectory={directory}\n{env}")
     extra = "KillMode=process\n" if svc.name == "listener" else ""
     return (f"[Unit]\nDescription={svc.description}\n\n[Service]\n"
             f"ExecStart={exec_start}\n"
-            f"WorkingDirectory={state_dir()}\nRestart=always\nRestartSec=5\n{extra}{env}\n"
+            f"WorkingDirectory={directory}\nRestart=always\nRestartSec=5\n{extra}{env}\n"
             "[Install]\nWantedBy=default.target\n")
 
 
@@ -475,7 +523,8 @@ class InstallReport:
 
 
 def run_install(dry_run: bool = False, service: bool = True, wake: bool = True, start: bool = True,
-                settings_file: Optional[Path] = None, schedules: bool = True, say=print) -> InstallReport:
+                settings_file: Optional[Path] = None, schedules: bool = True, say=print,
+                wire_statusline: bool = False) -> InstallReport:
     if not dry_run:
         from .hooks import wait_idle
         try:
@@ -492,6 +541,10 @@ def run_install(dry_run: bool = False, service: bool = True, wake: bool = True, 
     report = InstallReport(settings=path, dry_run=dry_run, service=service, start=start)
     old = _read_settings(path)
     new, changes = merge_settings(old, wake)
+    if wire_statusline:
+        new["statusLine"] = {"type": "command", "command": command("statusline")}
+        if new.get("statusLine") != old.get("statusLine"):
+            changes.append("wire the Harnessgram status line")
     say(f"Claude Code settings: {path}")
     for c in changes:
         say(f"  {tag}{c}")
@@ -502,8 +555,15 @@ def run_install(dry_run: bool = False, service: bool = True, wake: bool = True, 
         try:
             again = _read_settings(path)
             report.hooks = merge_settings(again, wake)[0] == again
-        except SystemExit:
+        except (SystemExit, OSError):
             report.hooks = False
+            again = None
+    else:
+        again = old
+    if again is None:
+        say("Could not read settings to check the status line.")
+    else:
+        say(statusline_check(again, path)[1])
     if service:
         chosen = SERVICES if schedules else SERVICES[:1]
         if service_file() is None:
@@ -563,15 +623,61 @@ def run_install(dry_run: bool = False, service: bool = True, wake: bool = True, 
 
 
 def install(dry_run: bool = False, service: bool = True, wake: bool = True, start: bool = True,
-            settings_file: Optional[Path] = None, schedules: bool = True) -> int:
+            settings_file: Optional[Path] = None, schedules: bool = True, wire_statusline: bool = False) -> int:
     """The CLI: 0 only when the hooks were confirmed and every service asked to start was checked running."""
-    return run_install(dry_run, service, wake, start, settings_file, schedules).code
+    return run_install(dry_run, service, wake, start, settings_file, schedules, wire_statusline=wire_statusline).code
+
+
+def _uninstall_radios(dry_run: bool) -> bool:
+    """Stop only owned radio jobs and streams; never start either edition."""
+    if sys.platform != "darwin":
+        return True
+    from . import radio, radio_youtube
+    team_state = radio._read(radio.folder() / "state.json")
+    youtube_state = radio_youtube._state()
+    team = (radio._job_loaded() is not False or radio.plist_path().exists()
+            or radio.owned_call(team_state) or radio.wanted())
+    youtube = (radio_youtube._job_on() or radio_youtube.plist_path().exists()
+               or youtube_state.get("on") or youtube_state.get("broadcast_id") or youtube_state.get("cleanup"))
+    if not (team or youtube):
+        return True
+    if dry_run:
+        print("[dry-run] would stop the active radio editions and their owned streams")
+        return True
+    try:
+        from .config import load
+        cfg = load()
+        # Each stop has its own cleanup path. Attempt both even if one fails.
+        ok = True
+        for active, name, stop, expected in ((youtube, "YouTube radio", radio_youtube.stop, "youtube_stopped"),
+                                             (team, "team radio", radio.stop, "radio_stopped")):
+            if active:
+                try:
+                    if stop(cfg) != expected:
+                        print(f"Could not fully stop {name}; retry its stop command.")
+                        ok = False
+                except Exception:
+                    print(f"Could not fully stop {name}; retry its stop command.")
+                    ok = False
+        if team and radio._job_loaded() is not False:
+            ok = False
+        if youtube and radio_youtube._job_on():
+            ok = False
+        return ok
+    except Exception:
+        print("Could not stop the radios; check configuration and retry uninstall.")
+        return False
 
 
 def uninstall(dry_run: bool = False, settings_file: Optional[Path] = None) -> int:
     tag = "[dry-run] would " if dry_run else ""
     path = settings_file or settings_path()
     old = _read_settings(path)
+    try:
+        radios_ok = _uninstall_radios(dry_run)
+    except Exception as e:  # a missing config or revoked credentials must not keep the hooks installed
+        print(f"Could not stop the radio ({e.__class__.__name__}); retry its stop command.")
+        radios_ok = False
     new, changes = remove_settings(old)
     print(f"Claude Code settings: {path}")
     for c in changes or ["no Harnessgram hooks found"]:
@@ -596,4 +702,4 @@ def uninstall(dry_run: bool = False, settings_file: Optional[Path] = None) -> in
     if removed and sys.platform.startswith("linux"):
         _sh("systemctl", "--user", "daemon-reload")
     print(f"Your config ({config_dir()}) and state ({state_dir()}) were left in place.")
-    return 0
+    return 0 if radios_ok else 1

@@ -62,3 +62,29 @@ def read_file(dir_fd: int, name: str, limit: int):
     if len(raw) > limit:
         return None
     return raw.decode("utf-8", "replace")
+
+
+def open_readonly(root, relative: str) -> int:
+    """Open an existing regular file below root, without following any link or creating anything.
+
+    The root is an administrator-selected directory. All components below it, including the file, are
+    opened relative to directory descriptors, so a concurrent link replacement cannot redirect the read.
+    The caller owns the returned descriptor.
+    """
+    parts = relative.split("/")
+    if (not relative or "\\" in relative or "\x00" in relative
+            or any(not p or p.startswith(".") for p in parts)):
+        raise Refused("not a plain relative file path")
+    parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise Refused("not a regular media file")
+        return fd
+    finally:
+        os.close(parent)

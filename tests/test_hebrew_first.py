@@ -113,19 +113,36 @@ def delivered(bot):
     return [p["text"] for meth, p in bot.calls if meth == "sendMessage" and "תרגום" not in p["text"]]
 
 
-def test_hebrew_send_fails_folded_after_sends_unfolded_original(tmp_path):
+def test_hebrew_send_fails_folded_after_sends_unfolded_original(tmp_path, monkeypatch):
+    monkeypatch.setattr(M.time, "sleep", lambda _: None)
     bot = FailingBot("תרגום")
     m = mk(tmp_path, bot)
     m.send_reply("P", "s", TEXT, lambda t: "תרגום")
     out = delivered(bot)
-    assert len(out) == 1 and TEXT in out[0] and "blockquote" not in out[0]
+    assert out == [] and m.dropped == 0 and m.queued == 2
+    from ctb import reply_outbox
+    bot.fail_text = "never matches"
+    bot.calls.clear()
+    assert reply_outbox.drain(m.cfg, bot) == 2
+    out = texts(bot)
+    assert "תרגום" in out[0] and TEXT in out[1] and "<blockquote expandable>" in out[1]
+    assert all("(באיחור)" in text for text in out)
+    assert reply_outbox.drain(m.cfg, bot) == 0 and len(texts(bot)) == 2
 
 
-def test_hebrew_send_fails_off_sends_the_original(tmp_path):
+def test_hebrew_send_fails_off_sends_the_original(tmp_path, monkeypatch):
+    monkeypatch.setattr(M.time, "sleep", lambda _: None)
     bot = FailingBot("תרגום")
-    mk(tmp_path, bot, original="off").send_reply("P", "s", TEXT, lambda t: "תרגום")
+    m = mk(tmp_path, bot, original="off")
+    m.send_reply("P", "s", TEXT, lambda t: "תרגום")
     out = delivered(bot)
-    assert len(out) == 1 and TEXT in out[0] and "blockquote" not in out[0]
+    assert out == [] and m.dropped == 0 and m.queued == 1
+    from ctb import reply_outbox
+    bot.fail_text = "never matches"
+    bot.calls.clear()
+    assert reply_outbox.drain(m.cfg, bot) == 1
+    assert len(texts(bot)) == 1 and "תרגום" in texts(bot)[0] and "(באיחור)" in texts(bot)[0]
+    assert TEXT not in texts(bot)[0] and reply_outbox.drain(m.cfg, bot) == 0
 
 
 def test_after_alias_is_hebrew_first(tmp_path):

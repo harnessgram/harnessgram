@@ -20,13 +20,23 @@ from typing import Dict, Iterable, List, Optional, Tuple
 HEBREW = re.compile(r"[֐-׿]")
 LATIN = re.compile(r"[A-Za-z]")
 MAX_ITEMS = 3           # items read aloud per update
-MAX_SCRIPT = 1300       # characters, about 90 seconds of Hebrew speech
+MAX_SCRIPT = 600        # about 45 seconds of Hebrew speech
 QUOTA_WARN = 80         # percent from which a quota window is worth saying
 DONE_WINDOW = 24 * 3600
 FRESH_WINDOW = 6 * 3600  # an item that appeared (or was finished) within this many seconds is news; older ones are backlog
 CLOCK_SKEW = 300         # seconds: an item stamped this far in the future is still taken as now; beyond it, bogus
 SPARE = 1                # extra fresh candidates prepared beyond the MAX_ITEMS read (MAX_ITEMS + SPARE = the pool size)
 ATTENTION_PARTS = ("asking", "decisions", "ledger", "reminders")
+
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def private_speech(text: str, secrets=()) -> str:
+    """Remove email addresses and known account identifiers from anything sent to the voice."""
+    text = _EMAIL.sub("חשבון", str(text))
+    for value in sorted(set(filter(None, secrets)), key=len, reverse=True):
+        text = re.sub(re.escape(value), "חשבון", text, flags=re.I)
+    return text.replace("@", "")
 
 # --- numbers in words ------------------------------------------------------------------------
 
@@ -147,6 +157,92 @@ def say_short(text: str, limit: int = 110) -> str:
     return short(text, limit)
 
 
+def whole(text: str, limit: int) -> str:
+    """At most `limit` characters (never more), ended at a whole sentence: the last one that fits, however short.
+    Text with no sentence end inside the limit is cut by `short` (at a clause or a word, marked with an
+    ellipsis), never kept whole past the limit. For caps on a full script or bulletin, where a plain `[:limit]`
+    stops the voice in the middle of a word."""
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    ends = _sentence_ends(text, limit)
+    return text[:ends[-1]].rstrip() if ends else short(text, limit)
+
+
+# What the voice is given. It reads the text verbatim, so a symbol or a Latin token that the Hebrew voice cannot
+# say is dropped or put into words first (the card keeps the original text).
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+_PAUSE_SYMBOLS = re.compile(r"\s*[\u2192\u2190\u21d2\u279c\u00b7\u2022\u2500\u2013\u2014]\s*")
+_SPOKEN_NAMES = {"claude": "קלוד", "codex": "קודקס", "gemini": "ג'מיני", "opus": "אופוס", "sonnet": "סונט",
+                 "haiku": "הייקו", "chatgpt": "צ'אט ג'י פי טי", "gpt": "ג'י פי טי", "telegram": "טלגרם",
+                 "github": "גיטהאב", "youtube": "יוטיוב", "whatsapp": "וואטסאפ"}
+_SPOKEN_LETTERS = {"PR": "פי אר", "CI": "סי איי", "API": "איי פי איי", "AI": "איי איי", "UI": "יו איי",
+                   "AGY": "איי ג'י וואי", "OK": "אוקיי"}
+_EXT = r"(?:py|js|ts|tsx|jsx|md|json|txt|sh|yml|yaml|toml|swift|html|css|log|pcm|wav|mp3|flv|png|jpg)"
+_UNSAYABLE = re.compile(
+    r"(?:(?<!\S)--?[A-Za-z][\w-]*"                                       # a command-line flag
+    r"|(?<!\S)(?:~|\.{0,2})/[\w.~-]+(?:/[\w.~-]+)*/?"                      # a path from / ~ ./ or ../
+    r"|[A-Za-z]:\\\S+"                                                   # a Windows path
+    r"|\b(?:[\w.-]+/)*[\w-]+\." + _EXT + r"\b"                              # a file name, with its folders
+    r"|\b(?=[\w./-]*[A-Za-z])[\w.-]+(?:/[\w.-]+){2,}"                      # three or more segments with letters
+    r"|\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b"                         # snake_case identifier
+    r"|\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b)")             # a hash
+_MONTHS = ("ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר")
+_FRACTIONS = {"1/2": "חצי", "1/3": "שליש", "1/4": "רבע", "2/3": "שני שלישים", "3/4": "שלושה רבעים"}
+_DATE = re.compile(r"(?<![\w/.])(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})(?![\w/])")
+_ISO_DATE = re.compile(r"(?<![\w-])(\d{4})-(\d{2})-(\d{2})(?![\w-])")
+_RATIO = re.compile(r"(?<![\w/.])(\d{1,4})/(\d{1,4})(?![\w/])")
+
+
+def _date_words(day: int, month: int, year: str) -> Optional[str]:
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        return None
+    return f"{day} ב{_MONTHS[month - 1]} {year}"
+
+
+def strip_invisible(text: str) -> str:
+    """Remove zero-width, bidi and other invisible format characters (they can hide inside a label or a token)."""
+    return _INVISIBLE.sub("", str(text))
+
+
+def _say_numbers(text: str) -> str:
+    """A full date (with a year, as d/m/y or y-m-d) in words, day first: "12/11/2026" -> "12 בנובמבר 2026". A bare a/b
+    has no year, so it is never a date ("24/7" and "10/10" stay as they are): a < b is a fraction ("3/5" ->
+    "3 מתוך 5", with 1/2, 1/3, 1/4, 2/3 and 3/4 as words); anything else stays as digits."""
+    text = _ISO_DATE.sub(lambda m: _date_words(int(m.group(3)), int(m.group(2)), m.group(1)) or m.group(0), text)
+    text = _DATE.sub(lambda m: _date_words(int(m.group(1)), int(m.group(2)), m.group(3)) or m.group(0), text)
+
+    def ratio(m: re.Match) -> str:
+        if m.group(0) in _FRACTIONS:
+            return _FRACTIONS[m.group(0)]
+        return f"{m.group(1)} מתוך {m.group(2)}" if int(m.group(1)) < int(m.group(2)) else m.group(0)
+    return _RATIO.sub(ratio, text)
+
+
+def for_voice(text: str) -> str:
+    """The text as the Hebrew voice should read it: no bidi or zero-width marks, no ellipsis, arrows, dashes or
+    bullets (a comma pause instead), no "=", "~", "@" or "$" (money becomes words), no file names, flags,
+    paths or hashes, and the usual product names and initialisms as Hebrew words. Other plain Latin words stay
+    (the voice reads them in English)."""
+    text = strip_invisible(text)
+    text = text.replace("\u2026", ". ").replace("...", ". ")
+    text = _say_numbers(text)
+    text = _UNSAYABLE.sub(" ", text)
+    text = text.replace("ו/או", "או")
+    text = re.sub(r"(?<=[^\W\d])/(?=[^\W\d])", " או ", text)  # an alternative: "כן/לא" is "כן או לא"
+    text = re.sub(r"(?<!\d)/|/(?!\d)", " ", text)  # any other slash is a pause; one between digits stays
+    text = re.sub(r"\$\s*(\d[\d.,]*)", r"\1 דולר", text)
+    text = re.sub(r"~\s*(?=\d)", "בערך ", text)
+    text = re.sub(r"\s\+\s", " ועוד ", text)
+    text = re.sub(r"[=@~$+]", " ", text)
+    text = _PAUSE_SYMBOLS.sub(", ", text)
+    text = re.sub(r"\b([A-Za-z][A-Za-z]*)\b", lambda m: _SPOKEN_LETTERS.get(m.group(1)) or
+                  _SPOKEN_NAMES.get(m.group(1).lower(), m.group(1)), text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([,.;:])(?:\s*[,.;:])+", r"\1", text)
+    return " ".join(text.split()).strip(" ,;:")
+
+
 def spoken(text: str) -> str:
     """A line fit for the voice: no emoji, no hashes, no URLs, no brackets."""
     text = re.sub(r"https?://\S+", "", text)
@@ -255,10 +351,18 @@ def snapshot(state: dict, asking: Iterable[str], ledger: Tuple[List[dict], List[
     asking = set(asking)
     waiting, done, team_open = ledger
     quota = []
+    sensitive = []
     for q in state.get("quota") or []:
+        account = str(q.get("account") or "")
+        for address in _EMAIL.findall(account + " " + str(q.get("label") or "")):
+            sensitive.extend([address, address.split("@", 1)[0]])
+    for index, q in enumerate(state.get("quota") or []):
         for window, value in (("week", q.get("weekly")),):  # weekly only: no 5-hour window
             if isinstance(value, (int, float)):
-                quota.append({"label": q.get("label") or q.get("account") or "", "window": window,
+                label = str(q.get("label") or "")
+                if not label or private_speech(label, sensitive) != label:
+                    label = "חשבון קלוד הראשי" if index == 0 else "חשבון קלוד הנוסף"
+                quota.append({"label": label, "window": window,
                               "pct": int(round(value))})
     quota += [{"label": r["label"], "window": r.get("window") or "5h", "pct": r["pct"]} for r in quota_rows]
     return {
@@ -274,8 +378,10 @@ def snapshot(state: dict, asking: Iterable[str], ledger: Tuple[List[dict], List[
                    for r in waiting],
         "done": [{"key": "x:" + r["key"], "project": r["project"], "text": r["text"], "updated": r["updated"]}
                  for r in done],
-        "sessions": [{"id": s.get("id") or "", "name": s.get("name") or "", "state": s.get("state") or ""}
+        "sessions": [{"id": s.get("id") or "", "name": s.get("name") or "", "state": s.get("state") or "",
+                      "now": s.get("now") or "", "summary": s.get("summary") or "", "age": s.get("age")}
                      for s in sessions if s.get("id")],
+        "private_accounts": sensitive,
         "agents_done": [dict(a) for a in agents_done or []],
         "working": sum(1 for s in sessions if s.get("state") == "working"),
         "idle": sum(1 for s in sessions if s.get("state") == "idle"),
@@ -317,6 +423,29 @@ def radio_ready(raw: str, text: str) -> bool:
     """Short, clean Hebrew the voice can read as it is: at most 90 characters, no digits, Latin letters,
     brackets or ellipsis in the original text. Anything else is phrased first (radio.localize)."""
     return len(text) <= 90 and not re.search(r"[\d()\[\]{}<>…A-Za-z]", raw or "")
+
+
+_FRAGMENT = re.compile(r"[;+\u2192()\[\]{}]|#\d|\bOwner\s+\d{4}", re.I)
+
+
+def plain_title(text: str) -> bool:
+    """A note short and plain enough to be translated word for word and still sound like a sentence: one clause,
+    at most 14 words, no list separators, brackets, ids or dates. Telegraphic
+    notes ("a + b; c (see #12)") are not: a literal translation of those is word salad, so they are phrased as a
+    whole line or not read."""
+    text = " ".join(str(text or "").split())
+    return (0 < len(text) <= 120 and len(text.split()) <= 14 and not _FRAGMENT.search(text)
+            and text.count(",") <= 1 and text.count(":") <= 1)
+
+
+def done_fallback(item: dict, names: Dict[str, str], lang: str = "he") -> Optional[str]:
+    """What is said about a finished item whose own words cannot be read (no whole Hebrew line): a task of the
+    project, by its Hebrew name (the caller's "done" lead-in says it finished). None without a sayable name."""
+    where = _name(item["project"], names) if item.get("project") else ""
+    where = spoken(where)
+    if not where or (lang == "he" and not hebrew_enough(where)):
+        return None
+    return f"משימה בפרויקט {short(where, 40)}" if lang == "he" else f"A task in {where}"
 
 
 def is_fresh(part: str, item: dict, snap: dict) -> bool:
@@ -466,7 +595,7 @@ def build_news(snap: dict, last: dict, names: Dict[str, str], lang: str = "he", 
         out.append(line)
         rep["team"].append(line)
     done = [i for k, i in items if k == "done"]
-    lines = [line for line in (_item_line(i, names, lang) for i in done[:2]) if line]
+    lines = [line for line in (_item_line(i, names, lang) or done_fallback(i, names, lang) for i in done[:2]) if line]
     for line in lines:
         out.append(("הושלם: " if he else "Done: ") + _sentence(line))
     rep["done_count"], rep["done"] = len(done), [_sentence(line) for line in lines]
@@ -482,11 +611,12 @@ def build_news(snap: dict, last: dict, names: Dict[str, str], lang: str = "he", 
         line = _quota_line(q, he)
         out.append(line)
         rep["quota"].append(line)
-    return " ".join(out)[:MAX_SCRIPT]
+    return whole(private_speech(" ".join(out), snap.get("private_accounts") or []), MAX_SCRIPT)
 
 
 def _quota_line(q: dict, he: bool) -> str:
-    label = _SPOKEN_LABELS.get(q["label"].lower(), q["label"]) if he else q["label"]
+    safe_label = private_speech(q.get("label") or "חשבון")
+    label = _SPOKEN_LABELS.get(safe_label.lower(), safe_label) if he else safe_label
     which = f"המכסה של {label} לחמש השעות" if q["window"] == "5h" else f"המכסה השבועית של {label}"
     return (f"שים לב: {which} הגיעה ל{number_he(q['pct'])} אחוז." if he else
             f"Note: {label} quota ({q['window']}) is at {q['pct']}%.")
@@ -575,7 +705,7 @@ def build_script(snap: dict, last: dict, names: Dict[str, str], lang: str = "he"
                         f"{n} thing{'' if n == 1 else 's'} wait{'s' if n == 1 else ''} for you.")
         prefix = (("חדש: " if m == 1 else "החדשים: ") if he else "New: ") if said and m and m < n else ""
         told = 0
-        for part, item in new:
+        for part, item in (new if new else attention):
             if told >= MAX_ITEMS:
                 break
             line = _item_line(item, names, lang)
@@ -589,7 +719,7 @@ def build_script(snap: dict, last: dict, names: Dict[str, str], lang: str = "he"
                 out.append(("" if told else prefix) + _sentence(line))
                 rep["new"].append(_sentence(line))
                 told += 1
-        rep["more"] = m - told
+        rep["more"] = max(0, m - told)
         if m and not told:  # nothing could be read: say so, once, for all the new ones
             out.append(("את החדש אי אפשר להקריא בעברית." if m == 1 else "את החדשים אי אפשר להקריא בעברית.") if he else
                        "The new one cannot be read aloud." if m == 1 else "The new ones cannot be read aloud.")
@@ -607,6 +737,17 @@ def build_script(snap: dict, last: dict, names: Dict[str, str], lang: str = "he"
         out.append("כרגע שום דבר לא מחכה לך." if he else "Nothing waits for you right now.")
         rep["status"] = out[-1]
 
+    active = [s for s in snap.get("sessions") or [] if s.get("state") == "working"]
+    active.sort(key=lambda s: _num(s.get("age")) if _num(s.get("age")) is not None else float("inf"))
+    work_lines = []
+    for session in active[:4]:
+        name = say_short(spoken(session.get("name") or ""), 55)
+        candidates = [spoken(session.get(key) or "") for key in ("now", "summary")]
+        detail = next((value for value in candidates if value and (not he or hebrew_enough(value))), "")
+        detail = say_short(detail, 70) if detail else ("העבודה נמשכת" if he else "work continues")
+        if name:
+            work_lines.append(_sentence(f"{name}: {detail}"))
+
     # done: only what was finished within FRESH_WINDOW and not told before (one filter: recent_done). The real
     # count is said, at most two titles are read.
     fresh = recent_done(snap, last)
@@ -616,10 +757,22 @@ def build_script(snap: dict, last: dict, names: Dict[str, str], lang: str = "he"
                     f"{since} הושלם דבר אחד.") if he else f"{len(fresh)} item(s) done.")
         rep["done_count"] = len(fresh)
         for item in fresh[:2]:
-            line = _item_line(item, names, lang)
+            line = _item_line(item, names, lang) or done_fallback(item, names, lang)
             if line:
                 out.append(_sentence(line))
                 rep["done"].append(out[-1])
+
+    if last:
+        for session in (s for s in snap.get("sessions") or []
+                        if s.get("id") in set(last.get("working_ids") or []) and s.get("state") == "idle"):
+            summary = spoken(session.get("summary") or "")
+            if summary and (not he or hebrew_enough(summary)):
+                label = say_short(spoken(session.get("name") or ""), 45)
+                line = _sentence(("מאז העדכון הקודם, " if he else "Since the last update, ") +
+                                 (f"{label}: " if label else "") + say_short(summary, 90))
+                out.append(line)
+                rep["done"].append(line)
+                break
 
     w, idle = snap.get("working", 0), snap.get("idle", 0)
     if w or idle:
@@ -629,16 +782,29 @@ def build_script(snap: dict, last: dict, names: Dict[str, str], lang: str = "he"
                    f"{w} sessions working, {idle} idle.")
         rep["team"].append(out[-1])
 
+    out.extend(work_lines)
+    rep["team"].extend(work_lines)
+
     for q in (snap.get("quota") or [])[:2]:
         out.append(_quota_line(q, he))
         rep["quota"].append(out[-1])
 
     out.append("זה הכול לעכשיו." if he else "That's all for now.")
     script = " ".join(out)
+    # Keep waiting titles, milestones and the newest work ahead of optional closing and quota details.
+    optional = list(reversed(rep["quota"])) + [out[-1], rep.get("backlog", "")]
+    optional += [line for line in rep["team"] if line not in work_lines]
+    optional += list(reversed(rep["new"][2:])) + list(reversed(work_lines))
+    for line in optional:
+        if len(script) <= MAX_SCRIPT:
+            break
+        if line and line in out:
+            out.remove(line)
+            script = " ".join(out)
     while len(script) > MAX_SCRIPT and len(out) > 3:
-        out.pop(-2)
+        out.pop()
         script = " ".join(out)
-    return script
+    return whole(private_speech(script, snap.get("private_accounts") or []), MAX_SCRIPT)
 
 
 def _sentence(line: str) -> str:

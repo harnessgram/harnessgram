@@ -44,6 +44,7 @@ CALL_BUSY = "the group already has another live stream or voice chat"  # radio_c
 RATE = radio_voice.RATE
 FRAME = 960                 # samples per 20 ms
 FPS = 2                     # card frames per second
+OUT_FPS = 15                # frames per second the stream carries: Telegram players stutter on very low rates
 LEAD = 0.3                  # seconds of audio kept ahead of real time
 POLL = 30                   # seconds between looks at the team's state
 QUOTA_EVERY = 300           # seconds between runs of the quota command
@@ -56,9 +57,10 @@ RESUME_DELAY = 20           # seconds after the listener started before the radi
 RESUME_BACKOFF = (0, 60, 180, 600)  # waits before each resume attempt; one attempt per entry
 MAX_RESUME = len(RESUME_BACKOFF)    # failed resume attempts within RESUME_WINDOW before the radio gives up
 RESUME_WINDOW = 3600
+LATE_AFTER = 0.25           # seconds the audio feed may fall behind real time before the pipeline logs it
 DEFAULTS = {
     "every_minutes": 20, "news_minutes": 3, "tts_daily_minutes": 25, "tts_model": "gemini-2.5-flash-tts", "voice": "Sadaltager",
-    "style": "", "say_voice": "", "bed": "pad", "bed_db": -30, "video_encoder": "", "title": "",
+    "style": "", "say_voice": "", "bed": "off", "bed_db": -30, "video_encoder": "", "title": "",
     "telethon_python": "", "account_api_command": [], "account_session_command": [],
     "rtmp_url_command": [], "rtmp_key_command": [], "ledger_dir": "", "quota_command": [],
     "rewrite_command": [], "project_names": {}, "path": [], "motion_modules": "", "chrome_path": "",
@@ -163,7 +165,10 @@ def phrase_one(row: dict, ask: Callable[[str], str]) -> str:
 
 
 def translate_one(text: str, translate: Callable[[str], str]) -> str:
-    """The literal translation, if Hebrew enough ("" otherwise). Runs on a pool worker."""
+    """The literal translation of a plain one-clause note, if Hebrew enough ("" otherwise: a telegraphic note is
+    never translated word for word, see radio_script.plain_title). Runs on a pool worker."""
+    if not radio_script.plain_title(text):
+        return ""
     out = radio_script.spoken(str(translate(text) or ""))
     return radio_script.say_short(out, 160) if radio_script.hebrew_enough(out) else ""
 
@@ -354,7 +359,8 @@ def job_path(extra: List[str]) -> str:
 
 def plist_bytes(extra_path: Optional[List[str]] = None) -> bytes:
     env = {"PATH": job_path(extra_path or [])}
-    env.update({n: os.environ[n] for n in ("CTB_CONFIG_DIR", "CTB_STATE_DIR") if os.environ.get(n)})
+    env.update({n: os.environ[n] for n in ("CTB_CONFIG_DIR", "CTB_STATE_DIR", "CTB_RADIO_DIAG_SECONDS", "CTB_RADIO_TAP_SECONDS", "CTB_RADIO_LEAD_SECONDS",
+                 "CTB_RADIO_OUT_FPS") if os.environ.get(n)})
     return plistlib.dumps({
         "Label": LABEL, "ProgramArguments": launch.argv() + ["radio", "run"],
         "WorkingDirectory": str(folder()), "EnvironmentVariables": env,
@@ -776,7 +782,7 @@ def minutes(cfg: Config) -> dict:
 
 
 def say(text: str) -> str:
-    text = " ".join(str(text).split())[:MAX_SAY]
+    text = radio_script.whole(text, MAX_SAY)
     if not text:
         raise RadioError("radio_say_empty")
     if not job_pid():
@@ -840,7 +846,8 @@ def spawn(action: str) -> None:
 # --- audio ------------------------------------------------------------------------------------
 
 def make_bed(kind: str, db: int) -> bytes:
-    """40 s of a soft, seamless pad (or silence), raw 48 kHz mono s16le."""
+    """40 s of raw 48 kHz mono s16le: true digital silence unless `kind` is "pad" (an opt-in soft chord drone of pure
+    sines, no noise source; the default is "off", so nothing sounds between updates)."""
     if kind != "pad":
         return bytes(2 * RATE * 2)
     # carriers and swells complete whole cycles in 40 s, so the loop has no click
@@ -930,7 +937,7 @@ class Mixer:
     def next(self, n: int = FRAME) -> bytes:
         with self.lock:
             bed = self._bed(n)
-            while self.voice is None and self.clips and self.gain <= 0.0:
+            while self.voice is None and self.clips and self.gain <= 0.0 and self.gap <= 0:  # a breath between lines
                 pcm, tag = self.clips.popleft()
                 self.front_n = max(0, self.front_n - 1)
                 if tag is not None and self.veto is not None and self.veto(tag):
@@ -961,6 +968,15 @@ class Mixer:
 
 # --- the encoder pipeline ------------------------------------------------------------------------
 
+def out_fps() -> int:
+    """The stream's constant frame rate (CTB_RADIO_OUT_FPS, 2..30, default OUT_FPS). The picture still changes at
+    its own rate; the encoder repeats frames, which costs almost nothing for a still card."""
+    try:
+        return min(30, max(2, int(os.environ.get("CTB_RADIO_OUT_FPS", OUT_FPS))))
+    except ValueError:
+        return OUT_FPS
+
+
 def encoder_args(encoder: str, video_fd: int = 3, marker: str = MARKER, fps: int = FPS, codec: str = "png",
                  bitrate: Tuple[str, str, str] = ("250k", "300k", "600k"), strip_fd: Optional[int] = None,
                  strip: Optional[Tuple[int, int, int]] = None) -> List[str]:
@@ -971,7 +987,8 @@ def encoder_args(encoder: str, video_fd: int = 3, marker: str = MARKER, fps: int
     video = (["-c:v", "h264_videotoolbox", "-realtime", "1", "-allow_sw", "1", "-profile:v", "main", "-bf", "0"]
              if encoder == "h264_videotoolbox" else
              ["-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage,zerolatency", "-bf", "0"])
-    picture = ["-map", "1:v", "-map", "0:a", "-vf", "format=yuv420p"]
+    out = out_fps()
+    picture = ["-map", "1:v", "-map", "0:a", "-vf", f"fps={out},format=yuv420p"]
     ticker: List[str] = []
     if strip_fd is not None and strip:
         width, row, speed = strip
@@ -980,18 +997,24 @@ def encoder_args(encoder: str, video_fd: int = 3, marker: str = MARKER, fps: int
         # the strip holds the same text twice: the window runs right to left through one copy and loops seamlessly
         picture = ["-filter_complex",
                    f"[2:v]crop=w={width}:h=ih:x='iw-{width}-mod(n*{speed},iw/2)':y=0[t];"
-                   f"[1:v][t]overlay=x=0:y={row}:eof_action=repeat,format=yuv420p[v]",
+                   f"[1:v][t]overlay=x=0:y={row}:eof_action=repeat,fps={out},format=yuv420p[v]",
                    "-map", "[v]", "-map", "0:a"]
     return ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
             "-probesize", "32", "-analyzeduration", "100000",  # raw audio: nothing to probe (0 means 5 s)
             "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-thread_queue_size", "64", "-i", "pipe:0",
             "-analyzeduration", "100000", "-f", "image2pipe", "-c:v", codec, "-framerate", str(fps),
             "-thread_queue_size", "8", "-i", f"pipe:{video_fd}", *ticker,
-            *picture, "-g", str(2 * fps), *video,
+            *picture, "-g", str(2 * out), "-keyint_min", str(2 * out), *video,
             "-b:v", bitrate[0], "-maxrate", bitrate[1], "-bufsize", bitrate[2],
             "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2",
-            "-metadata", f"comment={marker}", "-flush_packets", "1", "-f", "flv", "-flvflags", "no_duration_filesize",
+            "-metadata", f"comment={marker}", "-flush_packets", "1", "-max_interleave_delta", "100000", "-f", "flv", "-flvflags", "no_duration_filesize",
             "pipe:1"]
+
+
+def feed_behind(start: float, sent: int, now: float) -> float:
+    """Seconds by which the audio written so far (`sent` samples since `start`) is behind real time: a live
+    listener's player has run dry for this long. Zero while the feed is ahead, as it normally is (LEAD)."""
+    return max(0.0, (now - start) - sent / RATE)
 
 
 def pick_encoder(wanted: str) -> str:
@@ -1030,12 +1053,39 @@ class Pipeline:
         self.stop = threading.Event()
         self.quit = quit or threading.Event()
         self.proc: Optional[subprocess.Popen] = None
+        self.stalls: "collections.deque[float]" = collections.deque(maxlen=20)  # seconds, appended by _writer
+        self.stalled = threading.Event()  # set by the writer (never blocks); the log thread wakes on it
+        self.diag = None
+
+    def report_stalls(self) -> None:
+        """Write the stalls the audio writer noted (on the log thread only)."""
+        while self.stalls:
+            log(f"audio feed {self.stalls.popleft():.1f} s behind real time (the encoder or the connection stalled)")
+
+    def _stall_logger(self) -> None:
+        """The small daemon thread that turns noted stalls into log lines, so neither the real-time writer nor
+        run()'s supervising loop ever does file work for them."""
+        while not self.stop.is_set():
+            self.stalled.wait(1.0)
+            self.stalled.clear()
+            self.report_stalls()
+        self.report_stalls()
 
     def _writer(self, failed: threading.Event) -> None:
         """Audio frames at real-time pace (LEAD seconds ahead)."""
-        start, sent = time.monotonic(), 0
+        start, sent, late = time.monotonic(), 0, False
         try:
             while not self.stop.is_set() and not failed.is_set():
+                now = time.monotonic()
+                behind = feed_behind(start, sent, now)
+                if self.diag:
+                    self.diag.call("lag", "audio", behind, now)
+                if behind > LATE_AFTER and not late:  # the listener's player has run dry: noted once per episode
+                    late = True
+                    self.stalls.append(behind)  # no file work here: the stall-log thread writes the line
+                    self.stalled.set()
+                elif behind <= 0:
+                    late = False
                 due = (time.monotonic() - start + LEAD) * RATE
                 while sent < due:
                     self.proc.stdin.write(self.mixer.next(FRAME))
@@ -1054,6 +1104,9 @@ class Pipeline:
         start, sent, png, stamp = time.monotonic(), 0, b"", None
         try:
             while not self.stop.is_set() and not failed.is_set():
+                if self.diag:
+                    now = time.monotonic()
+                    self.diag.call("lag", "video", max(0.0, now - start - sent / FPS), now)
                 try:
                     st = self.card.stat()
                     if (st.st_mtime_ns, st.st_size) != stamp:
@@ -1077,9 +1130,13 @@ class Pipeline:
             threading.Thread(target=self._moving, args=(self.strip_out, failed, self.source.strip),
                              daemon=True, name="radio-ticker").start()
         get = get or self.source.frame
+        writer = "ticker" if get == getattr(self.source, "strip", None) else "video"
         start, sent, fps = time.monotonic(), 0, self.source.fps
         try:
             while not self.stop.is_set() and not failed.is_set():
+                if self.diag:
+                    now = time.monotonic()
+                    self.diag.call("lag", writer, max(0.0, now - start - sent / fps), now)
                 due = int((time.monotonic() - start + LEAD) * fps) + 1
                 while sent < due:
                     frame = get()
@@ -1097,7 +1154,7 @@ class Pipeline:
         """Stream until a part fails or `quit` is set; returns why it stopped ("" on quit). Never raises: a bad
         stream URL, a missing ffmpeg or any other error comes back as the reason, after everything is closed."""
         from . import policy
-        from .radio_rtmp import Publisher
+        from .radio_rtmp import Publisher, lead_seconds
         pub = err = video = None
         # the one gate before any connection: whatever was prepared before this point (a first picture, a show)
         # is dropped when a stop arrived or the bridge was switched off meanwhile
@@ -1108,9 +1165,20 @@ class Pipeline:
         try:
             try:
                 pub = Publisher(self._url, self._key)
+                pub.lead = lead_seconds()  # jitter buffer: steady sends even when the encoder stalls
                 pub.connect()
             except Exception as e:
                 return "publish failed: " + (str(e) if e.__class__.__name__ == "RtmpError" else e.__class__.__name__)
+            try:
+                from .radio_diag import Capture, Guard, configured_seconds
+                seconds = configured_seconds()
+                if seconds:
+                    self.diag = pub.diag = Guard(Capture(folder(), seconds, log))
+            except Exception as e:
+                try:
+                    log("radio diagnostic disabled: " + e.__class__.__name__)
+                except Exception:
+                    pass
             err = open(self.err_path or folder() / "ffmpeg.err", "ab")
             rfd, wfd = os.pipe()
             sfd = swfd = None
@@ -1148,10 +1216,13 @@ class Pipeline:
                 except Exception as e:
                     reason["why"] = str(e) if e.__class__.__name__ == "RtmpError" else e.__class__.__name__
                 failed.set()
-            for target, args in ((forward, ()), (self._writer, (failed,)), (self._pictures, (video, failed))):
+            for target, args in ((forward, ()), (self._writer, (failed,)), (self._pictures, (video, failed)),
+                                 (self._stall_logger, ())):
                 threading.Thread(target=target, args=args, daemon=True).start()
             from . import policy
             while not failed.wait(1.0):
+                if self.diag:
+                    self.diag.log_error(log)
                 if self.quit.is_set():
                     break
                 if not policy.on():
@@ -1162,6 +1233,8 @@ class Pipeline:
         except Exception as e:
             return "pipeline error: " + e.__class__.__name__
         finally:
+            if self.diag:
+                self.diag.log_error(log)
             self.close(pub, err)
             for pipe_out in (video, self.strip_out):
                 if pipe_out is not None:
@@ -1173,6 +1246,7 @@ class Pipeline:
     def close(self, pub=None, err=None) -> None:
         """Stop the encoder first (a writer blocked on a full pipe then fails at once), then the rest."""
         self.stop.set()
+        self.stalled.set()  # wakes the stall-log thread for its last write
         p = self.proc
         if p is not None:
             try:
@@ -1253,7 +1327,7 @@ class Station:
     # content
     def gather(self, now: float) -> dict:
         from .panel import build_state
-        state = build_state(self.cfg, now=now, light=True)
+        state = build_state(self.cfg, now=now, light=False)
         from . import asks
         asking = []
         ask_dir = state_dir() / "ask"
@@ -1407,6 +1481,7 @@ class Station:
         self.post_channel(report)  # a room line has no report: it never reaches the alerts channel
         self._status(route=route, tts_today=round(self.usage.today(), 1), voice_problem=why or None)
         log(f"speak: {radio_voice.seconds_of(pcm):.0f} s via {route}" + (f" (paid voice: {why})" if why else ""))
+        radio_voice.spoken_log(self.dir / "spoken.log", route, text)
         return True
 
     def talk_loop(self) -> None:
@@ -1433,7 +1508,8 @@ class Station:
                     batch.append(record)
                     arrived.append(time.time())
             if radio_talk.ready(batch, arrived, time.time()) and not self.room_live():
-                text = radio_talk.bulletin(batch)[:MAX_SAY * 3]
+                text = radio_script.whole(radio_talk.bulletin(batch, (self.snap or {}).get("private_accounts") or []),
+                                          MAX_SAY * 3)
                 self.speak(text, front=True, talk=list(batch), report=radio_post.bulletin_report(batch))
                 batch, arrived = [], []
 
@@ -1479,6 +1555,8 @@ class Station:
             script = radio_script.build_script(snap, told, self.s["project_names"], self.s["lang"], report=report)
         if kind == "periodic":
             script = self.rewrite(script, snap)
+        script = radio_script.private_speech(radio_script.whole(script, radio_script.MAX_SCRIPT),
+                                            snap.get("private_accounts") or [])
         if self.speak(script, report=report):
             _write(self.dir / "last.json", radio_script.remember(snap, now, last))
             self._status(last_update=int(now), last_kind=kind)
@@ -1662,7 +1740,7 @@ class Station:
         spool = self.dir / "say"
         for f in sorted(spool.glob("*.txt")) if spool.is_dir() else []:
             try:
-                text = f.read_text(encoding="utf-8")[:MAX_SAY]
+                text = radio_script.whole(f.read_text(encoding="utf-8"), MAX_SAY)
                 f.unlink()
             except OSError:
                 continue

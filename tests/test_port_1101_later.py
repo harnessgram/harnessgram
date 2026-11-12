@@ -193,7 +193,7 @@ def test_live_keyboard_shows_account_effort_model_and_mode(monkeypatch):
     labels = [b["text"] for r in kb["keyboard"] for b in r]
     assert "👤 dev" in labels and "🧠 Opus 5.5" in labels
     assert "🎚️ " + i18n.t("effort_xhigh", lang="he") in labels and "🔐 עריכות" in labels
-    kb_en = M.live_keyboard("Context 10k", base_kb=M.KEYBOARD_EN, lang="en", thread=77)
+    kb_en = M.live_keyboard("Context 10k", lang="en", thread=77)
     assert "🔐 Edits" in [b["text"] for r in kb_en["keyboard"] for b in r]
 
 

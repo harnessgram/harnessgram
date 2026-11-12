@@ -134,21 +134,36 @@ def test_team_failure_does_not_drop_owner(cfg, bot, tmp_path):
 
 
 def test_retry_429_and_parse_only(cfg, bot, tmp_path, monkeypatch):
+    from ctb import flood, reply_outbox
+    clock = [100.0]
+    monkeypatch.setattr(mirror.time, "time", lambda: clock[0])
     tm = topics.TopicMap(tmp_path / "topics", bot, 7)
     tm.ensure("s", "t")
     orig = bot.call
     failures = [telegram.TelegramError("slow", 429, 99)]
     def call(method, params=None, timeout=15):
         if method == "sendMessage" and failures:
-            raise failures.pop()
+            error = failures.pop()
+            if error.code == 429:
+                flood.record_429(7, error.retry_after)
+            raise error
         return orig(method, params, timeout)
     monkeypatch.setattr(bot, "call", call)
     delays = []
-    monkeypatch.setattr(mirror.time, "sleep", delays.append)
-    assert mirror.Mirror(cfg, bot, tm).send_reply("t", "s", "hello") == 1
-    assert delays == [30]
+    def sleep(delay):
+        delays.append(delay)
+        clock[0] += delay
+    monkeypatch.setattr(mirror.time, "sleep", sleep)
+    assert mirror.Mirror(cfg, bot, tm).send_reply("t", "s", "hello") == 0
+    assert delays == [30, 30, 30] and bot.methods("sendMessage") == []
+    assert reply_outbox.drain(cfg, bot) == 0 and bot.methods("sendMessage") == []
+    clock[0] += 9
+    assert reply_outbox.drain(cfg, bot) == 1
+    assert reply_outbox.drain(cfg, bot) == 0 and len(bot.methods("sendMessage")) == 1
     failures.append(telegram.TelegramError("forbidden", 403))
     assert mirror.Mirror(cfg, bot, tm).send_reply("t", "s", "hello") == 0
+    assert reply_outbox.drain(cfg, bot) == 1  # the failed part is retained before later replies
+    assert reply_outbox.drain(cfg, bot) == 0
     failures.append(telegram.TelegramError("can't parse entities", 400))
     assert mirror.Mirror(cfg, bot, tm).send_reply("t", "s", "hello") == 1
     assert "parse_mode" not in bot.methods("sendMessage")[-1]

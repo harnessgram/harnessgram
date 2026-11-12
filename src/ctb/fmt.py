@@ -271,7 +271,12 @@ def unmix(text: str, arrows: bool = True) -> str:
                 # pair its "(" with a ")" in the Hebrew text, and the phone draws them mirrored.
                 head = re.match(r"[(\[\"'«]*", name).group()
                 tail = re.search(r"[,.;:!?)\]\"'»]*$", name[len(head):]).group()
-                g = [head + "\u2068" + name[len(head):len(name) - len(tail)] + "\u2069" + tail]
+                inner = name[len(head):len(name) - len(tail)]
+                # a bracket inside the name ("Codex (gpt-6.1-sol," whose ")" is in the Hebrew text) stays outside
+                # the isolates too: each English piece is isolated on its own
+                parts = re.split(r"(\s*[()\[\]«»]\s*)", inner)
+                g = [head + "".join(p if not p or re.fullmatch(r"\s*[()\[\]«»]\s*", p) else "\u2068" + p + "\u2069"
+                                    for p in parts) + tail]
                 k = "he"
             if merged and k == "he" and mkinds[-1] == "he":
                 merged[-1] += g

@@ -1155,3 +1155,23 @@ def test_a_tampered_old_shape_file_is_still_refused(cfg):
     C.write_private(C.state_dir() / A.SETTINGS_FILE, json.dumps(raw))
     A._saved.clear()
     assert A.settings(cfg)["files"] == "off"
+
+
+def test_a_post_without_a_reply_link_opens_the_group_not_the_bot(cfg, monkeypatch):
+    register()
+    bot = FakeBot()
+    monkeypatch.setattr(A, "home_chat", lambda c: -1001234567890)
+    assert A.alert(cfg, "radio digest", "", bot=bot, kind="radio")
+    (sent,) = to_channel(bot)
+    url = sent["reply_markup"]["inline_keyboard"][0][0]["url"]
+    assert url == "https://t.me/c/1234567890/1"
+
+
+def test_a_session_post_opens_its_own_topic(cfg, monkeypatch):
+    register()
+    bot = FakeBot()
+    monkeypatch.setattr(A, "home_chat", lambda c: -1001234567890)
+    monkeypatch.setattr(A.TopicMap, "all", lambda self: {"s9": {"thread": 77, "name": "Topic"}})
+    assert A.alert(cfg, "waiting", "s9", bot=bot, kind="waiting")
+    (sent,) = to_channel(bot)
+    assert sent["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://t.me/c/1234567890/77"

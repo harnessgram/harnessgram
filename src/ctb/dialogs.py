@@ -1,13 +1,17 @@
 """Claude Code dialogs (questions, forms, permission and plan prompts, menus) as Telegram cards.
 
-Design rule: text on the terminal pane can never approve anything. A card shows
-the dialog and its options as text, with Cancel and Full screen as its only buttons; the owner types
-the option number or name in the session's topic. Only that typed text, from the paired owner, in that
-session's topic, while the same dialog is still open (identity and stamp unchanged), selects the option.
+Text on the terminal pane can never prove permission to answer by tapping. The
+PreToolUse hook records each AskUserQuestion before it appears, hashing its complete
+question and ordered option labels. Only an exact match in the same session within
+thirty minutes gets answer buttons. The proof binds to the first matching dialog's
+identity and stamp; changed screens, sensitive or lasting choices, permissions,
+plans and menus stay typed-only, with Cancel and Full screen.
 
-Tap-to-answer is deliberately absent. It would need positive proof that the numbered dialog is an
-AskUserQuestion, recorded by a PreToolUse hook before the question is shown; the installed hooks only
-include PostToolUse, which fires after the answer, so there is no proof and everything is typed-only.
+Only the paired owner in that session's topic can answer. Every tap rechecks the
+live dialog, the card and the proof, then atomically consumes that screen's proof
+before selecting the option through the same path as a typed answer. Repeated taps
+cannot answer twice. A verified checkbox toggle alone can advance a multi-select
+proof to the resulting screen. All other dialogs retain the existing typed path.
 
 The screen picture and keypad (inbox.menu_buttons) stay only as a last resort behind a small button.
 Everything shown is cleaned with creds.redact and progress.hide_signin first.
@@ -19,6 +23,7 @@ import hashlib
 import html
 import json
 import re
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -36,6 +41,7 @@ SEEN_GRACE = 20.0        # a dialog must be open this long before the watcher sh
 TYPED_TTL = 1800.0       # a typed-answer window closes by itself after 30 minutes
 CARD_LIMIT = 3900        # Telegram refuses a message over 4096 characters, counted after HTML escaping
 MAX_ANSWER = 2000
+BACKGROUND_GRACE = 20.0
 
 _OPT = re.compile(r"^\s*(?P<cur>[❯›])?\s*(?P<num>\d{1,2})[.)]\s+(?P<rest>\S.*)$")
 _SEP = re.compile(r"^[\s─━═_\-╌┄]+$")
@@ -56,6 +62,8 @@ _REMOTE_CAPACITY = re.compile(r"^\s*Capacity:\s*\d+/\d+\b", re.I)
 # What may sit under the hint row: the status line, never an input box or text.
 _STATUS_ROW = re.compile(r"(?i)^[⏵⏸⏯]|\d+\s*%|\btokens\b|\bcontext\b|\b(?:opus|sonnet|haiku)\b|plan mode|shift\+tab|\? for shortcuts|esc to interrupt|\b\d+s\b|\b\d+m\b")
 _TABS = re.compile(r"←.*→")
+_FORM_HEADER = re.compile(r"^[☐☑✔✓]\s+\S.*$")
+_FORM_TABS = re.compile(r"^←\s+(?:[☐☑✔✓]\s+[^←→☐☑✔✓]+?\s+)+→$")
 # An option that grants a lasting permission, trusts something, spends money or switches a mode: the card
 # says so. (Curly apostrophes are normalised first; wrapped rows are joined before matching.)
 _STANDING = re.compile(r"(?i)don'?t ask again|do not ask again|always|allow all|all future|auto-?accept|accept edits|"
@@ -88,7 +96,31 @@ _SENSITIVE = re.compile(
     r"publish\w*|public(?:ly)?|announce\w*|send (?:an? )?(?:e-?mail|message)|whatsapp|"
     r"app store|testflight|play store|play console|store submission|submit for review|app review)\b|₪|\$\s?\d"
     r"|הרשא|סיסמ|תשלום|מחיק|פרסו|פרודקשן|ייצור")
+# Actions a tap may never approve, on top of _SENSITIVE (owner rules: money, messaging people, publication,
+# production, destructive or repository-changing steps need typed words). Used only to withhold tap buttons,
+# so it may over-match freely without making every card red.
+_TAP_BLOCK = re.compile(
+    r"(?i)\b(?:buy\w*|order\w*|purchas\w*|transfer\w*|pay\w*|money|price\w*|cost\w*|domain|"
+    r"send\w*|sent|message\w*|notify\w*|e-?mail\w*|sms|reply|post(?:s|ed|ing)?|share\w*|invite\w*|"
+    r"merg\w*|push\w*|commit\w*|deploy\w*|ship\w*|migrat\w*|live|main|master|"
+    r"delet\w*|remov\w*|overwrit\w*|uninstall\w*|revok\w*|cancel\w*|"
+    r"approv\w*|grant\w*|permission\w*|allow\w*|admin\w*|sudo|install\w*)\b"
+    r"|שלח|שליח|הודע|לקנ|קנו|קנה|קני|רכיש|העבר|כסף|מחיר|תשלו|מזג|מיזוג|דחיפ|פריס|מחק|הסר|אישור|אשר|הרש")
 _ANSWER_LIKE = re.compile(r"^\d{1,2}(?:\s*[,\s]\s*\d{1,2})*$")
+# Claude renders this as a dim shortcut row, or beside its live spinner. The installed CLI also
+# advertises a doubled chord under tmux; send-keys still needs just one C-b.
+_BACKGROUND_HINT = re.compile(
+    r"(?i)^(?:[·•✢✳✶✻✽*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*"
+    r"(?:[a-z][a-z ]*(?:…|\.{3})\s*(?:\([^()\n]*?[·•]\s*)?)?)?"
+    r"\(?\s*ctrl\+b(?:\s+ctrl\+b)?(?:\s+\(?twice\)?)?\s+to run in background"
+    r"\s*\)?(?:\s*[·•|]\s*esc to interrupt\s*\)?)?$"
+)
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_BACKGROUND_SPINNER = re.compile(
+    r"^[✢✳✶✻✽*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+[A-Za-z]+(?:…|\.{3})\s+\(\d+s\s*·[^\n]*\)$"
+)
+_BACKGROUND_RULE = re.compile(r"^[─━═_-]{8,}(?:\s+.+?\s+[─━═_-]+)?$")
+_BACKGROUND_TOOL = re.compile(r"^(?:[⏺●]\s*[A-Za-z][\w:.-]*|Bash)\(.*")
 
 
 @dataclass
@@ -100,6 +132,7 @@ class Option:
     other: bool = False
     typed_only: bool = False
     confirm: bool = False
+    match_label: str = ""        # complete label for proof; display labels may be shortened
 
 
 @dataclass
@@ -123,6 +156,7 @@ class Dialog:
     stamp: str = ""
     identity: str = ""
     rows: List[str] = field(default_factory=list)
+    question_text: str = ""      # nearest complete paragraph, without form headers
 
 
 # --- reading the screen ---------------------------------------------------------------------
@@ -142,7 +176,7 @@ def _norm_row(row: str) -> str:
     return re.sub(r"^[│┃]\s?|\s?[│┃]$", "", row).rstrip()
 
 
-def hint_row_index(rows: List[str]) -> Optional[int]:
+def hint_row_index(rows: List[str], pattern=_REAL_HINT) -> Optional[int]:
     """Index of the dialog's key-hint row when it is the bottom of the screen: at most three status rows
     (never an input box, a prompt or other text) may follow it."""
     i, below = len(rows) - 1, 0
@@ -151,7 +185,7 @@ def hint_row_index(rows: List[str]) -> Optional[int]:
         if not text:
             i -= 1
             continue
-        if _REAL_HINT.match(text):
+        if pattern.fullmatch(text):
             if (_REMOTE_QR_HINT.fullmatch(text)
                     and any(_REMOTE_CONNECTED.search(r) for r in rows[:i])
                     and any(_REMOTE_CAPACITY.match(r) for r in rows[:i])):
@@ -165,7 +199,75 @@ def hint_row_index(rows: List[str]) -> Optional[int]:
 
 
 def bottom_hint(body: str) -> bool:
+    if background_screen(body):
+        return False  # a running command is not a typed-answer dialog
     return hint_row_index([_norm_row(r) for r in (body or "").splitlines()]) is not None
+
+
+_UNDER_SPINNER = re.compile(r"^(?:⎿|[☐☒◻◼✔✓□■]|…\s*\+\d+|Tip:)")
+
+
+def _background_hint_index(rows: List[str]) -> Optional[int]:
+    """Read the live footer upwards; never search the transcript for a shortcut."""
+    footer = hint_row_index(rows, _BACKGROUND_HINT)
+    if footer is not None:
+        # Older/synthetic layouts put the hint in the spinner or in a bare footer.
+        if not any(_BACKGROUND_SPINNER.fullmatch(r.strip()) for r in rows[footer + 1:]):
+            return footer
+        return None
+
+    i, statuses = len(rows) - 1, 0
+
+    def skip_blanks(index):
+        while index >= 0 and not rows[index].strip():
+            index -= 1
+        return index
+
+    i = skip_blanks(i)
+    while i >= 0 and not _SEP.fullmatch(rows[i].strip()):
+        if statuses >= 3 or not _STATUS_ROW.search(rows[i].strip()):
+            return None
+        statuses += 1
+        i = skip_blanks(i - 1)
+    if i < 0 or not _BACKGROUND_RULE.fullmatch(rows[i].strip()):
+        return None
+    i -= 1  # bottom input rule
+    if i < 0 or not rows[i].strip().startswith("❯"):
+        return None
+    while i >= 0 and rows[i].strip().startswith("❯"):
+        i -= 1
+    if i < 0 or not _BACKGROUND_RULE.fullmatch(rows[i].strip()):
+        return None
+    i = skip_blanks(i - 1)  # top input rule, optionally carrying a title
+    # Claude Code may draw its task list or a tip under the spinner: skip a few such rows.
+    extra = 0
+    while i >= 0 and extra < 12 and _UNDER_SPINNER.match(rows[i].strip()):
+        extra += 1
+        i = skip_blanks(i - 1)
+    if i < 0 or not _BACKGROUND_SPINNER.fullmatch(rows[i].strip()):
+        return None
+    i = skip_blanks(i - 1)
+    return i if i >= 0 and _BACKGROUND_HINT.fullmatch(rows[i].strip()) else None
+
+
+def background_screen(body: str) -> bool:
+    """A live running-command shortcut, with parsed dialogs taking priority."""
+    body = _ANSI.sub("", body or "")
+    rows = [_norm_row(r) for r in body.splitlines()]
+    return _background_hint_index(rows) is not None and parse(body) is None
+
+
+def _background_fingerprint(body: str) -> str:
+    """Bind the shortcut to the nearest tool call, ignoring styling and spinner ticks."""
+    rows = [_norm_row(r) for r in _ANSI.sub("", body or "").splitlines()]
+    hint = _background_hint_index(rows)
+    if hint is not None:
+        for row in reversed(rows[:hint]):
+            text = row.strip()
+            if _BACKGROUND_TOOL.match(text):
+                text = re.sub(r"^[⏺●]\s*", "", text)
+                return hashlib.sha256(re.sub(r"\s+", " ", text).encode()).hexdigest()
+    return ""
 
 
 def _unparsed_rows(body: str) -> List[str]:
@@ -270,7 +372,7 @@ def parse(body: str) -> Optional[Dialog]:
         label = _label_of(rest)
         options.append(Option(num=num, label=label[:80], checked=checked, cursor=cur,
                               other=bool(_OTHER.match(label)), typed_only=bool(_STANDING.search(label + " " + cont)),
-                              confirm=checked is None and bool(_CONFIRM_ROW.match(label))))
+                              confirm=checked is None and bool(_CONFIRM_ROW.match(label)), match_label=label))
     if re.search(r"(?i)\bspace\b.*\b(?:select|toggle)", hint) or submit is not None:
         multi = True
     # selectable rows in screen order, and where the selector stands
@@ -344,6 +446,15 @@ def parse(body: str) -> Optional[Dialog]:
     stamp_src = "\n".join(r.strip() for r in rows[near:end])
     shown = "\n".join(r.strip() for r in rows[near:first_row]) if perm else ""
     para = " ".join(r.strip() for r in rows[near:first_row])
+    # Form tabs/headers may immediately precede the question, without a blank row.
+    # Keep them in stamp/identity, but never mistake their labels for question text.
+    proof_start = near
+    while proof_start < first_row:
+        row = rows[proof_start].strip()
+        if row and not (_FORM_TABS.fullmatch(row) or _FORM_HEADER.fullmatch(row)):
+            break
+        proof_start += 1
+    question_text = " ".join(r.strip() for r in rows[proof_start:first_row] if r.strip())
     labels = "|".join(re.sub(r"[^a-z0-9]+", " ", o.label.lower()).strip() for o in options if not o.other)
     ident_src = (f"{re.sub(r'[^a-z0-9]+', ' ', para.lower()).strip()}|{len(options)}|{labels}|"
                  f"{hashlib.sha256(shown.encode()).hexdigest()}")
@@ -351,7 +462,7 @@ def parse(body: str) -> Optional[Dialog]:
                   plan=bool(_PLAN.search(perm_text)), perm=perm, cut=cut, preview=preview, submit=submit[0] if submit else None,
                   nav=nav, cursor_at=cursor_at, hint=hint, tabs=tabs, body=_norm_text(body or ""),
                   stamp=hashlib.sha256(stamp_src.encode("utf-8")).hexdigest()[:12],
-                  identity=hashlib.sha256(ident_src.encode()).hexdigest()[:12], rows=rows)
+                  identity=hashlib.sha256(ident_src.encode()).hexdigest()[:12], rows=rows, question_text=question_text)
 
 
 # The spinner row of a running /compact: "✻ Compacting conversation… (23s · ↓ 1.2k tokens · esc to interrupt)".
@@ -541,11 +652,9 @@ def _norm_label(text: str) -> str:
     return " ".join(_norm_text(text).split())
 
 
-def _alnum(text: str) -> str:
-    return re.sub(r"[^a-z0-9\u0590-\u05ff]+", "", _norm_text(text).lower())
-
-
-_BUILTIN_ROW = re.compile(r"(?i)^(?:chat about this|type something|skip)")
+_BUILTIN_ROW = re.compile(r"(?i)^(?:chat about this|type something\.?|skip)$")
+_MENU_HEADER = re.compile(r"(?i)^(?:/(?:model|config|permissions|theme|help)\b.*|"
+                          r"(?:select|choose) (?:a |the )?(?:model|theme|permission mode)|settings(?: menu)?)$")
 
 
 def proof_for(session: str, d: Optional[Dialog]) -> Optional[dict]:
@@ -553,35 +662,40 @@ def proof_for(session: str, d: Optional[Dialog]) -> Optional[dict]:
 
     Positive proof only: the PreToolUse hook recorded this session's call, the pane's options equal one
     recorded question's options exactly and in order (only the built-in rows may follow them), the recorded
-    question text is on the screen, and multiSelect agrees with the pane. Pane text alone proves nothing.
+    complete question paragraph matches exactly, and multiSelect agrees with the pane. A first match binds
+    the proof to this identity and stamp. Pane text alone proves nothing.
     Rule C wins: a sensitive, lasting-grant, trust, plan or permission dialog is never answered by a tap, and
     neither is a recorded question or option that matches those words."""
-    if d is None or not session or d.sensitive or d.lasting or d.trust or d.plan or d.perm:
+    if (d is None or not session or not d.question_text.strip()
+            or d.sensitive or d.lasting or d.trust or d.plan or d.perm
+            or _MENU_HEADER.fullmatch(_norm_label(d.question_text))):
         return None
     rec = asks.load(session)
     if not rec:
         return None
-    shown = _alnum("\n".join(d.rows))
     for q in rec["questions"]:
         try:
-            labels = [_norm_label(x)[:80] for x in q["options"]]
+            labels = [_norm_label(x) for x in q["options"]]
             text, multi = q["question"], bool(q["multiSelect"])
         except (KeyError, TypeError):
             continue
         k = len(labels)
         if (not isinstance(text, str) or k < 2 or k > len(d.options) or multi != d.multi
-                or [_norm_label(o.label) for o in d.options[:k]] != labels
+                or [_norm_label(o.match_label or o.label) for o in d.options[:k]] != labels
                 or [o.num for o in d.options[:k]] != list(range(1, k + 1))
                 or any(o.other or o.confirm for o in d.options[:k])):
             continue
         if not all(o.other or o.confirm or _BUILTIN_ROW.match(o.label) for o in d.options[k:]):
             continue
-        if _alnum(text) not in shown:
+        if not text.strip() or _norm_label(text) != _norm_label(d.question_text):
             continue
         blob = text + "\n" + "\n".join(q["options"])
-        if _SENSITIVE.search(blob) or _STANDING.search(_norm_text(blob)) or _SECRET_PATH.search(blob):
+        if (_SENSITIVE.search(blob) or _TAP_BLOCK.search(blob) or _STANDING.search(_norm_text(blob))
+                or _SECRET_PATH.search(blob)):
             continue
-        return q
+        if any(o.typed_only for o in d.options):
+            continue
+        return asks.bind(session, q, d.identity, d.stamp)
     return None
 
 
@@ -810,6 +924,8 @@ def send_card(cfg: Config, bot, session: str, thread, translate: bool = False, s
     `chat`: the project group of the topic (None = the home chat)."""
     from . import inbox as I
     pane, body, d, is_open = open_screen(session)
+    if background_screen(body) and not I._dialog_open(body, session):
+        return False  # this shortcut has its own silent card and never enables typed answers
     loose = False
     if not is_open:
         # A menu the strict reader does not know (no hint row): shown as text with Cancel, never typed into.
@@ -833,6 +949,7 @@ def send_card(cfg: Config, bot, session: str, thread, translate: bool = False, s
     keep_text = bool(old.get("text_mode") and old.get("identity") == ident_now)  # "Other" stays open
     rec_set(session, {"identity": ident_now, "stamp": stamp, "message_id": mid, "thread": thread,
                       "sent_at": time.time(), "typed": True, "sensitive": bool(d and d.sensitive),
+                      "proof": proof.get("_record") if proof else None,
                       "unparsed": d is None, "multi": bool(d and d.multi), "loose": loose,
                       "options": [{"num": o.num, "label": o.label, "confirm": o.confirm, "other": o.other}
                                   for o in (d.options if d else [])],
@@ -1029,7 +1146,8 @@ def _answered_text(lang: str, labels: List[str]) -> str:
 def _card_live(session, pane, body, d, is_open, rec, stamp) -> bool:
     """The card's screen is still the screen it was made for: same stamp, same identity, still open."""
     cur = d.stamp if d else stamp_of(body)
-    return bool(pane and stamp and stamp == cur and rec and rec.get("identity") == _identity_of(d, body)
+    return bool(pane and stamp and stamp == cur and rec and rec.get("stamp") == stamp
+                and rec.get("identity") == _identity_of(d, body)
                 and (rec.get("unparsed") or d is not None) and (is_open or rec.get("loose")))
 
 
@@ -1044,7 +1162,8 @@ def _refresh_card(cfg, bot, session, mid, lang, chat: Optional[int] = None) -> N
     _edit(bot, cfg, mid, card_text(d, body, lang, proof=pr), kb, chat=chat)
     rec = rec_get(session)
     if rec:
-        rec_set(session, dict(rec, identity=_identity_of(d, body), stamp=d.stamp if d else stamp_of(body)))
+        rec_set(session, dict(rec, identity=_identity_of(d, body), stamp=d.stamp if d else stamp_of(body),
+                              proof=pr.get("_record") if pr else None))
 
 
 def button(q: dict, cfg: Config, bot, m: dict, session: str) -> str:
@@ -1063,6 +1182,15 @@ def button(q: dict, cfg: Config, bot, m: dict, session: str) -> str:
 
     def toast(key: str, **kw):
         I._answer_button(bot, q, t(key, lang=lang, **kw))
+
+    found = place(cfg, session)
+    if ((q.get("from") or {}).get("id") != cfg.owner_user_id or (q.get("from") or {}).get("is_bot")
+            or not found or found.chat != (m.get("chat") or {}).get("id") or found.thread != thread):
+        toast("toast_not_available")
+        return "ignored"
+
+    if action == "b":
+        return _background_button(q, cfg, bot, m, session)
 
     if action == "s":  # the last resort: the raw screen with the keypad
         pane = I.pane_for_session(session)
@@ -1110,11 +1238,15 @@ def button(q: dict, cfg: Config, bot, m: dict, session: str) -> str:
             _refresh_card(cfg, bot, session, mid, lang, chat=chat)
         return "dialog-key"
     # answer buttons: positive proof, checked again now
+    if (rec.get("thread") != thread or rec.get("chat") != chat or rec.get("message_id") != mid):
+        toast("toast_question_closed")
+        return "stale"
     proof = proof_for(session, d)
     num = int(parts[2]) if len(parts) > 3 and parts[2].isdigit() else 0
     k = len(proof["options"]) if proof else 0
     opt = next((o for o in (d.options if d else []) if o.num == num), None)
-    if proof is None or (action in ("o", "x", "t") and opt is None) or (action != "d" and parts[-1] != d.stamp):
+    if (proof is None or rec.get("proof") != proof.get("_record")
+            or (action in ("o", "x", "t") and opt is None) or (action != "d" and parts[-1] != d.stamp)):
         toast("dlg_toast_typed")
         return "typed-required"
     if action == "o" and (d.multi or num > k or opt.other or opt.typed_only):
@@ -1129,6 +1261,16 @@ def button(q: dict, cfg: Config, bot, m: dict, session: str) -> str:
     if action == "d" and not d.multi:
         toast("dlg_toast_typed")
         return "typed-required"
+    if not asks.claim(session, proof, ident, stamp):
+        toast("toast_question_closed")
+        return "stale"
+    # A lock wait or a card refresh must not leave the earlier pane read authoritative.
+    live_pane, live_body, live_d, live_open = open_screen(session)
+    live_rec = rec_get(session)
+    if (live_pane != pane or not _card_live(session, live_pane, live_body, live_d, live_open, live_rec, stamp)
+            or live_rec.get("message_id") != mid or live_rec.get("proof") != proof["_record"]):
+        toast("toast_question_closed")
+        return "stale"
     if action == "o":
         if not _answer(session, pane, d, num):
             toast("toast_not_available")
@@ -1146,10 +1288,12 @@ def button(q: dict, cfg: Config, bot, m: dict, session: str) -> str:
         _say(bot, cfg, thread, t("dlg_text_prompt", lang=lang), chat=chat)
         return "dialog-other"
     if action == "t":
-        if _toggle(session, pane, d, num) is None:  # every key is verified on the screen; a mismatch stops here
+        toggled = _toggle(session, pane, d, num)
+        if toggled is None:  # every key is verified on the screen; a mismatch stops here
             toast("toast_not_available")
             _refresh_card(cfg, bot, session, mid, lang, chat=chat)
             return "ignored"
+        asks.advance(session, proof, toggled.identity, stamp, toggled.stamp)
         toast("toast_key_sent", name=str(num))
         _refresh_card(cfg, bot, session, mid, lang, chat=chat)
         return "dialog-toggle"
@@ -1337,6 +1481,123 @@ _first_seen: dict = {}
 _watch_lock = threading.Lock()
 
 
+def _background_suppressed(session: str) -> bool:
+    from . import compact, inbox as I
+    return compact.just_started(session) or I.recently_moving(session)
+
+
+def _background_card(cfg, bot, session: str, thread, pane: str, fingerprint: str,
+                     now: float, chat=None) -> bool:
+    """One silent card per command. Keep state in the existing session record."""
+    rec = rec_get(session)
+    if (rec.get("kind") != "background" or rec.get("pane") != pane
+            or rec.get("fingerprint") != fingerprint):
+        _drop_keyboard(bot, cfg, rec)
+        rec = {"kind": "background", "pane": pane, "fingerprint": fingerprint,
+               "first_seen": now, "thread": thread,
+               "stamp": hashlib.sha256(f"{session}:{time.time_ns()}".encode()).hexdigest()[:12],
+               **({} if chat is None else {"chat": chat})}
+        rec_set(session, rec)
+    if (rec.get("sending") or rec.get("consumed")
+            or (rec.get("message_id") is not None and not rec.get("retry"))
+            or now - rec["first_seen"] < BACKGROUND_GRACE):
+        return False
+    lang = _lang(cfg)
+    kb = {"inline_keyboard": [[{"text": t("bg_btn", lang=lang), "callback_data": f"dg:b:{rec['stamp']}"}]]}
+    mid = _send(bot, cfg, thread, t("bg_card", lang=lang), kb, silent=True, chat=chat)
+    if mid is None:
+        return False
+    rec_set(session, dict(rec, message_id=mid, retry=False))
+    return True
+
+
+def _background_button(q, cfg, bot, m: dict, session: str) -> str:
+    """Claim the card, recheck its command, and consume it only after sending C-b."""
+    from . import inbox as I
+
+    def toast(key):
+        I._answer_button(bot, q, t(key, lang=_lang(cfg)))
+
+    rec = rec_get(session)
+    stamp = (q.get("data") or "").split(":")[-1]
+    if (rec.get("kind") != "background" or rec.get("stamp") != stamp or rec.get("consumed")
+            or rec.get("sending") or rec.get("message_id") != m.get("message_id")):
+        toast("bg_toast_stale")
+        return "stale"
+
+    sent = False
+    claim_token = f"{threading.get_ident()}:{time.time_ns()}"
+
+    def finish(key, result):
+        def release(data):
+            cur = data.get(session, {})
+            if (cur.get("stamp") == stamp and cur.get("message_id") == rec.get("message_id")
+                    and (cur.get("sending") == claim_token
+                         or (not cur.get("sending") and not cur.get("consumed")))):
+                data[session] = dict(cur, sending=False, consumed=sent, retry=not sent)
+                return True
+            return False
+        if _update(release):
+            text_key = "bg_card_finished" if key == "bg_toast_stale" else key
+            _edit(bot, cfg, rec["message_id"], t(text_key, lang=_lang(cfg)), chat=rec.get("chat"))
+            _drop_keyboard(bot, cfg, rec)
+        toast(key)
+        return result
+
+    pane, body, d, is_open = open_screen(session)
+    if (not pane or pane != rec.get("pane") or d is not None or is_open
+            or _background_suppressed(session) or I._dialog_open(body, session)
+            or not background_screen(body) or not rec.get("fingerprint")
+            or _background_fingerprint(body) != rec["fingerprint"]):
+        return finish("bg_toast_stale", "stale")
+
+    def claim(data):
+        cur = data.get(session, {})
+        if (cur.get("kind") != "background" or cur.get("stamp") != stamp
+                or cur.get("message_id") != m.get("message_id") or cur.get("consumed")
+                or cur.get("sending") or cur.get("fingerprint") != rec["fingerprint"]):
+            return False
+        data[session] = dict(cur, sending=claim_token)
+        return True
+
+    if not _update(claim):
+        toast("bg_toast_stale")
+        return "stale"
+
+    # Nothing that calls Telegram sits between this final screen read and the one allowed key.
+    try:
+        live_pane, body, d, is_open = open_screen(session)
+    except Exception:
+        return finish("bg_toast_failed", "background-failed")
+    if (live_pane != pane or d is not None or is_open or _background_suppressed(session)
+            or I._dialog_open(body, session) or not background_screen(body)
+            or _background_fingerprint(body) != rec["fingerprint"]):
+        return finish("bg_toast_stale", "stale")
+    try:
+        sent = _keys(pane, "C-b")
+    except (OSError, subprocess.SubprocessError):
+        sent = False
+    if not sent:
+        return finish("bg_toast_failed", "background-failed")
+
+    def consume(data):
+        cur = data.get(session, {})
+        if cur.get("sending") == claim_token:
+            data[session] = dict(cur, consumed=True)
+    _update(consume)
+    for _ in range(6):
+        time.sleep(0.5)
+        try:
+            live_pane, body, _d, _open = open_screen(session)
+        except Exception:
+            break
+        if live_pane != pane or not body:
+            break  # losing the pane is not proof that the command moved
+        if not background_screen(body) or _background_fingerprint(body) != rec["fingerprint"]:
+            return finish("bg_toast_done", "background")
+    return finish("bg_toast_failed", "background-failed")
+
+
 def remind(cfg: Config, bot, topics, now: Optional[float] = None) -> int:
     """One pass over the sessions that work or wait: show a dialog nobody has been told about, re-show
     one that is still open every REMIND_EVERY seconds, and retire the card of one that was answered
@@ -1359,7 +1620,20 @@ def remind(cfg: Config, bot, topics, now: Optional[float] = None) -> int:
         except Exception:
             continue
         if not pane:
+            if rec.get("kind") == "background":
+                _drop_keyboard(bot, cfg, rec)
+                rec_del(session)
             continue
+        if (not d and not is_open and not _background_suppressed(session)
+                and not I._dialog_open(body, session) and background_screen(body)
+                and (fingerprint := _background_fingerprint(body))):
+            _first_seen.pop(session, None)
+            sent += int(_background_card(cfg, bot, session, thread, pane, fingerprint, now, chat=chat))
+            continue
+        if rec.get("kind") == "background":
+            _drop_keyboard(bot, cfg, rec)
+            rec_del(session)
+            rec = {}
         if not is_open:
             if rec:
                 _drop_keyboard(bot, cfg, rec)

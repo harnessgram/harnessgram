@@ -170,3 +170,11 @@ def test_changed_files_and_enabled_footers(tmp_path, monkeypatch):
     context = usage.context_footer(str(path), Config(context_footer=True, ui_language="en"))
     assert "450" in context and "file0.py" in context and "Sample" in context
     assert "file4.py" not in context
+
+
+def test_a_bracket_inside_a_short_english_name_stays_outside_the_isolates():
+    from ctb import fmt as _f
+    out = _f.unmix("כנראה בגלל התזמון. Codex (gpt-6.1-sol, מאמץ גבוה) מחפש עכשיו.")
+    assert "⁨Codex⁩ (⁨gpt-6.1-sol⁩, מאמץ גבוה)" in out
+    for run in out.split("⁨")[1:]:
+        assert not any(b in run.split("⁩")[0] for b in "()[]")

@@ -10,6 +10,7 @@ and FLV tags sent as RTMP messages. Enough for Telegram's RTMP live streams and 
 from __future__ import annotations
 
 import os
+import queue
 import socket
 import ssl
 import struct
@@ -21,6 +22,16 @@ from urllib.parse import urlsplit
 CHUNK = 4096
 HANDSHAKE = 1536
 TIMEOUT = 15
+LEAD_SECONDS = 1.5      # media held ahead of the ingest, so an encoder stall never reaches Telegram as a burst
+MAX_QUEUED_TAGS = 4000  # about 30 s of radio media; the reader blocks (ffmpeg's pipe fills) beyond it
+
+
+def lead_seconds() -> float:
+    """CTB_RADIO_LEAD_SECONDS (0..5) overrides the default lead; 0 forwards each tag at once (the old way)."""
+    try:
+        return min(5.0, max(0.0, float(os.environ.get("CTB_RADIO_LEAD_SECONDS", LEAD_SECONDS))))
+    except ValueError:
+        return LEAD_SECONDS
 
 
 class RtmpError(Exception):
@@ -137,6 +148,10 @@ class Publisher:
         self._txn = 0
         self.sent_bytes = 0
         self._wlock = threading.Lock()
+        self.diag = None
+        self.lead = 0.0          # seconds of jitter buffer; the radio sets lead_seconds()
+        self.clock = time.monotonic
+        self.late_resyncs = 0    # times the encoder fell further behind than the lead
 
     # --- low level
     def _open(self) -> None:
@@ -323,6 +338,9 @@ class Publisher:
             raise RtmpError("the encoder did not produce FLV")
         skip = struct.unpack(">I", header[5:9])[0] - 9 + 4  # the rest of the header and PreviousTagSize0
         _read_exact(stream, skip)
+        if self.lead > 0:
+            return self._send_paced(stream, stop)
+        diag = self.diag
         while not (stop and stop.is_set()):
             if self._closed:
                 raise RtmpError(self._error or "connection lost")
@@ -335,11 +353,140 @@ class Publisher:
             size = int.from_bytes(tag[1:4], "big")
             ts = int.from_bytes(tag[4:7], "big") | (tag[7] << 24)
             data = _read_exact(stream, size)
-            _read_exact(stream, 4)  # PreviousTagSize
-            if kind == 18:
-                self.message(4, 18, amf_encode("@setDataFrame") + data, ts, self._stream_id)
-            elif kind in (8, 9):
-                self.message(4 if kind == 8 else 6, kind, data, ts, self._stream_id)
+            _read_exact(stream, 4)
+            if diag:
+                row = diag.call("tag", {8: "audio", 9: "video", 18: "script"}.get(kind, f"other:{kind}"),
+                                ts, time.monotonic(), size)
+                if kind in (8, 9, 18):
+                    diag.call("sent", row, "send_start_monotonic", time.monotonic())
+            try:
+                if kind in (8, 9, 18):
+                    if kind == 18:
+                        self.message(4, 18, amf_encode("@setDataFrame") + data, ts, self._stream_id)
+                    else:
+                        self.message(4 if kind == 8 else 6, kind, data, ts, self._stream_id)
+            finally:
+                if diag and kind in (8, 9, 18):
+                    diag.call("sent", row, "send_end_monotonic", time.monotonic())
+
+    def _forward(self, kind: int, data: bytes, ts: int) -> None:
+        if kind == 18:
+            self.message(4, 18, amf_encode("@setDataFrame") + data, ts, self._stream_id)
+        elif kind in (8, 9):
+            self.message(4 if kind == 8 else 6, kind, data, ts, self._stream_id)
+
+    def _send_paced(self, stream: BinaryIO, stop: Optional[threading.Event]) -> None:
+        """Jitter buffer: a reader thread queues tags as ffmpeg emits them; this thread sends each one at
+        anchor + its timestamp, with the anchor set `lead` seconds after the first tag was read. Encoder stalls
+        shorter than the lead are absorbed, so the ingest sees a steady real-time stream instead of bursts."""
+        diag = self.diag
+        tags: "queue.Queue" = queue.Queue(maxsize=MAX_QUEUED_TAGS)
+        done = threading.Event()
+        END = object()
+
+        def read() -> None:
+            try:
+                while not done.is_set():
+                    head = stream.read(11)
+                    if not head:
+                        break
+                    if len(head) < 11:
+                        head += _read_exact(stream, 11 - len(head))
+                    kind = head[0] & 0x1F
+                    size = int.from_bytes(head[1:4], "big")
+                    ts = int.from_bytes(head[4:7], "big") | (head[7] << 24)
+                    data = _read_exact(stream, size)
+                    _read_exact(stream, 4)
+                    row = None
+                    if diag:
+                        row = diag.call("tag", {8: "audio", 9: "video", 18: "script"}.get(kind, f"other:{kind}"),
+                                        ts, time.monotonic(), size)
+                    while not done.is_set():
+                        try:
+                            tags.put((kind, data, ts, self.clock(), row), timeout=0.5)
+                            break
+                        except queue.Full:
+                            continue
+            except Exception as e:  # noqa: BLE001 - handed to the sending thread
+                _hand_over(e)
+                return
+            _hand_over(END)
+
+        def _hand_over(item):
+            # never block on a full queue: once the sender has stopped reading (done), nobody would ever drain it
+            while not done.is_set():
+                try:
+                    tags.put(item, timeout=0.5)
+                    return
+                except queue.Full:
+                    continue
+
+        tap = _open_tap()
+        if tap is not None:
+            inner = read
+
+            def read() -> None:  # noqa: F811 - the same reader, also copying the bytes to the tap file
+                stream_read = stream.read
+                deadline, out = tap
+
+                def copy(n):
+                    data = stream_read(n)
+                    if data and time.monotonic() < deadline:
+                        try:
+                            out.write(data)
+                        except OSError:
+                            pass
+                    return data
+                stream.read = copy
+                try:
+                    inner()
+                finally:
+                    try:
+                        out.close()
+                    except OSError:
+                        pass
+        reader = threading.Thread(target=read, daemon=True, name="rtmp-reader")
+        reader.start()
+        anchor = None
+        try:
+            while not (stop and stop.is_set()):
+                if self._closed:
+                    raise RtmpError(self._error or "connection lost")
+                try:
+                    item = tags.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if item is END:
+                    return
+                if isinstance(item, Exception):
+                    if isinstance(item, EOFError):
+                        return
+                    raise item
+                kind, data, ts, read_at, row = item
+                if anchor is None:
+                    anchor = read_at + self.lead - ts / 1000.0
+                due = anchor + ts / 1000.0
+                wait = due - self.clock()
+                if wait < -self.lead:
+                    # The encoder fell further behind than the whole lead: start a new timeline from now
+                    # rather than sending a long backlog at once.
+                    self.late_resyncs += 1
+                    anchor = self.clock() - ts / 1000.0
+                elif wait > 0:
+                    if stop is not None:
+                        if stop.wait(wait):
+                            return
+                    else:
+                        time.sleep(wait)
+                if diag and row is not None and kind in (8, 9, 18):
+                    diag.call("sent", row, "send_start_monotonic", time.monotonic())
+                try:
+                    self._forward(kind, data, ts)
+                finally:
+                    if diag and row is not None and kind in (8, 9, 18):
+                        diag.call("sent", row, "send_end_monotonic", time.monotonic())
+        finally:
+            done.set()
 
     def close(self) -> None:
         with self._cv:
@@ -359,6 +506,31 @@ class Publisher:
             self._sock.close()
         except OSError:
             pass
+
+
+TAP_KEEP = 3  # newest tap files kept, the one being written included
+
+
+def _open_tap():
+    """Opt-in (CTB_RADIO_TAP_SECONDS, 1..120): copy the first seconds of the outgoing FLV to a private file in the
+    radio folder, to check by ear or transcript exactly what the ingest receives. No URL or key is ever in it."""
+    try:
+        seconds = min(120, max(0, int(os.environ.get("CTB_RADIO_TAP_SECONDS", "0"))))
+    except ValueError:
+        return None
+    if not seconds:
+        return None
+    try:
+        from .radio import folder
+        for old in sorted(folder().glob("radio-tap-*.flv"), key=lambda f: f.stat().st_mtime, reverse=True)[TAP_KEEP - 1:]:
+            old.unlink(missing_ok=True)  # keep only the newest captures, so a tap left on never fills the disk
+        path = folder() / ("radio-tap-%d.flv" % int(time.time()))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        out = os.fdopen(fd, "wb")
+        out.write(b"FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00")  # the header the sender already consumed
+        return time.monotonic() + seconds, out
+    except OSError:
+        return None
 
 
 def _read_exact(stream: BinaryIO, n: int) -> bytes:

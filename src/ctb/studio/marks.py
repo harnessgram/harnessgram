@@ -74,12 +74,13 @@ def _load(state_fd: int) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _clean_project(raw, sentences: int) -> dict:
+def _clean_project(raw, sentence_ids) -> dict:
     out = {}
     if not isinstance(raw, dict):
         return out
+    sentence_ids = set(sentence_ids)
     for k, v in raw.items():
-        if not (isinstance(k, str) and k.isdigit() and 1 <= int(k) <= sentences and isinstance(v, dict)):
+        if not (isinstance(k, str) and k.isdigit() and int(k) in sentence_ids and isinstance(v, dict)):
             continue
         mark = v.get("mark")
         if mark not in MARKS:
@@ -108,13 +109,13 @@ def _open_lock(state_fd: int) -> int:
 def get(folder, pid: str) -> dict:
     """The marks of one video ({} when there are none, or when the API runs without its app folder). Read-only."""
     proj = provider.project(pid)
-    if not folder or proj is None:
+    if not folder or proj is None or proj.get("notice"):
         return {}
     fd = _open_state(folder, create=False)
     if fd is None:
         return {}
     try:
-        return _clean_project(_load(fd).get(pid), len(proj["sentences"]))
+        return _clean_project(_load(fd).get(pid), (s["i"] for s in proj["sentences"]))
     finally:
         os.close(fd)
 
@@ -144,8 +145,10 @@ def set_mark(folder, pid, i, mark, text=None) -> dict:
     proj = provider.project(pid)
     if proj is None:
         raise MarkError("not_found")
-    count = len(proj["sentences"])
-    if not 1 <= i <= count:
+    if proj.get("notice"):
+        raise MarkError("unavailable")  # never attach invented sample sentences to a real production
+    sentence_ids = {s["i"] for s in proj["sentences"]}
+    if i not in sentence_ids:
         raise MarkError("bad_request")
     fd = _open_state(folder, create=True)
     try:
@@ -153,7 +156,7 @@ def set_mark(folder, pid, i, mark, text=None) -> dict:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
             data = _load(fd)
-            mine = _clean_project(data.get(pid), count)
+            mine = _clean_project(data.get(pid), sentence_ids)
             if mark == "clear":
                 mine.pop(str(i), None)
             else:

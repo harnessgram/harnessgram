@@ -77,7 +77,7 @@ Add a `"radio"` object to `config.json`. The radio stays off until it is configu
 | `tts_daily_minutes` | 25 | Daily cap of paid speech; 0 = system voice only |
 | `say_voice` | Carmit for Hebrew | The free system voice |
 | `every_minutes` | 20 | Least time between updates that are not urgent |
-| `bed`, `bed_db` | `pad`, -30 | Background between updates (`pad` or `silence`) and its level |
+| `bed`, `bed_db` | `off`, -30 | Background between updates: `off` is true digital silence (the default); `pad` is an optional soft chord drone, about -45 dBFS RMS at -30 |
 | `ledger_dir` | none | Folder of `<project>.json` ledgers (`items` with `status`, `wait`, `updated`) |
 | `quota_command` | none | Prints lines like `Codex: 5h 79%`; run every 5 minutes |
 | `project_names` | none | Spoken names of the ledger projects |
@@ -264,3 +264,13 @@ One-time setup for the Cockpit sign-in (a developer step, done once):
 3. Its id and secret in the Keychain, next to the radio's own items (service `harnessgram.radio-youtube`, or the
    configured `keychain_service`), accounts `web-client-id` and `web-client-secret`. Until both exist the card
    says setup is pending.
+
+### Stream diagnostics
+
+For a bounded capture at the start of a connection, set `CTB_RADIO_DIAG_SECONDS` in the radio process environment
+to a positive whole number (maximum 120). It is off by default. After the window, a background thread writes
+one uniquely named `radio-diag-*.json` file per connection in the radio state folder, with owner-only permissions.
+The file contains timing and size metadata, never media data. Capture is limited to 100,000 timing rows;
+samples may also be dropped under contention. A send still in progress at the end of the window has no end time
+in the report. Run `ctb radio diag-report <path-to-json>` to summarize FLV audio gaps, read bursts, slow sends,
+and audio/video writer lag. Remove the environment setting to disable it.

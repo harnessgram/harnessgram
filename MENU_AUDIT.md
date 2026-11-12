@@ -4,10 +4,11 @@ Each line denotes a keyboard construction site; empty keyboards that remove butt
 
 - src/ctb/agents_card.py:206 — render — close
 - src/ctb/alerts.py:364 — propose — not-now
-- src/ctb/alerts.py:422 — _button — EXEMPT: channel post link, not a menu.
-- src/ctb/alerts.py:424 — _button — EXEMPT: channel post link, not a menu.
-- src/ctb/alerts.py:567 — show — close
-- src/ctb/alerts.py:615 — button — close
+- src/ctb/alerts.py:434 — _button — EXEMPT: channel post link, not a menu.
+- src/ctb/alerts.py:436 — _button — EXEMPT: channel post link, not a menu.
+- src/ctb/alerts.py:438 — _button — EXEMPT: channel post link, not a menu.
+- src/ctb/alerts.py:582 — show — close
+- src/ctb/alerts.py:630 — button — close
 - src/ctb/board.py:325 — _sync — EXEMPT: permanent pinned board; closing would remove its controls.
 - src/ctb/board.py:335 — _sync — EXEMPT: permanent pinned board; closing would remove its controls.
 - src/ctb/dashboard.py:167 — stuck_check — not-now
@@ -48,7 +49,6 @@ Each line denotes a keyboard construction site; empty keyboards that remove butt
 - src/ctb/members.py:99 — request — not-now
 - src/ctb/members.py:114 — member list and retry — close / not-now; empty rows remove the keyboard
 - src/ctb/members.py:140 — show — close
-- src/ctb/mirror.py:103 — reply_keyboard — EXEMPT: fixed topic reply keyboard, not a transient menu.
 - src/ctb/mirror.py:118 — fixed_keyboard — EXEMPT: fixed topic reply keyboard, not a transient menu.
 - src/ctb/mirror.py:919 — _yes_no_keyboard — not-now
 - src/ctb/mirror.py:2171 — limit_offer — not-now
@@ -56,6 +56,7 @@ Each line denotes a keyboard construction site; empty keyboards that remove butt
 - src/ctb/moves.py:167 — suggest — cancel
 - src/ctb/panel_pin.py:97 — _markup — EXEMPT: permanent pinned topic link, not a menu.
 - src/ctb/cockpit_notice.py:66 — update — EXEMPT: one link to the open Cockpit question; the notice closes itself once answered.
+- src/ctb/dialogs.py:1506 — _background_card — EXEMPT: one Move to background button; the card clears itself when the command ends or after the tap.
 - src/ctb/sessions_menu.py:260 — list_view — close
 - src/ctb/sessions_menu.py:286 — detail_view — back
 - src/ctb/sessions_menu.py:291 — _confirm — cancel
@@ -67,5 +68,6 @@ Each line denotes a keyboard construction site; empty keyboards that remove butt
 - src/ctb/panel_page.py:1237 — YouTube start confirmation — cancel
 - src/ctb/panel_page.py:1229 — YouTube project choices (always inline) — EXEMPT: always-visible inline settings, not a dismissible picker.
 - src/ctb/panel_page.py:1187 — native date picker — EXEMPT: native date picker is dismissed by the operating system.
+- src/ctb/panel_page.py:2043 — bottom bar More sheet — back (its More button toggles it; an outside tap or a tab choice closes it)
 - src/ctb/panel_page.py:1044 — session details — back (native details summary toggles)
 - src/ctb/panel_page.py:1310 — model choices (always inline) — EXEMPT: always-visible inline settings, not a dismissible picker.

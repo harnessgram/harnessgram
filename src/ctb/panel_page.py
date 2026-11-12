@@ -21,7 +21,7 @@ def _iso(name: str) -> str:
 STRINGS = {
     "he": {
         "macTitle": "המחשב", "macUnavailable": "המידע אינו זמין כרגע", "macMemory": "לחץ זיכרון וזיכרון פנוי משוער", "macCpu": "עומס מעבד לדקה, חמש דקות ורבע שעה", "macCores": "ליבות", "macDisk": "מקום פנוי בכונן המערכת, ללא מקום שניתן לפינוי ובכוננים אחרים", "macBattery": "סוללה", "macPower": "מחובר לחשמל", "macOnBattery": "פועל על סוללה", "macNoBattery": "אין סוללה", "macUptime": "זמן מאז ההפעלה", "macHours": "שעות", "macGb": "גיגה־בייט", "macTopCpu": "שימוש ממוצע במעבד לאורך חיי התהליך", "macTopMemory": "הפעילים ביותר בזיכרון", "macTest": "הרצת בדיקות", "macEncoder": "קידוד וידאו", "macAgent": "סוכן", "macBrowser": "דפדפן", "macBuild": "כלי בנייה", "macOther": "תהליך אחר", "macOk": "המצב תקין", "macWarn": "כדאי לבדוק את מצב המחשב", "macCritical": "נדרשת תשומת לב למצב המחשב", "macMemoryOk": "יש זיכרון פנוי", "macMemoryWarn": "לחץ הזיכרון עולה", "macMemoryCritical": "לחץ הזיכרון גבוה", "macCpuOk": "העומס נמוך ביחס לליבות", "macCpuWarn": "העומס בחמש הדקות האחרונות מתקרב למספר הליבות", "macCpuCritical": "העומס בחמש הדקות האחרונות גבוה ביחס לליבות", "macDiskOk": "יש מקום פנוי", "macDiskWarn": "המקום הפנוי מצטמצם", "macDiskCritical": "נותר מעט מקום פנוי", "macBatteryOk": "מצב הסוללה תקין", "macBatteryWarn": "הסוללה מתרוקנת", "macBatteryCritical": "הסוללה כמעט ריקה",
-        "title": "הקוקפיט", "here": "הנושא הזה", "all": "כל הלוח",
+        "moreTabs": "עוד", "title": "הקוקפיט", "here": "הנושא הזה", "all": "כל הלוח",
         "waiting": "מחכה לך", "nothing": "אין החלטות שמחכות לך",
         "nothingHint": "כשסוכן ישאל אותך משהו, השאלה תופיע כאן ותוכל לענות בלחיצה אחת.",
         "reminders": "תזכורות", "openTasks": "משימות פתוחות", "sessions": "עובדים עכשיו", "none": "אף סשן לא עובד כרגע",
@@ -167,7 +167,8 @@ STRINGS = {
         "allClear": "הכל רגוע", "allClearHint": "שום דבר לא מחכה לך כרגע. הסוכנים ממשיכים לעבוד.",
         "cardsAsk": "הסוכנים שואלים", "cardsShow": "עדכונים מהסוכנים", "cardsOld": "כרטיסים ישנים",
         "cardsOldHint": "כרטיסים של סשנים שהסתיימו או עדכונים שנסגרו.",
-        "cardUpdated": "עודכן", "cardStale": "לא מעודכן", "cardClosed": "נסגר אוטומטית", "cardDismiss": "הסרה",
+        "cardUpdated": "עודכן", "cardStale": "לא מעודכן", "cardAuto": "כרטיס אוטומטי מרשימת המשימות", "cardClosed": "נסגר אוטומטית", "cardDismiss": "הסרה",
+        "cardNow": "עכשיו", "cardTask": "המשימה הפעילה", "cardLiveUpdated": "עודכן לפני {0} דקות",
         "k_progress": "התקדמות", "k_choice": "בחירה", "k_ask": "תשובה קצרה", "k_link": "קישור", "k_numbers": "נתונים",
         "cardSent": "התשובה ממתינה למסירה לסוכן", "cardAlready": "כבר נענה", "cardGone": "הכרטיס כבר נסגר",
         "deliveryTitle": "מסירת תשובות", "deliveryQueued": "ממתינה למסירה לסוכן",
@@ -179,7 +180,7 @@ STRINGS = {
     },
     "en": {
         "macTitle": "This Mac", "macUnavailable": "Information is not available yet", "macMemory": "Memory pressure and estimated available memory", "macCpu": "CPU load over one, five and fifteen minutes", "macCores": "cores", "macDisk": "Free space on the system volume, excluding purgeable space and other volumes", "macBattery": "Battery", "macPower": "Connected to power", "macOnBattery": "On battery", "macNoBattery": "No battery", "macUptime": "Time since startup", "macHours": "hours", "macGb": "GB", "macTopCpu": "Highest lifetime average CPU use", "macTopMemory": "Highest memory use", "macTest": "Test run", "macEncoder": "Video encoding", "macAgent": "Agent", "macBrowser": "Browser", "macBuild": "Build tool", "macOther": "Other process", "macOk": "Everything looks normal", "macWarn": "Check the computer status", "macCritical": "The computer needs attention", "macMemoryOk": "Memory is available", "macMemoryWarn": "Memory pressure is rising", "macMemoryCritical": "Memory pressure is high", "macCpuOk": "Load is low for the core count", "macCpuWarn": "The five minute load is approaching the core count", "macCpuCritical": "The five minute load is high for the core count", "macDiskOk": "Free space is available", "macDiskWarn": "Free space is getting low", "macDiskCritical": "Very little free space remains", "macBatteryOk": "Battery level is normal", "macBatteryWarn": "Battery is running low", "macBatteryCritical": "Battery is almost empty",
-        "title": "Cockpit", "here": "This topic", "all": "Everything",
+        "moreTabs": "More", "title": "Cockpit", "here": "This topic", "all": "Everything",
         "waiting": "Waiting for you", "nothing": "No decisions waiting for you",
         "nothingHint": "When an agent asks you something, it shows up here and one tap answers it.",
         "reminders": "Reminders", "openTasks": "Open tasks", "sessions": "Working now", "none": "No session is working right now",
@@ -322,7 +323,8 @@ STRINGS = {
         "allClear": "All clear", "allClearHint": "Nothing is waiting for you right now. Your agents keep working.",
         "cardsAsk": "Your agents ask", "cardsShow": "Updates from your agents", "cardsOld": "Older cards",
         "cardsOldHint": "Cards from ended sessions or updates that were closed.",
-        "cardUpdated": "Updated", "cardStale": "Stale", "cardClosed": "Closed automatically", "cardDismiss": "Dismiss",
+        "cardUpdated": "Updated", "cardStale": "Stale", "cardAuto": "Automatic card from the task list", "cardClosed": "Closed automatically", "cardDismiss": "Dismiss",
+        "cardNow": "Now", "cardTask": "Current task", "cardLiveUpdated": "Updated {0} min ago",
         "k_progress": "Progress", "k_choice": "Choice", "k_ask": "Short answer", "k_link": "Link", "k_numbers": "Figures",
         "cardSent": "Your answer is queued for delivery", "cardAlready": "Already answered", "cardGone": "This card is already closed",
         "deliveryTitle": "Answer delivery", "deliveryQueued": "Queued for delivery",
@@ -333,6 +335,9 @@ STRINGS = {
         "step": "Step", "of": "of", "allDone": "All steps done", "allAgents": "All agents",
     },
 }
+
+STRINGS["he"].update({"usageTitle":"צריכת סשנים", "usageToday":"היום", "usageWeek":"השבוע", "usageSession":"כל הסשן", "usageTokens":"אסימונים", "usageCost":"עלות משוערת", "usageInput":"קלט", "usageOutput":"פלט", "usageWrite":"כתיבה למטמון", "usageRead":"קריאה מהמטמון", "usageShare":"חלק המטמון", "usageTop":"הסשנים המובילים היום", "usageUnknown":"לא הוגדר מחיר", "usageUnpriced":"אסימונים ללא מחיר", "usageModelUnknown":"דגם לא מזוהה", "usageHint":"כולל רק סשנים שמחוברים לגשר. הערכה לפי המחירים המוגדרים; מחירי ברירת המחדל עשויים להיות לא עדכניים. המנוי בתשלום קבוע."})
+STRINGS["en"].update({"usageTitle":"Session usage", "usageToday":"Today", "usageWeek":"This week", "usageSession":"Whole session", "usageTokens":"Tokens", "usageCost":"Estimated cost", "usageInput":"Input", "usageOutput":"Output", "usageWrite":"Cache write", "usageRead":"Cache read", "usageShare":"Cache share", "usageTop":"Top sessions today", "usageUnknown":"no price set", "usageUnpriced":"Unpriced tokens", "usageModelUnknown":"Unknown model", "usageHint":"Covers only sessions connected to the bridge. Estimate from configured prices; defaults may be outdated. The subscription is a flat fee."})
 
 PAGE = r"""<!doctype html>
 <html lang="__LANG__" dir="__DIR__">
@@ -387,7 +392,7 @@ html{background:var(--bg)}
 body{margin:0;min-block-size:100vh;color:var(--text);
 background:radial-gradient(130% 380px at 50% -120px,var(--glow),transparent 70%),radial-gradient(90% 300px at 50% 105%,var(--glow2),transparent 70%),var(--bg);
 font:16px/1.45 -apple-system,BlinkMacSystemFont,"SF Hebrew","Segoe UI","Noto Sans Hebrew",Arial,sans-serif;
-padding-block:calc(var(--tg-safe-area-inset-top,0px) + var(--tg-content-safe-area-inset-top,0px)) calc(28px + max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)));
+padding-block:calc(var(--tg-safe-area-inset-top,0px) + var(--tg-content-safe-area-inset-top,0px)) calc(108px + max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)));
 padding-inline:16px;-webkit-font-smoothing:antialiased}
 button{font:inherit;color:inherit}
 [hidden]{display:none!important}
@@ -407,18 +412,23 @@ svg.i{inline-size:20px;block-size:20px;stroke:currentColor;fill:none;stroke-widt
 #ptr{block-size:0;overflow:hidden;display:flex;align-items:flex-end;justify-content:center;gap:6px;color:var(--hint);font-size:13px;transition:block-size .2s ease}
 #ptr.drag{transition:none}
 #ptr.ready{color:var(--link)}
-/* tabs: a segmented control */
-.tabs{display:flex;gap:4px;padding:4px;border-radius:16px;background:var(--card);border:1px solid var(--edge);box-shadow:var(--shadow);margin-block:12px 14px;
--webkit-backdrop-filter:var(--glass);backdrop-filter:var(--glass);position:sticky;inset-block-start:calc(6px + var(--tg-content-safe-area-inset-top,0px));z-index:5}
-.tab{flex:1;min-inline-size:0;min-block-size:40px;border:0;border-radius:12px;background:transparent;font-weight:650;font-size:15px;cursor:pointer;color:var(--hint);
-display:flex;align-items:center;justify-content:center;gap:6px;padding-inline:4px;white-space:nowrap;transition:background .25s,color .25s,transform .12s}
+/* Bottom navigation follows the document direction and clears the home indicator. */
+.tabs{position:fixed;inset-inline:0;inset-block-end:0;z-index:10;display:flex;align-items:stretch;
+ padding-block:6px calc(6px + max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)));padding-inline:4px;
+ background:var(--bg);border-block-start:1px solid var(--edge);box-shadow:var(--shadow-lg)}
+.tab{flex:1;min-inline-size:0;min-block-size:56px;border:0;background:transparent;color:var(--hint);cursor:pointer;
+ display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 2px;font-size:11px;font-weight:650;line-height:1.2}
+.tab-icon{position:relative;display:grid;place-items:center;inline-size:48px;block-size:28px;border-radius:99px}
+.tab.on{color:var(--accent)}.tab.on .tab-icon{background:var(--blue-soft)}
+.tab-label{max-inline-size:100%;text-align:center;overflow-wrap:anywhere}
 .tab:active{transform:scale(.96)}
-.tab.on{background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,0)),var(--accent);color:var(--on-accent);box-shadow:0 4px 14px rgba(47,124,246,.32)}
-.tab.app{flex:0 1 auto;padding-inline:10px}
-.tab.app span{overflow:hidden;text-overflow:ellipsis}
+.more-sheet{position:fixed;z-index:11;inset-inline:12px;inset-block-end:calc(76px + max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)));
+ max-block-size:50vh;overflow:auto;padding:8px;border:1px solid var(--edge);border-radius:18px;background:var(--bg);box-shadow:var(--shadow-lg)}
+.more-sheet .tab{inline-size:100%;min-block-size:48px;flex-direction:row;justify-content:flex-start;gap:8px;padding-inline:8px;font-size:15px;text-align:start}
+.more-sheet .tab-label{text-align:start}
 /* a cockpit app: its own page in a sandboxed frame, kept alive while other tabs show */
 #apps{margin-block-end:12px}
-.appframe{display:block;inline-size:100%;block-size:calc(var(--tg-viewport-stable-height,100vh) - 150px);min-block-size:360px;border:0;
+.appframe{display:block;inline-size:100%;block-size:calc(var(--tg-viewport-stable-height,100vh) - 176px - max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)));min-block-size:360px;border:0;
 border-radius:0;background:transparent}
 #apps[hidden],.appframe[hidden]{display:none}
 /* focus mode: the app asked to fold the header and tabs, so its frame fills the page edge to edge (the top inset stays) */
@@ -428,7 +438,7 @@ body.focus .appframe{block-size:calc(var(--tg-viewport-stable-height,100vh) - va
 /* measures the bottom safe-area inset (the home-indicator strip) so an app can keep its main action above it */
 #probe{position:fixed;inset-block-start:0;inset-inline-start:0;inline-size:0;block-size:0;visibility:hidden;pointer-events:none;
 padding-block-end:max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px))}
-.tab .tb{font-size:11px;font-weight:800;min-inline-size:18px;block-size:18px;line-height:18px;border-radius:99px;padding-inline:5px;background:var(--warn);color:#2a1a00}
+.tab .tb{position:absolute;inset-block-start:-3px;inset-inline-end:-3px;font-size:11px;font-weight:800;min-inline-size:18px;block-size:18px;line-height:18px;border-radius:99px;padding-inline:5px;background:var(--warn);color:#2a1a00}
 .mac-status.ok{color:var(--ok)}.mac-status.warn{color:var(--warn-ink)}.mac-status.critical{color:var(--danger)}
 .mac-row{display:flex;justify-content:space-between;gap:12px;margin-block-start:8px}.mac-value{font-variant-numeric:tabular-nums;text-align:end}.mac-detail{font-size:12px;opacity:.85}.mac-processes{margin-block-start:10px}
 /* cards */
@@ -447,7 +457,7 @@ padding-block-end:max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-botto
 .hero .h-s{font-size:14px;color:var(--hint);margin-block-start:4px;line-height:1.4}
 .ring{position:relative;flex:none;inline-size:84px;block-size:84px}
 .ring svg{inline-size:100%;block-size:100%;display:block}
-:root[dir="rtl"] .ring svg{transform:scaleX(-1)}
+:root[dir="rtl"] .ring>svg{transform:scaleX(-1)}
 .rg-t{fill:none;stroke:var(--warm);stroke-width:5.5}
 .rg-a{fill:none;stroke:var(--warn);stroke-width:5.5;stroke-linecap:round;transition:stroke-dashoffset 1s cubic-bezier(.2,.8,.2,1)}
 .calm .rg-t{stroke:var(--ok-soft)}.calm .rg-a{stroke:var(--ok)}
@@ -765,7 +775,8 @@ transition:transform .18s cubic-bezier(.3,1.4,.5,1),opacity .2s,background .2s}
 .sk.t{block-size:14px;inline-size:40%;margin-block:20px 10px}
 .sk.c{block-size:120px;border-radius:var(--r);margin-block-end:12px}
 .sk.c.s{block-size:64px}
-#toast{position:fixed;inset-inline:16px;inset-block-end:calc(18px + env(safe-area-inset-bottom));display:flex;justify-content:center;pointer-events:none;z-index:9}
+#toast{position:fixed;inset-inline:16px;inset-block-end:calc(84px + max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)));display:flex;justify-content:center;pointer-events:none;z-index:12}
+body.focus #toast{inset-block-end:calc(18px + max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)))}
 #toast div{max-inline-size:440px;background:rgba(15,23,41,.94);color:#fff;border-radius:16px;padding:12px 16px;font-size:14.5px;font-weight:600;
 box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;gap:8px;align-items:center;opacity:0;transform:translateY(10px);transition:opacity .22s,transform .22s;white-space:pre-line}
 #toast div.show{opacity:1;transform:none}
@@ -854,7 +865,7 @@ background:var(--accent);color:var(--on-accent);box-shadow:0 4px 12px rgba(47,12
 .trow .tr-m{flex:none;color:var(--hint)}
 .trow .tr-m.m-ok{color:var(--ok)}.trow .tr-m.m-warn{color:var(--warn-ink)}.trow .tr-m.m-critical{color:var(--danger)}
 .trow .stale{opacity:.6}
-.askbox{position:sticky;inset-block-end:calc(8px + var(--tg-safe-area-inset-bottom,0px));z-index:4;margin-block:6px 4px}
+.askbox{position:sticky;inset-block-end:calc(80px + max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)));z-index:4;margin-block:6px 4px}
 .ask-f{display:flex;align-items:center;gap:8px;padding-block:6px;padding-inline:14px 6px;border-radius:99px;background:var(--card);
 border:1px solid var(--edge);box-shadow:var(--shadow-lg);-webkit-backdrop-filter:var(--glass);backdrop-filter:var(--glass)}
 .ask-f>svg.i{color:var(--link)}
@@ -910,7 +921,7 @@ try{reduce=window.matchMedia("(prefers-reduced-motion: reduce)").matches;}catch(
 function el(tag,cls,text){var n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=text;return n;}
 function iso(s){return FSI+s+PDI;}
 function ver(v){try{return !!(wa&&wa.isVersionAtLeast&&wa.isVersionAtLeast(v));}catch(e){return false;}}
-var ICONS={refresh:"M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",check:"M5 12.5l4.5 4.5L19 7.5",chev:"M9 6l6 6-6 6",
+var ICONS={more:"M4 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0M10.5 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0M17 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0",person:"M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM5 20a7 7 0 0 1 14 0",settings:"M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6L7 7M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4",refresh:"M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",check:"M5 12.5l4.5 4.5L19 7.5",chev:"M9 6l6 6-6 6",
  clock:"M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z",x:"M6 6l12 12M18 6L6 18",link:"M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
  box:"M5 5h14v14H5z",bolt:"M13 3L5 13.5h6L10 21l8-10.5h-6z",
  mic:"M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3",
@@ -1137,7 +1148,16 @@ function progressBody(c,box){
   anim("c"+c.id,pct,function(v){fill.style.inlineSize=Math.max(2,Math.min(100,v))+"%";});}
  if(steps.length){var tr=el("ol","track");tr.style.gridTemplateColumns="repeat("+steps.length+",minmax(0,1fr))";
   steps.forEach(function(s,i){var li=el("li",i<at?"done":i===at?"cur":"");var dot=el("span","sd");if(i<at)dot.appendChild(icon("check"));li.appendChild(dot);
-   var lb=el("span","sl",s);lb.dir="auto";li.appendChild(lb);tr.appendChild(li);});box.appendChild(tr);}}
+   var lb=el("span","sl",s);lb.dir="auto";li.appendChild(lb);tr.appendChild(li);});box.appendChild(tr);}
+ // Labels and agent text stay on separate lines, each with its own direction.
+ if(c.live){box.appendChild(el("div","ac-status",S.cardNow));
+  box.appendChild(says("live"+c.id,c.live,he(c,"live"),"ac-d"));
+  var age=typeof c.live_age==="number"?c.live_age:Math.max(0,((last&&last.now)||Date.now()/1000)-c.live_at);
+  box.appendChild(el("div","ac-status",S.cardLiveUpdated.replace("{0}",nf.format(Math.floor(age/60)))));}
+ if(c.task){box.appendChild(el("div","ac-status",S.cardTask));
+  box.appendChild(says("task"+c.id,c.task,he(c,"task"),"ac-d"));}
+ if(c.automatic)box.appendChild(el("div","ac-status",S.cardAuto));
+ if(c.bg)box.appendChild(el("div","ac-status",nf.format(c.bg)+" "+plural(c.bg,S.bg1,S.bg)));}
 function choiceBody(c,box){
  var opts=Array.isArray(c.options)?c.options:[],long=opts.some(function(o){return String(o).length>14;});
  var g=el("div","opts"+(long?"":opts.length===3||opts.length>4?" c3":" c2"));
@@ -1326,7 +1346,22 @@ function compactRow(s,d){var r=kv(S.compactOwn,""),v=r.lastChild,b=el("button","
    .then(function(){s.compact=next;render(last,true);})
    .catch(function(st){b.disabled=false;haptic("n","error");toast(st===403?S.reopen:S.failed,true);});});
  return r;}
+var usd=new Intl.NumberFormat(LANG,{style:"currency",currency:"USD",minimumFractionDigits:2,maximumFractionDigits:4});
+function cost(u){return u.estimate_usd==null?S.usageUnknown:usd.format(u.estimate_usd);}
+function shortUsageModel(m){var x=/^claude-(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?$/.exec(m);return x?iso(x[1][0].toUpperCase()+x[1].slice(1)+" "+x[2]+(x[3]?"."+x[3]:"")):S.usageModelUnknown;}
+function usageLine(u){return S.usageToday+": "+nf.format(u.tokens)+" "+S.usageTokens+" · "+S.usageCost+": "+cost(u)+(u.unknown_models?" · "+S.usageUnknown:"");}
+function usageDetails(u,host){if(!u)return;host.appendChild(el("div","safe",S.usageHint));
+ [[S.usageToday,u.today],[S.usageSession,u.session]].forEach(function(pair){var v=pair[1];host.appendChild(el("div","lbl",pair[0]));
+  host.appendChild(kv(S.usageTokens,nf.format(v.tokens)));host.appendChild(kv(S.usageCost,cost(v)));
+  if(v.unknown_models)host.appendChild(kv(S.usageUnpriced,nf.format(v.unpriced_tokens)));
+  [[S.usageInput,"input_tokens"],[S.usageOutput,"output_tokens"],[S.usageWrite,"cache_creation_input_tokens"],[S.usageRead,"cache_read_input_tokens"]].forEach(function(x){host.appendChild(kv(x[0],nf.format(v[x[1]])));});
+  host.appendChild(kv(S.usageShare,pf.format(v.tokens?(v.cache_creation_input_tokens+v.cache_read_input_tokens)/v.tokens:0)));
+  Object.keys(v.models).forEach(function(m){var model=v.models[m];host.appendChild(el("div","lbl",shortUsageModel(m)));[[S.usageInput,"input_tokens"],[S.usageOutput,"output_tokens"],[S.usageWrite,"cache_creation_input_tokens"],[S.usageRead,"cache_read_input_tokens"]].forEach(function(x){host.appendChild(kv(x[0],nf.format(model[x[1]])));});host.appendChild(kv(S.usageCost,cost(model)));if(model.has_unpriced)host.appendChild(kv(S.usageUnpriced,nf.format(model.unpriced_tokens)));});});}
+function usageCard(t){if(!t)return;sec(S.usageTitle);var c=el("div","card group");
+ [[S.usageToday,t.today],[S.usageWeek,t.week]].forEach(function(x){c.appendChild(kv(x[0]+" · "+S.usageTokens,nf.format(x[1].tokens)));c.appendChild(kv(x[0]+" · "+S.usageCost,cost(x[1])));if(x[1].unknown_models)c.appendChild(kv(x[0]+" · "+S.usageUnpriced,nf.format(x[1].unpriced_tokens)));});
+ c.appendChild(el("div","safe",S.usageHint));if(t.top.length)c.appendChild(el("div","lbl",S.usageTop));t.top.forEach(function(x){var row=kv("",nf.format(x.today.tokens));row.firstChild.textContent=shown(x,"name");row.firstChild.dir="auto";c.appendChild(row);});app.appendChild(c);}
 function details(s,d,host){
+ usageDetails(s.usage,host);
  if(s.model)host.appendChild(kv(S.model,iso(s.model)));
  host.appendChild(kv(S.ctx,kt(s.context)));
  var at=compactOf(s,d);if(at&&s.context){host.appendChild(bar(s.context/(at*10)));
@@ -1350,7 +1385,7 @@ function sessionRow(s,d,lead){
  var mt=el("div","mt");
  sessionMeta(s,d).forEach(function(x){var a=Array.isArray(x),c=el("span","chip"+(a&&x[1]?" "+x[1]:""));
   if(a&&x[2]!=null){c.className+=" cm";c.appendChild(bar(x[2]));}c.appendChild(el("span",null,a?x[0]:x));mt.appendChild(c);});
- mt.appendChild(sidTag(s.id));b.appendChild(mt);r.appendChild(b);r.appendChild(el("span","pill "+s.state,S[s.state]||s.state));det.appendChild(r);
+ mt.appendChild(sidTag(s.id));b.appendChild(mt);if(s.usage)b.appendChild(el("div","safe",usageLine(s.usage.today)));r.appendChild(b);r.appendChild(el("span","pill "+s.state,S[s.state]||s.state));det.appendChild(r);
  var more=el("div","more");details(s,d,more);det.appendChild(more);return det;}
 function sessionCard(s,d){
  var c=el("div","card"),h=el("div","s-head");h.appendChild(robot(s.id,s.state,false));
@@ -1467,7 +1502,7 @@ function renderAll(d){
  if(!by.working.length)app.appendChild(empty("cpu",S.none,S.noneHint));
  else{var g=el("div","card group");by.working.slice(0,4).forEach(function(s){var r=el("div","row tap");r.appendChild(robot(s.id,s.state,true));
    var b=el("div","body"),n=el("div","nm",shown(s,"name"));n.dir="auto";b.appendChild(n);
-   if(s.now)b.appendChild(line("act","bolt",s.now));r.appendChild(b);r.appendChild(el("span","when",ago(s.age)));r.appendChild(icon("chev"));
+   if(s.now)b.appendChild(line("act","bolt",s.now));if(s.usage)b.appendChild(el("div","safe",usageLine(s.usage.today)));r.appendChild(b);r.appendChild(el("span","when",ago(s.age)));r.appendChild(icon("chev"));
    r.addEventListener("click",function(){opened["s"+s.id]=true;switchTo("agents");});g.appendChild(r);});app.appendChild(g);}
  var all=el("button","link-btn all");all.type="button";all.appendChild(el("span",null,S.allAgents));all.appendChild(icon("chev"));
  all.addEventListener("click",function(){switchTo("agents");});app.appendChild(all);
@@ -1649,6 +1684,7 @@ function bankCard(list){
  c.appendChild(el("div","safe bankh",S.bankHint));return c;}
 function renderAgents(d){
  var by=groups(d);
+ usageCard(d.usage_totals);
  sec(S.sessions,by.working.length||null,"go");
  if(!by.working.length)app.appendChild(empty("cpu",S.none,S.noneHint));
  else{var g=el("div","card group");by.working.forEach(function(s){g.appendChild(sessionRow(s,d,"now"));});app.appendChild(enter(g,"ag-w"));}
@@ -1993,6 +2029,9 @@ window.addEventListener("resize",pushLayout);
 // --- tabs and the page around them -----------------------------------------------------------------------------
 function home(){return last&&last.topic?"here":"me";}
 function switchTo(v){if(view===v)return;view=v;try{sessionStorage.setItem(TABKEY,v);}catch(e){}haptic("sel");render(last,true);window.scrollTo(0,0);}
+// one listener for the page: a tap outside the More sheet closes it
+document.addEventListener("click",function(e){var sh=document.getElementById("more-tabs"),m=document.querySelector(".tab-more");
+ if(sh&&!sh.hidden&&!sh.contains(e.target)&&!(m&&m.contains(e.target))){sh.hidden=true;if(m)m.setAttribute("aria-expanded","false");}});
 function tabs(d){
  var box=document.getElementById("tabs");box.textContent="";
  document.getElementById("sub").textContent=d.topic?shown(d.topic,"name"):"";
@@ -2001,13 +2040,24 @@ function tabs(d){
  if(!view||(["here","me","agents","settings"].indexOf(view)<0&&!appNamed(d,appOf(view))))view=home();
  var list=(d.topic?[["here",S.here]]:[]).concat([["me",S.tabMe],["agents",S.tabAgents],["settings",S.settings]]).concat(appTabs(d));
  if(d.brief)list.forEach(function(p){if(p[0]==="me")p[1]=S.tabBrief;});  // the Morning Brief is the home
- var t=el("div","tabs"),n=waitingCount(d);t.setAttribute("role","tablist");
- list.forEach(function(p){var b=el("button","tab"+(view===p[0]?" on":""));b.type="button";b.setAttribute("role","tab");
-  b.setAttribute("aria-selected",view===p[0]?"true":"false");if(p[2]){b.className+=" app";b.appendChild(icon(p[2]));}
-  b.appendChild(el("span",null,p[1]));
-  if(p[0]==="me"&&n&&view!=="me")b.appendChild(el("span","tb",nf.format(n)));
-  var an=appOf(p[0]),ab=an&&appUi[an]?appUi[an].badge:0;if(ab)b.appendChild(el("span","tb",nf.format(ab)));
-  b.addEventListener("click",function(){switchTo(p[0]);});t.appendChild(b);});box.appendChild(t);}
+ var t=el("div","tabs"),n=waitingCount(d),sheet=el("div","more-sheet"),overflow=list.length>5?list.slice(4):[];
+ t.setAttribute("role","tablist");sheet.hidden=true;sheet.setAttribute("aria-label",S.moreTabs);
+ function badge(p){var an=appOf(p[0]);return p[0]==="me"&&view!=="me"?n:(an&&appUi[an]?appUi[an].badge:0);}
+ function button(p){var b=el("button","tab"+(view===p[0]?" on":"")),ic=el("span","tab-icon"),count=badge(p);
+  b.type="button";b.setAttribute("role","tab");b.setAttribute("aria-selected",view===p[0]?"true":"false");
+  if(p[2])b.className+=" app";ic.appendChild(icon(p[2]||({here:"chat",me:"person",agents:"cpu",settings:"settings"})[p[0]]));
+  if(count)ic.appendChild(el("span","tb",nf.format(count)));b.appendChild(ic);b.appendChild(el("span","tab-label",p[1]));
+  b.addEventListener("click",function(){sheet.hidden=true;more.setAttribute("aria-expanded","false");switchTo(p[0]);});return b;}
+ var more=el("button","tab tab-more"+(overflow.some(function(p){return p[0]===view;})?" on":""));
+ (overflow.length?list.slice(0,4):list).forEach(function(p){t.appendChild(button(p));});
+ if(overflow.length){var mi=el("span","tab-icon");mi.appendChild(icon("more"));
+  var total=overflow.reduce(function(sum,p){return sum+badge(p);},0);if(total)mi.appendChild(el("span","tb",nf.format(total)));
+  more.type="button";more.setAttribute("aria-expanded","false");more.setAttribute("aria-controls","more-tabs");
+  more.appendChild(mi);more.appendChild(el("span","tab-label",S.moreTabs));
+  more.addEventListener("click",function(){sheet.hidden=!sheet.hidden;more.setAttribute("aria-expanded",sheet.hidden?"false":"true");});
+  sheet.id="more-tabs";overflow.forEach(function(p){sheet.appendChild(button(p));});t.appendChild(more);box.appendChild(sheet);}
+ box.appendChild(t);}
+
 function syncBack(){if(!ver("6.1")||!wa.BackButton)return;try{if(view!==home())wa.BackButton.show();else wa.BackButton.hide();}catch(e){}}
 // the native back button goes to the app first when it asked for it, otherwise back to the home tab as before
 function backTap(){haptic("sel");var n=activeApp();
@@ -2094,8 +2144,16 @@ document.addEventListener("touchmove",function(e){if(y0==null)return;dy=e.touche
  ptr.className="drag"+(dy>PULL?" ready":"");ptrText(dy>PULL);ptr.style.blockSize=Math.min(56,dy*.45)+"px";},{passive:true});
 document.addEventListener("touchend",function(){if(y0==null)return;var go=dy>PULL;y0=null;ptr.className="";ptr.style.blockSize="";
  if(go){haptic("tap");followups=0;load();}},{passive:true});
-document.addEventListener("visibilitychange",function(){if(!document.hidden)load();});
-load();setInterval(function(){if(!document.hidden)load();},15000);
+// refresh: often while the page is seen (more often while a session works), backing off while it is hidden
+var POLL={work:10000,idle:20000,hidden:60000,most:300000},pollTimer=null,hiddenSince=0;
+function pollDelay(hidden,working,hiddenFor){
+ if(hidden)return Math.min(POLL.most,POLL.hidden*Math.pow(2,Math.floor(Math.max(0,hiddenFor||0)/POLL.most)));
+ return working?POLL.work:POLL.idle;}
+function anyWorking(d){return !!d&&(d.sessions||[]).some(function(s){return s.state==="working";});}
+function schedule(){clearTimeout(pollTimer);var h=!!document.hidden;if(!h)hiddenSince=0;else if(!hiddenSince)hiddenSince=Date.now();
+ pollTimer=setTimeout(function(){load();schedule();},pollDelay(h,anyWorking(last),h?Date.now()-hiddenSince:0));}
+document.addEventListener("visibilitychange",function(){if(!document.hidden){hiddenSince=0;load();}schedule();});
+load();schedule();
 })();
 </script>
 </body>

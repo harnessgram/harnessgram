@@ -22,6 +22,10 @@ def _parser() -> argparse.ArgumentParser:
                                 epilog="First run: harnessgram setup   (then: harnessgram doctor)")
     p.add_argument("--version", action="version", version=f"Harnessgram {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
+    widget = sub.add_parser("widget", help="private chat widget spike")
+    widget_sub = widget.add_subparsers(dest="widget_cmd", required=True)
+    widget_test = widget_sub.add_parser("test", help="send a private sample widget")
+    widget_test.add_argument("--force", action="store_true", help="send even when widgets are disabled")
 
     sub.add_parser("hook-stop", help="Claude Code Stop hook (reads the hook JSON on stdin)")
     sub.add_parser("hook-stop-failure", help="Claude Code StopFailure hook: fallback on usage limit (stdin: hook JSON)")
@@ -71,6 +75,7 @@ def _parser() -> argparse.ArgumentParser:
     rst.add_argument("--live", action="store_true", help="also ask Telegram about the live stream")
     rds.add_parser("say", help="speak one line on the radio now").add_argument("text")
     rds.add_parser("run", help=argparse.SUPPRESS)  # the launchd job
+    rds.add_parser("diag-report", help="summarize a radio diagnostic capture").add_argument("json_file")
     rpm = rds.add_parser("prepare-motion", help="render the flight board's ident and 'landed' sting once (needs "
                                                 "node, puppeteer-core and Chrome)")
     rpm.add_argument("--modules", default="", help="a folder that holds node_modules/puppeteer-core")
@@ -195,6 +200,7 @@ def _parser() -> argparse.ArgumentParser:
     pp.add_argument("name")
 
     i = sub.add_parser("install", help="install the listener and the scheduled jobs and merge the hooks into ~/.claude/settings.json")
+    i.add_argument("--wire-statusline", action="store_true", help="replace the Claude Code status line with the Harnessgram status line")
     i.add_argument("--dry-run", action="store_true", help="show what would change; write nothing")
     i.add_argument("--no-service", action="store_true", help="hooks only; do not write the listener service")
     i.add_argument("--no-schedules", action="store_true", help="listener only; skip the dashboard, heartbeat and "
@@ -214,6 +220,9 @@ def _parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="check config, bot, Threaded Mode, listener and hooks")
     d.add_argument("--offline", action="store_true", help="skip the Telegram check")
+    ob = sub.add_parser("outbox", help="manage reply parts that could not be delivered")
+    obs = ob.add_subparsers(dest="outbox_cmd", required=True, metavar="action")
+    obs.add_parser("retry", help="move permanently failed reply parts back to the delivery queue")
 
     st = sub.add_parser("setup", help="guided first run: BotFather steps, token check, pairing, config, install, "
                                       "test message, doctor")
@@ -659,7 +668,7 @@ def _cmd_tasks(args) -> int:
 
 # Commands that work while mirroring is off: they set the bridge up or only read and change local files.
 LOCAL_ONLY = {"doctor", "setup", "install", "uninstall", "pair", "project", "team", "bank", "dispatcher",
-              "wait-idle", "statusline", "compact", "tasks", "studio"}
+              "wait-idle", "statusline", "compact", "tasks", "studio", "outbox"}
 # Long-running services: they start either way and check the switch at every round or request themselves.
 SERVICES = {"serve", "heartbeat", "panel", "share-serve", "radio"}
 # Everything else talks to Telegram, the relay, an outside model or a session's queue: nothing while off.
@@ -667,7 +676,7 @@ GUARDED = {"account", "auto-compact", "autopilot", "block", "board", "bot-api", 
            "direct-note", "finish-stop", "hook-ask", "hook-lifecycle", "hook-notify", "hook-post", "hook-prompt",
            "hook-start", "hook-stop", "hook-stop-failure", "hook-wake", "lifecycle", "mirror", "notify",
            "progress", "prompt-mirror", "refresh-status", "session-log", "session-state", "take", "topic-icons",
-           "topic-names", "topic-rename", "translate-warm", "typing"}
+           "topic-names", "topic-rename", "translate-warm", "typing", "widget"}
 
 
 def _off(args) -> Optional[int]:
@@ -697,6 +706,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     if off is not None:
         return off
     cmd = args.cmd
+    if cmd == "outbox":
+        from .reply_outbox import retry_failed
+        count = retry_failed()
+        print(f"Requeued {count} failed reply part{'s' if count != 1 else ''}.")
+        return 0
+    if cmd == "widget":
+        from . import widgets
+        from .telegram import Bot, TelegramError
+        try:
+            cfg = C.load()
+            if not cfg.widgets_enabled and not args.force:
+                print("Widgets are disabled; set widgets_enabled or use --force", file=sys.stderr)
+                return 1
+            if cfg.owner_chat_id <= 0 or not cfg.ready:
+                print("A paired private owner chat is required", file=sys.stderr)
+                return 1
+            widgets.send_sample(cfg, Bot.from_config(cfg))
+            return 0
+        except (C.ConfigError, OSError, ValueError, TelegramError) as e:
+            print(f"Harnessgram: {e}", file=sys.stderr)
+            return 1
     if cmd in SEND_ONLY_HELPERS and getattr(args, "session", ""):
         from .scheduled import suppressed
         if suppressed(args.session, SEND_ONLY_HELPERS[cmd]):
@@ -831,6 +861,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         return panel_serve(cfg, args.port)
     if cmd == "radio":
+        if args.radio_cmd == "diag-report":
+            from .radio_diag import report
+            try:
+                report(args.json_file)
+                return 0
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                print(f"Radio diagnostic: {e}", file=sys.stderr)
+                return 1
         from .radio import cli as radio_cli
         try:
             cfg = C.load()
@@ -861,7 +899,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         from pathlib import Path
         return install(dry_run=args.dry_run, service=not args.no_service, wake=not args.no_wake,
                        start=not args.no_start, settings_file=Path(args.settings) if args.settings else None,
-                       schedules=not args.no_schedules)
+                       schedules=not args.no_schedules, wire_statusline=args.wire_statusline)
     if cmd == "uninstall":
         from .install import uninstall
         from pathlib import Path

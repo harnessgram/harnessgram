@@ -302,3 +302,14 @@ def test_an_unconfigured_helper_keeps_the_call_too(monkeypatch, no_launchd):
     monkeypatch.setattr(radio, "call_helper", helper)
     assert radio.stop(_cfg()) == "radio_stopped_call_left"
     assert _state()["call"]["id"] == 777
+
+
+def test_radio_job_receives_the_diagnostic_setting(monkeypatch):
+    """A diagnostic capture is opt-in through CTB_RADIO_DIAG_SECONDS; the launchd job must receive it."""
+    import plistlib
+    from ctb import radio
+    monkeypatch.setenv("CTB_RADIO_DIAG_SECONDS", "60")
+    env = plistlib.loads(radio.plist_bytes([]))["EnvironmentVariables"]
+    assert env.get("CTB_RADIO_DIAG_SECONDS") == "60"
+    monkeypatch.delenv("CTB_RADIO_DIAG_SECONDS")
+    assert "CTB_RADIO_DIAG_SECONDS" not in plistlib.loads(radio.plist_bytes([]))["EnvironmentVariables"]

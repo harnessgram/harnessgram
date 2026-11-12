@@ -1,6 +1,7 @@
 """`harnessgram setup`: one guided first run.
 
-BotFather steps, token check (format, then getMe), Threaded Mode, pairing (the account that sends
+BotFather steps (with a suggested username), the token read from the clipboard or a paste (just the token or
+BotFather's whole message), token check (format, then getMe), Threaded Mode, pairing (the account that sends
 the one-time /start code), config (mode 600), install, a "connected" test message, and doctor.
 
 Everything that talks to the user or the network is injected, so the wizard is tested without a
@@ -16,6 +17,7 @@ import copy
 import getpass
 import json
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -24,15 +26,31 @@ from . import config as C
 from . import lang as L
 from . import pairing
 from .i18n import t
-from .telegram import Bot, TelegramError, clean_token
+from . import clipboard
+from .telegram import Bot, TelegramError, clean_token, find_token, holds_token
 
 BOTFATHER_STEPS = """\
 Step 1 of 4: create your bot (about 1 minute, in the Telegram app)
-  1. Open @BotFather and send /newbot. Pick a name and a username that ends in "bot".
-  2. Copy the token BotFather sends back (it looks like 123456789:AAE...). Keep it private.
+  1. Open @BotFather (https://t.me/BotFather) and send /newbot.
+     When it asks, send a name, for example: Harnessgram
+     Then a username that ends in "bot", for example: {username}
+  2. BotFather answers with a message that holds the token (it looks like 123456789:AAE...).
+     Tap the token to copy it, or copy the whole message. Setup reads it from the clipboard.
   3. Still in BotFather: /mybots > your bot > Bot Settings > Threaded Mode > turn ON.
-     (This gives the private chat with your bot Topics: one topic per Claude Code session.)
+     (This gives the private chat with your bot Topics: one topic per Claude Code session.
+     Setup checks it for you.)
 """
+USERNAME_CHARS = "abcdefghijkmnpqrstuvwxyz23456789"  # no look-alikes (l/1, o/0) to retype
+
+
+def suggested_username(choice: Callable[[str], str] = secrets.choice) -> str:
+    """A username BotFather is likely to accept on the first try (random, so it is rarely taken already)."""
+    return "harnessgram_" + "".join(choice(USERNAME_CHARS) for _ in range(6)) + "_bot"
+
+
+def botfather_steps(username: Optional[str] = None) -> str:
+    return BOTFATHER_STEPS.format(username=username or suggested_username())
+
 
 CONNECTED_TEXT = t("setup_connected", lang="en")
 LISTENER_WAIT = 45.0  # seconds a just-started listener gets to report a poll (one long poll is 25 s)
@@ -56,10 +74,145 @@ def _existing_raw(path: Path) -> dict:
         return {}
 
 
+TOKEN_PROMPT = "Press Enter to read the token from the clipboard, or paste it here (hidden): "
+TOKEN_TRIES = 3
+
+
+PASTE_QUIET = 0.25  # seconds without more input that end one paste (pasted lines arrive together)
+PASTE_LIMIT = 64 * 1024
+
+
+def read_hidden(prompt: str, tty: str = "/dev/tty", quiet: float = PASTE_QUIET) -> str:
+    """A hidden prompt that keeps a multi-line paste together. getpass reads one line and then discards the rest
+    of the paste (it restores the terminal with TCSAFLUSH), so the token on a later line of BotFather's message was
+    lost; and a terminal in line mode cuts a line past its own limit (1024 bytes on macOS) before anyone can check
+    its length. Here echo and line mode go off, bytes are read as they come (Backspace deletes, Ctrl-U clears the
+    line, Ctrl-D on nothing is the end of input, Ctrl-C still interrupts), and after an Enter every byte that
+    follows within `quiet` seconds belongs to the same paste. More than PASTE_LIMIT bytes is refused, never cut.
+    The terminal is restored on every exit. Without a terminal it is getpass."""
+    try:
+        import select
+        import termios
+        fd = os.open(tty, os.O_RDWR | os.O_NOCTTY)
+    except (ImportError, OSError):
+        return getpass.getpass(prompt)
+    try:
+        try:
+            old = termios.tcgetattr(fd)
+        except termios.error:
+            return getpass.getpass(prompt)
+        new = termios.tcgetattr(fd)
+        new[3] &= ~(termios.ECHO | termios.ICANON)
+        new[6][termios.VMIN], new[6][termios.VTIME] = 1, 0
+        buf, too_long, entered = bytearray(), False, False
+        try:
+            os.write(fd, prompt.encode("utf-8", "replace"))
+            termios.tcsetattr(fd, termios.TCSAFLUSH, new)
+            while True:
+                if entered and not select.select([fd], [], [], quiet)[0]:
+                    break  # Enter, then nothing more: the paste (or the typing) is over
+                data = os.read(fd, 4096)
+                if not data:
+                    break
+                for byte in data:
+                    entered = entered or byte in (0x0A, 0x0D)  # also counted once the paste is too long to keep
+                    if byte in (0x7F, 0x08):
+                        del buf[-1:]
+                    elif byte == 0x15:
+                        del buf[buf.rfind(b"\n") + 1:]
+                    elif byte == 0x04 and not buf:
+                        raise EOFError
+                    elif not too_long:
+                        buf.append(byte)
+                        too_long = len(buf) > PASTE_LIMIT
+        finally:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, old)
+            os.write(fd, b"\n")
+        if too_long:
+            raise TelegramError("the paste is too long to hold just a bot token; copy only the token")
+        return buf.decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def clear_if_holds(token: Optional[str], read_clipboard: Callable[[], Optional[str]],
+                   clear_clipboard: Callable[[], bool]) -> Optional[bool]:
+    """Empty a clipboard that holds `token` (or, with token None, anything shaped like a token). None when it does
+    not (nothing is touched), else whether clearing worked. The clipboard is read again right before clearing and
+    left alone when its content changed; the moment between that read and the clear remains (no clipboard tool
+    offers compare-and-clear), so content copied in that instant can still be emptied."""
+    def held(text) -> bool:
+        return bool(text) and (token in text if token else holds_token(text))
+    first = read_clipboard()
+    if not held(first):
+        return None
+    if read_clipboard() != first:
+        return None
+    return clear_clipboard()
+
+
+def _clear_after(clear_clipboard: Callable[[], bool], say: Callable[[str], None], what: str) -> bool:
+    """Empty a clipboard that held a token, and say plainly whether that worked."""
+    if clear_clipboard():
+        say(f"  {what} Cleared the clipboard, so the token cannot be pasted somewhere by mistake.")
+        return True
+    say(f"  {what} Could not clear the clipboard: it still holds the token. Copy something else to replace it.")
+    return False
+
+
+def ask_token(getpass_fn: Callable[[str], str], say: Callable[[str], None] = print,
+              read_clipboard: Callable[[], Optional[str]] = clipboard.read,
+              clear_clipboard: Callable[[], bool] = clipboard.clear) -> str:
+    """The token from a hidden prompt: Enter alone reads the clipboard (the token, or BotFather's whole message,
+    copied in Telegram), anything typed or pasted is searched the same way. A clipboard that held a token is
+    cleared whether the token was taken or refused. Nothing read here is ever printed."""
+    for _ in range(TOKEN_TRIES):
+        try:
+            typed = getpass_fn(TOKEN_PROMPT)
+        except TelegramError as e:  # read_hidden refused a paste too long to check
+            say(f"  {e.description}.")
+            continue
+        from_clipboard = not typed.strip()
+        text = read_clipboard() if from_clipboard else typed
+        if from_clipboard and not text:
+            say("  The clipboard is empty or cannot be read here. Copy the token in Telegram, or paste it.")
+            continue
+        try:
+            token = find_token(text)
+            if token is None and not from_clipboard and text.strip()[:1].isdigit():
+                clean_token(text)  # a typed attempt at a bare token: say what is wrong with its shape
+        except TelegramError as e:
+            if from_clipboard and holds_token(text):
+                _clear_after(clear_clipboard, say, f"{e.description}.")
+            else:
+                say(f"  {e.description}.")
+            continue
+        if token is None:
+            where = "The clipboard holds" if from_clipboard else "That text holds"
+            say(f"  {where} no bot token. Copy the token from BotFather's message (it looks like 123456789:AAE...).")
+            continue
+        if from_clipboard:
+            _clear_after(clear_clipboard, say, "Read the token from the clipboard.")
+        return token
+    raise SetupError("no bot token was given; copy it from BotFather and run `harnessgram setup` again")
+
+
+def forget_pasted_token(token: Optional[str], say: Callable[[str], None], read_clipboard: Callable[[], Optional[str]],
+                        clear_clipboard: Callable[[], bool]) -> Optional[bool]:
+    """However setup ended after the prompt was shown: a clipboard that still holds the token (or, when no token
+    was accepted, anything shaped like one) is emptied. None when it does not (nothing to do), else whether
+    clearing worked (said plainly either way)."""
+    cleared = clear_if_holds(token, read_clipboard, clear_clipboard)
+    if cleared is None:
+        return None
+    return _clear_after(lambda: cleared, say, "The clipboard still held the token.")
+
+
 def _token(raw: dict, env: dict, interactive: bool, getpass_fn: Callable[[str], str],
            assume_yes: bool = False, input_fn: Callable[[str], str] = input,
-           say: Callable[[str], None] = print) -> str:
-    """Existing config first, then CTB_BOT_TOKEN, then a hidden prompt."""
+           say: Callable[[str], None] = print, read_clipboard: Optional[Callable[[], Optional[str]]] = None,
+           clear_clipboard: Optional[Callable[[], bool]] = None) -> str:
+    """Existing config first, then CTB_BOT_TOKEN, then a hidden prompt (or the clipboard, see ask_token)."""
     has_saved = bool(raw.get("bot_token") or raw.get("bot_token_command"))
     saved_token = None
     if has_saved:
@@ -93,7 +246,7 @@ def _token(raw: dict, env: dict, interactive: bool, getpass_fn: Callable[[str], 
 
     if not interactive:
         raise SetupError("no bot token: set CTB_BOT_TOKEN in the environment (not on the command line)")
-    return clean_token(getpass_fn("Paste the bot token from BotFather (hidden): "))
+    return ask_token(getpass_fn, say, read_clipboard or clipboard.read, clear_clipboard or clipboard.clear)
 
 
 def _threaded_mode(bot, me: dict, interactive: bool, input_fn: Callable[[str], str], say: Callable[[str], None]) -> bool:
@@ -290,8 +443,9 @@ def run(*, owner_id: Optional[int] = None, language: Optional[str] = None, assum
         interactive: bool = True, install_hooks: bool = True, service: bool = True, start: bool = True,
         test_message: bool = True, run_doctor: bool = True, settings_file: Optional[Path] = None,
         bot=None, env: Optional[dict] = None, input_fn: Callable[[str], str] = input,
-        getpass_fn: Callable[[str], str] = getpass.getpass, say: Callable[[str], None] = print,
-        pair_timeout: float = 180) -> int:
+        getpass_fn: Callable[[str], str] = read_hidden, say: Callable[[str], None] = print,
+        pair_timeout: float = 180, read_clipboard: Optional[Callable[[], Optional[str]]] = None,
+        clear_clipboard: Optional[Callable[[], bool]] = None) -> int:
     env = os.environ if env is None else env
     path = C.config_path()
     raw = _existing_raw(path)
@@ -299,9 +453,15 @@ def run(*, owner_id: Optional[int] = None, language: Optional[str] = None, assum
     if not path.exists():
         new_install_defaults(raw)
     say("Harnessgram setup\n")
-    say(BOTFATHER_STEPS)
+    say(botfather_steps())
+    prompted, token = [], None
+
+    def prompt(text: str) -> str:
+        prompted.append(text)
+        return getpass_fn(text)
     try:
-        token = _token(raw, env, interactive, getpass_fn, assume_yes=assume_yes, input_fn=input_fn, say=say)
+        token = _token(raw, env, interactive, prompt, assume_yes=assume_yes, input_fn=input_fn, say=say,
+                       read_clipboard=read_clipboard, clear_clipboard=clear_clipboard)
         bot = bot or Bot(token)
         say("Step 2 of 4: checking the bot with Telegram")
         me = check_bot(bot)
@@ -367,6 +527,9 @@ def run(*, owner_id: Optional[int] = None, language: Optional[str] = None, assum
     except (EOFError, KeyboardInterrupt):
         say("\nSetup cancelled; nothing more was changed.")
         return 1
+    finally:
+        if prompted:  # a token that came through the prompt must not stay pasteable, however setup ended
+            forget_pasted_token(token, say, read_clipboard or clipboard.read, clear_clipboard or clipboard.clear)
 
     code = 0 if report is None else report.code
     listener = None

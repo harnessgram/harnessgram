@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import re
 import secrets
 import sys
 import time
@@ -24,7 +25,7 @@ from . import decisions as D
 from .config import Config, home_chat, private_dir, state_dir, write_private
 
 STATE_FILE = "cards.json"
-PROGRESS_STALE_AFTER = 30 * 60
+PROGRESS_STALE_AFTER = 10 * 60
 PROGRESS_CLOSE_AFTER = 6 * 60 * 60  # legacy constant; unfinished work is not closed by age
 PROGRESS_FINISHED_GRACE = 10 * 60
 PROGRESS_ENDED_GRACE = 5 * 60
@@ -32,6 +33,7 @@ KINDS = ("progress", "choice", "ask", "link", "numbers")
 ASKS = ("choice", "ask")  # the owner answers these once; the others only show
 TITLE_CHARS = 120
 DETAIL_CHARS = 600
+LIVE_CHARS = 200
 STEP_CHARS = 40
 LABEL_CHARS = 30
 VALUE_CHARS = 14
@@ -40,6 +42,7 @@ ANSWER_CHARS = 300
 MAX_STEPS = 6
 MAX_OPTIONS = 6
 MAX_FIGURES = 3
+MAX_BG = 99  # background tasks an automatic card counts
 MAX_OPEN = 60
 MAX_OPEN_PER_SESSION = 8
 KEEP_CLOSED = 60
@@ -153,8 +156,12 @@ def _record(ident, raw) -> Optional[dict]:
             rec[key] = float(raw[key])
     if kind == "progress" and D._num(raw.get("nudged_at")):
         rec["nudged_at"] = float(raw["nudged_at"])
+    if kind == "progress" and isinstance(raw.get("live"), str) and D._num(raw.get("live_at")):
+        rec.update(live=subject_line(raw["live"]), live_at=float(raw["live_at"]))
     if kind == "progress" and raw.get("automatic") is True:
         rec["automatic"] = True
+        if type(raw.get("bg")) is int and 0 <= raw["bg"] <= MAX_BG:
+            rec["bg"] = raw["bg"]
     if kind == "progress" and raw.get("auto_closed") is True:
         rec["auto_closed"] = True
     if state != "open":
@@ -247,9 +254,10 @@ def dismiss_progress(ident: str) -> bool:
         return True
 
 
-def stale_reminder(session: str, now: float) -> str:
-    """Claim one stale card reminder under the same lock as updates."""
-    with _locked() as path:
+def stale_reminder(session: str, now: float, until: Optional[float] = None) -> str:
+    """Claim one stale card reminder under the same lock as updates. With `until` (a time.monotonic() deadline,
+    what a hook passes) a lock still busy then raises CardError("busy") instead of waiting."""
+    with _locked(until) as path:
         data = _load(path)
         last = max((r.get("nudged_at", 0) for r in data.values()
                     if r["session"] == session and r["kind"] == "progress"), default=0)
@@ -266,19 +274,69 @@ def stale_reminder(session: str, now: float) -> str:
         return rec["id"]
 
 
-def sync_todos(session: str, chat: int, thread: int, todos: list, title: str,
-               now: Optional[float] = None) -> Optional[dict]:
-    """Reflect a complete TodoWrite snapshot in this session's own automatic card."""
-    if not session or not isinstance(todos, list):
-        return None
+_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S+")
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_ABS_PATH = re.compile(r"(?:(?<![\w.~])(?:~|\.{1,2})|(?<![\w.~])(?=[/\\])|\b[A-Za-z]:)(?:[/\\][^\s/\\]+)+[/\\]?")
+_REL_PATH = re.compile(r"\b(?:[\w.-]+/)+([\w-]+\.\w+)\b")
+_NUMERIC = re.compile(r"[/\\]?\d+(?:[/\\.-]\d+)*[/\\]?")  # a date such as 2026/11/12: kept as written
+_DEEP_PATH = re.compile(r"(?<![\w./-])[\w.-]+(?:/[\w.-]+){2,}/?")
+_TOKEN = re.compile(r"\b(?=[A-Za-z0-9_+=-]*\d)(?=[A-Za-z0-9_+=-]*[A-Za-z])[A-Za-z0-9_+=-]{20,}\b")
+
+
+def scrub_subject(text: str) -> str:
+    """A task subject made fit for the Cockpit: credentials cleaned (labelled ones too), links, e-mail addresses,
+    absolute, home and deep relative paths and long token-like strings replaced (all-numeric groups such as
+    dates stay), a relative file path cut to its
+    file name."""
+    from .creds import redact_channel
+    text = redact_channel(text or "")
+    text = _URL.sub("[link]", text)
+    text = _EMAIL.sub("[email]", text)
+    text = _REL_PATH.sub(lambda m: m.group(1), text)
+    text = _DEEP_PATH.sub(lambda m: m.group() if _NUMERIC.fullmatch(m.group()) else "[path]", text)
+    text = _ABS_PATH.sub(lambda m: m.group() if m.group() in ("/", "\\") or _NUMERIC.fullmatch(m.group())
+                         else "[path]", text)
+    text = _TOKEN.sub("[redacted]", text)
+    return " ".join(text.split())
+
+
+def subject_line(text: str) -> str:
+    """Short, plain card text: scrub before truncation so a cut credential cannot escape redaction."""
+    from . import fmt
+    return _clean(scrub_subject(fmt.FENCE.sub(" ", text))[:LIVE_CHARS], LIVE_CHARS, "live", required=False)
+
+
+def update_live(session: str, text: str, now: Optional[float] = None, until: Optional[float] = None) -> int:
+    """Update only the session's own open, unfinished agent cards. Never bump its authored steps/detail
+    timestamp: a moving live line must not hide a stale plan. Hooks pass a short lock deadline."""
+    def eligible(rec):
+        return (rec["session"] == session and rec["kind"] == "progress" and rec["state"] == "open"
+                and not rec.get("automatic") and not finished(rec))
+
+    text = subject_line(text)
+    if not session or not text or not any(eligible(r) for r in open_cards()):
+        return 0  # no card: no lock or state file written
     now = time.time() if now is None else now
-    from .creds import redact
+    with _locked(until) as path:
+        data = _load(path)
+        mine = [r for r in data.values() if eligible(r)]
+        for rec in mine:
+            rec.update(live=text, live_at=now)
+        if mine:
+            _save(path, data)
+    return len(mine)
+
+
+def _todo_body(todos: list):
+    """(valid items, unfinished items, progress body) from a task list: each item a dict with "content" (the
+    task's subject, the only text that reaches the card, scrubbed by scrub_subject) and "status" (pending,
+    in_progress or completed)."""
     valid = []
     for item in todos:
         if not isinstance(item, dict) or not isinstance(item.get("content"), str) or item.get("status") not in ("pending", "in_progress", "completed"):
             continue
         try:
-            text = _clean(redact(item["content"])[:STEP_CHARS], STEP_CHARS, "step")
+            text = _clean(scrub_subject(item["content"])[:STEP_CHARS], STEP_CHARS, "step")
         except CardError:
             continue
         valid.append((text, item["status"]))
@@ -288,7 +346,91 @@ def sync_todos(session: str, chat: int, thread: int, todos: list, title: str,
     ordered = (shown_done + remaining)[:MAX_STEPS]
     body = {"steps": [x[0] for x in ordered], "at": len(shown_done),
             "percent": min(99 if remaining else 100, round(100 * len(completed) / len(valid))) if valid else 0}
+    return valid, remaining, body
+
+
+def _new_ident(data: dict) -> str:
+    ident = secrets.token_hex(8)
+    while ident in data:
+        ident = secrets.token_hex(8)
+    return ident
+
+
+def sync_auto(session: str, chat: int, thread: int, title: str, todos: list, bg: int = 0,
+              now: Optional[float] = None) -> Optional[dict]:
+    """The bridge's own progress card for a working session whose agent made none: its title is the topic's
+    name, its steps are only the subjects of the session's task list (a list with nothing left to do counts
+    as no list: it is from an earlier task), and `bg` is how many background tasks it runs. Written only when
+    something changed. None when the agent has its own progress card (an automatic one is closed then) or
+    when there is no room."""
+    if not session:
+        return None
+    now = time.time() if now is None else now
+    valid, remaining, body = _todo_body(todos if isinstance(todos, list) else [])
+    if not remaining:
+        body = {"steps": [], "at": 0, "percent": None}
+    bg = max(0, min(MAX_BG, int(bg))) if type(bg) is int else 0
+    try:
+        title = _clean(title, TITLE_CHARS, "title")
+    except CardError:
+        return None
     with _locked() as path:
+        data = _load(path)
+        mine = [r for r in data.values() if r["session"] == session and r["kind"] == "progress" and r["state"] == "open"]
+        auto = [r for r in mine if r.get("automatic")]
+        if len(auto) < len(mine):  # the agent's own card: the automatic one gives way at once
+            for rec in auto:
+                rec.update(state="closed", closed=now)
+            if auto:
+                _save(path, data)
+            return None
+        rec = auto[0] if auto else None
+        if rec:
+            if rec["title"] == title and rec.get("bg", 0) == bg and all(rec.get(k) == v for k, v in body.items()):
+                return rec
+            rec.update(title=title, bg=bg, updated=now, step_at=step_times(rec, body, now), **body)
+        else:
+            if sum(r["state"] == "open" for r in data.values()) >= MAX_OPEN or sum(
+                    r["state"] == "open" and r["session"] == session for r in data.values()) >= MAX_OPEN_PER_SESSION:
+                return None
+            ident = _new_ident(data)
+            rec = {"id": ident, "kind": "progress", "session": session, "chat": chat, "thread": thread,
+                   "title": title, "detail": "", "created": now, "updated": now, "state": "open", "closed": 0.0,
+                   "automatic": True, "bg": bg, "step_at": [now] * body["at"], **body}
+            data[ident] = rec
+        _save(path, data)
+        return rec
+
+
+def close_auto(sessions, now: Optional[float] = None) -> int:
+    """Close the automatic progress cards of these sessions (gone idle or ended); how many were closed.
+    Nothing is written when there is none."""
+    sessions = set(sessions)
+    if not sessions:
+        return 0
+    now = time.time() if now is None else now
+    if not any(r["session"] in sessions and r["kind"] == "progress" and r.get("automatic") for r in open_cards()):
+        return 0  # the common case: one read, no lock
+    with _locked() as path:
+        data = _load(path)
+        gone = [r for r in data.values() if r["session"] in sessions and r["kind"] == "progress"
+                and r["state"] == "open" and r.get("automatic")]
+        for rec in gone:
+            rec.update(state="closed", closed=now)
+        if gone:
+            _save(path, data)
+    return len(gone)
+
+
+def sync_todos(session: str, chat: int, thread: int, todos: list, title: str,
+               now: Optional[float] = None, until: Optional[float] = None) -> Optional[dict]:
+    """Reflect a complete TodoWrite snapshot in this session's own automatic card. With `until` (a
+    time.monotonic() deadline, what a hook passes) a lock still busy then raises CardError("busy")."""
+    if not session or not isinstance(todos, list):
+        return None
+    now = time.time() if now is None else now
+    valid, remaining, body = _todo_body(todos)
+    with _locked(until) as path:
         data = _load(path)
         rec = next((r for r in data.values() if r["session"] == session and r["kind"] == "progress"
                     and r["state"] == "open" and r.get("automatic")), None)
@@ -549,9 +691,13 @@ def view(rec: dict, now: float) -> dict:
     """A card as the panel page gets it (no session id beyond its short form, no chat ids)."""
     out = {"id": rec["id"], "kind": rec["kind"], "title": rec["title"], "detail": rec["detail"],
            "age": max(0, int(now - rec["updated"])), "session": rec["session"][:8]}
-    for key in ("steps", "at", "percent", "options", "url", "label", "figures"):
+    for key in ("steps", "at", "percent", "options", "url", "label", "figures", "live", "live_at"):
         if key in rec:
             out[key] = rec[key]
+    if "live_at" in rec:
+        out["live_age"] = max(0, int(now - rec["live_at"]))
+    if rec.get("automatic"):
+        out.update(automatic=True, bg=rec.get("bg", 0))
     return out
 
 

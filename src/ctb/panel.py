@@ -34,8 +34,8 @@ import time
 from typing import Optional
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from . import accounts, bank, board, blocks, brief, cards, cockpit_apps, decisions, models, panel_page, panel_settings, panel_text, panel_view, status, usage
-from . import mac_resources, panel_youtube
+from . import accounts, bank, board, blocks, brief, cards, cockpit_apps, decisions, models, panel_page, panel_settings, panel_text, panel_view, status, usage, session_usage
+from . import auto_progress, mac_resources, panel_youtube
 from .config import Config, home_chat, state_dir
 from .inbox import PanelQueueFull
 from .sessions_menu import collect
@@ -290,12 +290,14 @@ def _hebrew(tr, rows, fields, waiting: list) -> None:
                 row[field + "_he"] = value
 
 
-def _background(path: Optional[str], state: str) -> int:
-    """How many background agents and commands a live session is running (0 for an ended one)."""
+def _background(path: Optional[str], state: str, now: Optional[float] = None) -> int:
+    """How many background agents and commands a live session is running (0 for an ended one). Read again only
+    when the transcript changed, or every ten minutes (a job that never reported ends after hours)."""
     if not path or state == "ended":
         return 0
     try:
-        return len(usage.background_of(path))
+        bucket = int((time.time() if now is None else now) // 600)
+        return auto_progress.cached(path, f"bg{bucket}", lambda p: len(usage.background_of(p)), 0)
     except Exception:
         return 0
 
@@ -335,24 +337,28 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
         # the topic's own session always makes the list (review of #136: cut after
         # MAX_SESSIONS first, the topic's panel said its live session was gone)
         shown = shown[:MAX_SESSIONS - 1] + [e for e in shown if e.session == here][:1]
+    usage_snapshot = session_usage.snapshot([(e.session, e.name) for e in entries], now, cfg.usage_prices)
     sessions = []
+    paths = {}
     for e in shown[:MAX_SESSIONS]:
         path = None if light else status.transcript_of(e.session)
-        ctx, model = status.usage_of(path) if path else (0, "")
+        paths[e.session] = path
+        # every transcript read is cached by the file's size and mtime: a frequent poll reads only what changed
+        ctx, model = auto_progress.cached(path, "usage", status.usage_of, (0, ""))
         model = usage.session_model(e.session, path)[0] or models.display_name(model)  # "Opus 5.5", after a /model too
         live = not light and e.state != "ended"
-        folder, branch = status.workplace(path)
+        folder, branch = auto_progress.cached(path, "place", status.workplace, ("", ""))
         sessions.append({"id": e.session[:8], "name": e.name, "state": e.state,
                          "age": None if e.age is None else int(e.age), "context": ctx, "model": model,
-                         "account": _session_account(e.session), "bg": _background(path, e.state),
+                         "account": _session_account(e.session), "bg": _background(path, e.state, now),
                          "now": panel_view.current_step(e.session) if live and e.state == "working" else "",
-                         "summary": panel_view.last_summary(path) if live else "",
+                         "summary": auto_progress.cached(path, "summary", panel_view.last_summary, "") if live else "",
                          "url": panel_view.topic_url(home_chat(cfg) if e.chat is None else e.chat, e.thread),
                          "here": bool(scope) and e.session == scope["session"],
                          "folder": folder, "branch": "" if branch in ("HEAD", "") else branch,
                          "waiting": [] if light or e.state == "ended" else waiting_words(e.session, now),
                          "compact": _session_compact(e.session),  # its own threshold; None = the global one
-                         "left": left_behind(e)})
+                         "left": left_behind(e), "usage": usage_snapshot["sessions"].get(e.session)})
     names = {e.session: e.name for e in entries}
     quota = []
     for name in accounts.names():
@@ -365,7 +371,7 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
                       "banked": usage.banked_resets(u),
                       "at": u.get("at")})
     out = {"ok": True, "now": int(now), "decisions": asked, "reminders": reminders, "sessions": sessions,
-           "quota": quota, "compact_at": _compact_at(), "default_model": _default_model(),
+           "usage_totals": usage_snapshot["totals"], "quota": quota, "compact_at": _compact_at(), "default_model": _default_model(),
            "settings": panel_settings.read()}
     if not light:
         out["mac"] = mac_resources.snapshot()
@@ -374,12 +380,16 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
     out["tasks"] = open_tasks(topics, now, (scope["chat"], scope["thread"]) if scope else None)
     ended = {e.session for e in entries if e.state == "ended"}
     states = {e.session: e.state for e in entries}
+    if not light:
+        _auto_cards(cfg, entries, paths, {s["id"]: s["bg"] for s in sessions}, now)
     # each card's way into its session's own topic: the same t.me link the sessions list carries (no chat ids)
     links = {e.session: panel_view.topic_url(home_chat(cfg) if e.chat is None else e.chat, e.thread) for e in entries}
+    backgrounds = {e.session: s["bg"] for e, s in zip(shown[:MAX_SESSIONS], sessions)}  # full ids: short ones can collide
     out["cards"] = [dict(cards.view(r, now), topic=names.get(r["session"], ""), topic_url=links.get(r["session"], ""),
+                         **_card_activity(r, paths, backgrounds, states),
                          ended=r["session"] in ended and (r["kind"] != "progress" or bool(r.get("auto_closed"))),
                          auto_closed=bool(r.get("auto_closed")),
-                         stale=r["kind"] == "progress" and r["state"] == "open" and
+                         stale=r["kind"] == "progress" and r["state"] == "open" and not r.get("automatic") and
                                states.get(r["session"]) == "working" and cards.is_stale(r, now),
                          old=panel_view.is_old(now, r.get("updated")),
                          here=bool(scope) and r["session"] == scope["session"])
@@ -396,7 +406,7 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
             out["brief"] = None
     # The response boundary: agent-written text leaves this machine for the browser (and the radio), so it is
     # credential-filtered here too - also what was saved before the creation-time filter existed.
-    for key in ("decisions", "reminders", "tasks", "sessions", "cards", "topic", "deliveries", "brief"):
+    for key in ("decisions", "reminders", "tasks", "sessions", "cards", "topic", "deliveries", "brief", "usage_totals"):
         _secret_free(out.get(key))
     waiting: list = []
     if scope:
@@ -407,14 +417,16 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
     _hebrew(tr, reminders, ("text", "topic"), waiting)
     _hebrew(tr, out["tasks"], ("text", "topic"), waiting)
     _hebrew(tr, sessions, ("name", "summary"), waiting)
-    _hebrew(tr, out["cards"], ("title", "detail", "topic"), waiting)
+    if out["usage_totals"]:
+        _hebrew(tr, out["usage_totals"]["top"], ("name",), waiting)
+    _hebrew(tr, out["cards"], ("title", "detail", "topic", "live", "task"), waiting)
     _hebrew(tr, out["deliveries"], ("title",), waiting)
     if out.get("brief"):
         _hebrew(tr, out["brief"]["lines"], ("text",), waiting)
         _hebrew(tr, out["brief"]["waiting"], ("text", "note", "detail"), waiting)
         _hebrew(tr, out["brief"]["noticed"], ("text",), waiting)
     # The last pass, after the translations were added: a translation (or a cached one) is returned clean too.
-    for key in ("decisions", "reminders", "tasks", "sessions", "cards", "topic", "deliveries", "brief"):
+    for key in ("decisions", "reminders", "tasks", "sessions", "cards", "topic", "deliveries", "brief", "usage_totals"):
         _secret_free(out.get(key))
     out["pending"] = len(waiting)
     if getattr(cfg, "radio", None):
@@ -427,6 +439,38 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
         except Exception:
             pass
     return out
+
+
+def _card_activity(rec: dict, paths: dict, backgrounds: dict, states: dict) -> dict:
+    """Mid-turn activity for an agent card, using the same incremental task cache and job counts as sessions.
+    No tool output, descriptions, or new transcript scanners are used."""
+    if (rec["kind"] != "progress" or rec["state"] != "open" or rec.get("automatic")
+            or cards.finished(rec) or states.get(rec["session"]) == "ended"):
+        return {}
+    tasks = auto_progress.task_list(paths.get(rec["session"]))
+    subject = next((t["content"] for t in tasks if t.get("status") == "in_progress"), "")
+    return {"task": cards.subject_line(subject), "bg": backgrounds.get(rec["session"], 0)}
+
+
+def _auto_cards(cfg: Config, entries: list, paths: dict, bg: dict, now: float) -> None:
+    """The bridge's own progress card for every working session whose agent made none (auto_progress.py),
+    titled with the topic's name; closed once the session is idle or ended. Never raises."""
+    try:
+        from .i18n import t
+        fallback = t("todo_plan", lang=cfg.target_language)
+        rows, used = [], [p for p in paths.values() if p]
+        for e in entries:
+            row = {"session": e.session, "state": e.state, "bg": bg.get(e.session[:8], 0),
+                   "chat": home_chat(cfg) if e.chat is None else e.chat, "thread": e.thread,
+                   "title": (e.name or "").strip() or fallback}
+            if e.state == "working" or row["bg"]:
+                row["path"] = paths[e.session] if e.session in paths else status.transcript_of(e.session)
+                used.append(row["path"])
+            rows.append(row)
+        auto_progress.sync(rows, now)
+        auto_progress.forget(p for p in used if p)
+    except Exception:
+        pass
 
 
 # --- the page ----------------------------------------------------------------------------
@@ -1186,13 +1230,8 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             return
         self._media(*found)
 
-    def _media(self, path: str, ctype: str) -> None:
-        """Stream one media file, whole or one byte range, never reading it into memory."""
-        try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        except OSError:
-            self._json(404, {"error": "not found"})
-            return
+    def _media(self, fd: int, ctype: str) -> None:
+        """Take ownership of the verified descriptor and stream it, whole or one byte range."""
         with os.fdopen(fd, "rb") as f:
             st = os.fstat(f.fileno())
             if not stat.S_ISREG(st.st_mode):

@@ -21,7 +21,7 @@ def func(name: str) -> str:
 def test_both_languages_have_the_new_tab_and_card_strings():
     he, en = panel_page.STRINGS["he"], panel_page.STRINGS["en"]
     assert he.keys() == en.keys()
-    for key in ("tabMe", "tabAgents", "settings", "heroOne", "heroMany", "allClear", "cardsAsk", "cardsShow",
+    for key in ("tabMe", "tabAgents", "settings", "moreTabs", "heroOne", "heroMany", "allClear", "cardsAsk", "cardsShow",
                 "cardsOld", "cardSent", "cardAlready", "cardGone", "answerPh", "send", "openLink", "wrote"):
         assert he[key].strip() and en[key].strip(), key
     for kind in ("progress", "choice", "ask", "link", "numbers"):

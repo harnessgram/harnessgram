@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from . import accounts, flood, identity, lang as L, menus, status
+from . import accounts, flood, identity, lang as L, menus, pins, status
 from .config import home_chat, private_dir, state_dir, write_private
 from .i18n import t
 from .telegram import Bot, TelegramError
@@ -374,9 +374,22 @@ def run(cfg, daily=False, print_only=False, bot=None, now=None, find=status.tran
                 flood.optional_call(bot, "editMessageText", {"chat_id": home_chat(cfg), "message_id": state["id"],
                                     "text": body, "parse_mode": "HTML"})
             except TelegramError as exc:
-                if "not modified" not in str(exc).lower():
+                description = exc.description.lower()
+                if exc.code == 400 and "message can't be edited" in description:
+                    try:
+                        flood.optional_call(bot, "unpinChatMessage", {"chat_id": home_chat(cfg),
+                                            "message_id": state["id"]})
+                    except TelegramError as unpin_exc:
+                        if "not found" not in unpin_exc.description.lower():
+                            return 1  # do not replace while the old message may still be pinned
+                    state = {}
+                    write_private(path, json.dumps(state))
+                elif exc.code == 400 and ("message to edit not found" in description or "message_id_invalid" in description):
+                    state = {}
+                    write_private(path, json.dumps(state))
+                elif "not modified" not in description:
                     return 1  # ambiguous failure must not create a duplicate pin
-        else:
+        if not state.get("id"):
             msg = flood.optional_call(bot, "sendMessage", {"chat_id": home_chat(cfg), "text": body,
                                       "parse_mode": "HTML", "disable_notification": True})
             state["id"] = msg["message_id"]

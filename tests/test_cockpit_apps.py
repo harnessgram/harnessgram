@@ -356,6 +356,49 @@ def test_symlinks_may_not_escape_the_root(server, media):
     assert code == 200 and data == CLIP  # a link that stays inside the root is fine
 
 
+def test_directory_replaced_with_a_symlink_during_media_open_is_refused(server, media, monkeypatch):
+    outside = media.parent / "outside"
+    outside.mkdir()
+    (outside / "one.png").write_bytes(b"outside secret")
+    real_open = os.open
+    swapped = []
+
+    def replace_before_open(path, flags, *args, **kwargs):
+        if path == "shots" and kwargs.get("dir_fd") is not None and not swapped:
+            (media / "shots").rename(media / "original-shots")
+            (media / "shots").symlink_to(outside, target_is_directory=True)
+            swapped.append(True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", replace_before_open)
+    code, _, data = get(server, "/app/sample/media/shots/one.png")
+    assert swapped and code == 404 and b"outside secret" not in data
+
+
+def test_media_stream_uses_the_checked_descriptor_even_after_directory_replacement(server, media, monkeypatch):
+    outside = media.parent / "outside"
+    outside.mkdir()
+    (outside / "one.png").write_bytes(b"outside secret")
+    real_media_file = cockpit_apps.media_file
+    opened = []
+
+    def replace_after_open(app, rel):
+        found = real_media_file(app, rel)
+        assert found is not None
+        opened.append(found[0])
+        (media / "shots").rename(media / "original-shots")
+        (media / "shots").symlink_to(outside, target_is_directory=True)
+        return found
+
+    monkeypatch.setattr(cockpit_apps, "media_file", replace_after_open)
+    real_close, closed = os.close, []
+    monkeypatch.setattr(os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    code, _, data = get(server, "/app/sample/media/shots/one.png")
+    assert code == 200 and data == b"\x89PNG...."
+    # ownership was transferred to the HTTP stream, which closed it (a number check alone races fd reuse)
+    assert opened[0] in closed
+
+
 def test_a_control_character_in_a_media_path_never_reaches_a_header(server, media):
     code, hdrs, _ = get(server, "/app/sample/media/clip.mp4%0d%0aX-Injected:%201")
     assert code == 404 and "X-Injected" not in hdrs

@@ -11,8 +11,9 @@ import os
 import sys
 from pathlib import Path
 
+from ..config import config_path
 from ..cockpit_apps import apps_dir
-from . import page, safefs, strings
+from . import adapter, page, safefs, strings
 
 NAME = "studio"
 WRAPPER = '''"""Runs the Studio's API (written by `harnessgram studio install`). The panel runs it from the app folder;
@@ -21,6 +22,10 @@ import os
 import sys
 
 sys.path.insert(0, {root!r})
+from ctb.studio import adapter
+adapter.CONFIG_PATH = {config!r}
+adapter.MEDIA_ROOT_OVERRIDE = {media_root!r}
+adapter.limit_memory()
 from ctb.studio.api import main
 
 sys.exit(main(folder=os.path.dirname(os.path.abspath(__file__))))
@@ -28,8 +33,17 @@ sys.exit(main(folder=os.path.dirname(os.path.abspath(__file__))))
 
 
 def manifest() -> dict:
-    return {"title": strings.COMMON["en"]["title"].replace("The ", ""), "title_he": strings.STUDIO_MANIFEST_TITLE_HE, "icon": "film",
-            "page": "index.html", "command": [sys.executable, "api.py"]}
+    out = {"title": strings.COMMON["en"]["title"].replace("The ", ""), "title_he": strings.STUDIO_MANIFEST_TITLE_HE, "icon": "film",
+           "page": "index.html", "command": [sys.executable, "api.py"]}
+    try:
+        cfg = adapter.settings()
+        if cfg.studio_adapter:
+            root = adapter.media_root(cfg, adapter.module(cfg))
+            if root is not None:
+                out["media_root"] = str(root)
+    except adapter.AdapterError:
+        pass  # the API will explain the fallback sample, without breaking installation
+    return out
 
 
 InstallError = safefs.Refused  # the install refused to write: a link, or not a plain folder or file, is in the way
@@ -53,8 +67,10 @@ def install(base: Path = None) -> Path:
         os.close(root_fd)
     try:
         code_root = str(Path(__file__).resolve().parent.parent.parent)  # the folder that holds the `ctb` package
-        files = {"index.html": page.render_page(), "api.py": WRAPPER.format(root=code_root),
-                 "manifest.json": json.dumps(manifest(), ensure_ascii=False, indent=1) + "\n"}
+        data = manifest()
+        files = {"index.html": page.render_page(), "api.py": WRAPPER.format(
+                    root=code_root, config=str(adapter.CONFIG_PATH or config_path()), media_root=data.get("media_root", "")),
+                 "manifest.json": json.dumps(data, ensure_ascii=False, indent=1) + "\n"}
         for name, text in files.items():
             safefs.write_file(folder_fd, name, text)
     finally:

@@ -12,7 +12,8 @@ Security:
 - the page has a strict CSP with a per-response nonce, no external resources, no-store and no-referrer.
 - the bot token arrives in a POST body, lives in memory, is saved by the same functions as the wizard, and is
   never sent back, logged or put in a URL or a process argument. The page shows fixed sentences only.
-- the server stops by itself after the setup finished, or after IDLE_SECONDS without a request.
+- the server stops by itself a few seconds after the setup finished and the clear-clipboard button was answered
+  (or CLIP_GRACE after the finish when nobody taps it), or after IDLE_SECONDS without a request.
 """
 from __future__ import annotations
 
@@ -34,13 +35,15 @@ from . import lang as L
 from . import pairing
 from . import setup
 from .setup import SetupError
-from .telegram import Bot, TelegramError, clean_token
+from . import clipboard
+from .telegram import Bot, TelegramError, clean_token, find_token
 
 MAX_BODY = 4096
 MAX_CONNECTIONS = 8  # connections served at once; more are closed at once
 READ_TIMEOUT = 5.0  # seconds a connection may take for each read, the request line and headers included
 IDLE_SECONDS = 30 * 60
 DONE_GRACE = 3.0  # seconds the server keeps answering after a finished setup, so the last answer arrives
+CLIP_GRACE = 5 * 60.0  # seconds after the finish (or the last failed clear) the clear button keeps working
 PAIR_SECONDS = 10 * 60
 # One table per page language, the same keys in each. A command or a code sample is never inside a sentence:
 # the page shows it on its own line (CODES in the script).
@@ -94,7 +97,8 @@ class SetupFlow:
                  service: bool = True, start: bool = True, test_message: bool = True, run_doctor: bool = True,
                  settings_file: Optional[Path] = None, env: Optional[dict] = None,
                  bot_factory: Optional[Callable[[str], object]] = None, pair_timeout: float = PAIR_SECONDS,
-                 say: Callable[[str], None] = print):
+                 say: Callable[[str], None] = print, read_clipboard: Optional[Callable[[], Optional[str]]] = None,
+                 clear_clipboard: Optional[Callable[[], bool]] = None):
         self.lock = threading.RLock()
         self.path = C.config_path()
         self.raw = setup._existing_raw(self.path)
@@ -116,6 +120,10 @@ class SetupFlow:
         self.stop = threading.Event()
         self.busy = False
         self.result: Optional[dict] = None
+        self.read_clipboard = read_clipboard or clipboard.read
+        self.clear_clipboard_fn = clear_clipboard or clipboard.clear
+        self.clip: Optional[str] = None  # after the page's clear button: "cleared", "failed" or "clean"
+        self.clip_taps = 0  # how often the clear button was answered (the server's watcher keys its grace on it)
 
     # --- one gate for every network result ------------------------------------------------------------------
     #
@@ -192,8 +200,8 @@ class SetupFlow:
             ticket = (self.bot_gen, False)
         if not isinstance(text, str) or not text.strip():
             return "token_format"
-        try:
-            token = clean_token(text)
+        try:  # just the token, or BotFather's whole message pasted as it is
+            token = find_token(text) or clean_token(text)
         except TelegramError:
             return "token_format"
         try:
@@ -205,6 +213,20 @@ class SetupFlow:
             return "token_rejected"
         if not self._commit(ticket, lambda: self._set_bot(token, bot, me, new_token=True)):
             return self._dropped()  # the finish started, or another token won, while Telegram checked this one
+        return None
+
+    def clear_clipboard(self) -> Optional[str]:
+        """The finish banner's one-tap clear: the browser cannot read the clipboard without asking for permission,
+        but this local server can. A clipboard that still holds the token is emptied; any other content is left
+        alone. Only after the finish, and only on that tap."""
+        with self.lock:
+            if self.result is None or not self._token:
+                return "order"
+            token = self._token
+        cleared = setup.clear_if_holds(token, self.read_clipboard, self.clear_clipboard_fn)
+        with self.lock:
+            self.clip = "clean" if cleared is None else "cleared" if cleared else "failed"
+            self.clip_taps += 1
         return None
 
     def recheck(self) -> Optional[str]:
@@ -438,6 +460,7 @@ class SetupFlow:
                 "kept_id": self.chat_id if self.kept and self.chat_id else None,
                 "busy": self.busy,
                 "finished": copy.deepcopy(self.result),
+                "clip": self.clip,
                 "prefs": self._saved_prefs(),
                 "gens": {"bot": self.bot_gen, "pair": self.pair_gen},
                 "languages": [[code, name] for code, name in L.LANG_NAMES.items()],
@@ -464,6 +487,7 @@ class SetupServer(http.server.ThreadingHTTPServer):
         self.idle_timeout, self.clock = idle_timeout, clock
         self.last_seen = clock()
         self.done_at: Optional[float] = None
+        self.clip_seen = (0, None)  # (flow.clip_taps, when the watcher first saw that count)
         self.reason: Optional[str] = None
         self.on_page: Optional[Callable[[], None]] = None
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
@@ -501,8 +525,15 @@ class SetupServer(http.server.ThreadingHTTPServer):
         if self.flow.result is not None:
             if self.done_at is None:
                 self.done_at = now
-            if now - self.done_at >= DONE_GRACE:
-                return "done"
+            taps = self.flow.clip_taps
+            if taps != self.clip_seen[0]:
+                self.clip_seen = (taps, now)
+            if self.flow.clip in ("cleared", "clean"):  # the clear button is gone: only the last answer is left
+                if now - self.clip_seen[1] >= DONE_GRACE:
+                    return "done"
+            elif now - (self.clip_seen[1] or self.done_at) >= CLIP_GRACE:
+                return "done"  # nobody tapped (or the clear failed and nobody retried) for a few minutes
+            return None
         if self.flow.busy:  # the last step runs (it may wait for the listener): that is activity, not idleness
             self.last_seen = now
             return None
@@ -620,6 +651,7 @@ ACTIONS = {
     "pair": lambda flow, body: flow.start_pairing(),
     "confirm": lambda flow, body: flow.confirm(body),
     "finish": lambda flow, body: flow.finish(body.get("lang"), body.get("prefs")),
+    "clipboard": lambda flow, body: flow.clear_clipboard(),
 }
 
 
@@ -673,12 +705,15 @@ def run_web(*, language: Optional[str] = None, owner_id: Optional[int] = None, i
         if remote:
             say(f"  Connected over SSH? Forward the port first (ssh -L {server.port}:127.0.0.1:{server.port} "
                 "<this machine>), then open the link on your own computer.")
+    say(f"  After \"All set\" the page stays open up to {int(CLIP_GRACE // 60)} minutes for its clear-clipboard "
+        "button; press Ctrl-C to close it sooner.")
     threading.Thread(target=watch, args=(server,), daemon=True, name="setup-page-watch").start()
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
-        say("\nSetup cancelled; nothing more was changed.")
-        return 1
+        if flow.result is None:  # after the finish, Ctrl-C only closes the page sooner
+            say("\nSetup cancelled; nothing more was changed.")
+            return 1
     finally:
         flow.close()
         server.server_close()
@@ -819,7 +854,7 @@ h1{font-size:1.4rem}
 (function(){
 "use strict";
 var ALL=__STRINGS__, FORCED="__FORCED__";
-var CODES={newbot:"/newbot",token:"123456789:AAE…",threaded:"/mybots → your bot → Bot Settings → Threaded Mode → On",
+var CODES={newbot:"/newbot",name:"Harnessgram",username:suggestUsername(),token:"123456789:AAE…",threaded:"/mybots → your bot → Bot Settings → Threaded Mode → On",
   install:"harnessgram install",doctor:"harnessgram doctor",serve:"harnessgram serve",setup:"harnessgram setup",again:"harnessgram setup --web"};
 var ERR={token_format:"err_format",token_rejected:"err_rejected",network:"err_network",save_failed:"err_save",
   install_failed:"err_install",order:"err_order",gone:"err_gone",bad_request:"err_generic",stale:"err_generic",conflict:"err_conflict",internal:"err_generic"};
@@ -834,7 +869,25 @@ tokenInput.type="password";tokenInput.id="token";tokenInput.autocomplete="off";t
 tokenInput.setAttribute("autocapitalize","off");tokenInput.setAttribute("autocorrect","off");
 function syncDir(el){if(el.value){el.setAttribute("dir","auto");}else{el.removeAttribute("dir");}}
 tokenInput.addEventListener("input",function(){syncDir(tokenInput);});
+// BotFather's whole message may be pasted: keep only the token (a one-line field would glue the lines together)
+tokenInput.addEventListener("paste",function(ev){
+  var data=ev.clipboardData||window.clipboardData;if(!data)return;
+  ev.preventDefault();var text=String(data.getData("text")||"");
+  var found=findTokens(text);tokenInput.value=found.length===1?found[0]:text.replace(/\s+/g," ").trim();
+  syncDir(tokenInput);
+});
 
+function suggestUsername(){
+  var abc="abcdefghijkmnpqrstuvwxyz23456789",out="",r=new Uint32Array(6);
+  (window.crypto||window.msCrypto).getRandomValues(r);
+  for(var i=0;i<6;i++){out+=abc.charAt(r[i]%abc.length);}
+  return "harnessgram_"+out+"_bot";
+}
+function findTokens(text){
+  var re=/(^|[^A-Za-z0-9_:\/-])(\d+:[A-Za-z0-9_-]{30,})(?![A-Za-z0-9_:-])/g,m,seen={},out=[];
+  while((m=re.exec(text))!==null){if(!seen[m[2]]){seen[m[2]]=1;out.push(m[2]);}}
+  return out;
+}
 function t(k,v){var s=S[k]||ALL.en[k]||k;if(v){for(var n in v){s=s.split("{"+n+"}").join(String(v[n]));}}return s;}
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e;}
 function add(p){for(var i=1;i<arguments.length;i++){if(arguments[i])p.appendChild(arguments[i]);}return p;}
@@ -874,7 +927,7 @@ function poll(){
 function step1(cur){
   var b=el("div","body"),how=el("ol","how");
   add(how,add(el("li"),el("span",null,t("s1_a")),codeLine("newbot")),
-    add(el("li"),el("span",null,t("s1_b"))),
+    add(el("li"),el("span",null,t("s1_b")),codeLine("name"),el("span",null,t("s1_b2")),codeLine("username")),
     add(el("li"),el("span",null,t("s1_c")),codeLine("token")),
     add(el("li"),el("span",null,t("s1_d")),codeLine("threaded")));
   add(b,how,add(el("div","row"),linkButton(t("s1_open"),"https://t.me/BotFather"),
@@ -1058,6 +1111,10 @@ function render(){
   if(fin){
     var ok=st.finished.code===0,ban=el("section","banner"+(ok?"":" warn"));ban.setAttribute("role","status");
     add(ban,el("h2",null,ok?t("all_set"):t("almost")),el("p",null,t("next")),el("p",null,t("next_close")));
+    var CLIP={cleared:"clip_cleared",clean:"clip_clean",failed:"clip_failed"};
+    var clip=gone?msg("warn",t("clip_gone")):(CLIP[st.clip]?msg(st.clip==="failed"?"warn":"ok",t(CLIP[st.clip])):null);
+    add(ban,el("p",null,t("clip_hint")),clip,(gone||st.clip==="cleared"||st.clip==="clean")?null:
+      add(el("div","row"),button(working===5?t("clip_working"):t("clip_go"),"soft",function(){act(5,"clipboard",{});})));
     app.appendChild(ban);
   }
   if(focused){var again=document.getElementById(focused);if(again)again.focus();}

@@ -273,13 +273,15 @@ def test_the_whole_setup_with_a_fake_bot(make, tmp_path, monkeypatch):
     sent = srv.bot.methods("sendMessage")
     assert sent[0]["chat_id"] == OWNER and sent[0]["text"] == setup.t("setup_connected", lang="he")
 
-    # a second finish changes nothing, and the server stops itself after a short grace
+    # a second finish changes nothing; the server keeps the clear-clipboard button working for a while, then stops
     assert api(srv, "finish", {"lang": "en"})[1]["state"]["finished"] == done
     now = [1000.0]
     srv.clock = lambda: now[0]
     srv.touch()
     assert srv.should_stop() is None
     now[0] += setup_page.DONE_GRACE
+    assert srv.should_stop() is None
+    now[0] += setup_page.CLIP_GRACE
     assert srv.should_stop() == "done"
 
 
@@ -508,6 +510,7 @@ def test_run_web_over_ssh_prints_the_link_and_the_port_forward():
 
 def test_run_web_end_to_end_through_the_browser_launcher(monkeypatch, tmp_path):
     monkeypatch.setattr(setup_page, "DONE_GRACE", 0.1)
+    monkeypatch.setattr(setup_page, "CLIP_GRACE", 0.3)
     monkeypatch.setattr(doctor, "collect", lambda offline=False, bot=None, listener=None: [("ok", "all good")])
     bot, lines, seen = PageBot(), [], {}
 
@@ -1174,6 +1177,7 @@ def test_the_terminal_wizard_prints_what_it_printed_before(monkeypatch):
     bot = PageBot()
     answers = iter(["y", "he", ""])
     monkeypatch.setattr(setup.pairing, "new_code", lambda: "c0ffee00")
+    monkeypatch.setattr(setup, "suggested_username", lambda: "harnessgram_sample_bot")
     bot.push("/start c0ffee00")
     lines = []
 
@@ -1187,10 +1191,14 @@ def test_the_terminal_wizard_prints_what_it_printed_before(monkeypatch):
     assert "\n".join(lines) == "\n".join([
         "Harnessgram setup\n",
         "Step 1 of 4: create your bot (about 1 minute, in the Telegram app)",
-        '  1. Open @BotFather and send /newbot. Pick a name and a username that ends in "bot".',
-        "  2. Copy the token BotFather sends back (it looks like 123456789:AAE...). Keep it private.",
+        "  1. Open @BotFather (https://t.me/BotFather) and send /newbot.",
+        "     When it asks, send a name, for example: Harnessgram",
+        '     Then a username that ends in "bot", for example: harnessgram_sample_bot',
+        "  2. BotFather answers with a message that holds the token (it looks like 123456789:AAE...).",
+        "     Tap the token to copy it, or copy the whole message. Setup reads it from the clipboard.",
         "  3. Still in BotFather: /mybots > your bot > Bot Settings > Threaded Mode > turn ON.",
-        "     (This gives the private chat with your bot Topics: one topic per Claude Code session.)",
+        "     (This gives the private chat with your bot Topics: one topic per Claude Code session.",
+        "     Setup checks it for you.)",
         "",
         "Step 2 of 4: checking the bot with Telegram",
         "  Bot @demo_bot answers.",

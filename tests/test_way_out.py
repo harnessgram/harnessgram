@@ -17,10 +17,12 @@ SRC = Path(inbox.__file__).parent
 EXEMPT = {
     ("alerts.py", "_button", 0): "channel post link, not a menu.",
     ("alerts.py", "_button", 1): "channel post link, not a menu.",
+    ("alerts.py", "_button", 2): "channel post link, not a menu.",
     ("board.py", "_sync", 0): "permanent pinned board; closing would remove its controls.",
     ("board.py", "_sync", 1): "permanent pinned board; closing would remove its controls.",
     ("panel_pin.py", "_markup", 0): "permanent pinned topic link, not a menu.",
     ("cockpit_notice.py", "update", 0): "one link to the open Cockpit question; the notice closes itself once answered.",
+    ("dialogs.py", "_background_card", 0): "one Move to background button; the card clears itself when the command ends or after the tap.",
     ("telegram.py", "full_width", 0): "reformats an existing keyboard without creating a menu.",
 }
 WAY_OUT_CALLBACKS = {"more:dismiss", "more:unbuttons", "more:back", "close:no", "say:no", "d:x", "k:esc", "sm:l"}
@@ -350,7 +352,6 @@ COCKPIT_EXEMPT = {
     "model": "always-visible inline settings, not a dismissible picker.",
 }
 REPLY_EXEMPT = {
-    "reply_keyboard": "fixed topic reply keyboard, not a transient menu.",
     "fixed_keyboard": "fixed topic reply keyboard, not a transient menu.",
 }
 
@@ -379,6 +380,11 @@ def test_cockpit_dialogs_sheets_and_pickers_have_a_way_out():
                           ("oldGroup", 'el("summary"')):
         body = func(name)
         assert 'el("details"' in body and summary in body and 'det.appendChild(' in body
+    # The bottom bar's More sheet: its own button toggles it, any outside tap closes it, and choosing a tab closes it.
+    tabs = func("tabs")
+    assert 'el("div","more-sheet")' in tabs and "sheet.hidden=!sheet.hidden" in tabs and "sheet.hidden=true" in tabs
+    assert '!sh.contains(e.target)' in code and 'sh.hidden=true' in code
+    code = code.replace('el("div","more-sheet")', "")
     # Refuse newly introduced dialog/sheet/popover APIs until this inventory is extended.
     assert not re.search(r'<dialog\b|el\(["\']dialog["\']|createElement\(["\']dialog["\']|\.showModal\s*\(|\.showPopover\s*\(|role["\']?\s*,\s*["\']dialog|el\(["\'][^"\']+["\']\s*,\s*["\'][^"\']*(?:modal|sheet|popover)', code, re.I)
     assert not re.search(r'el\(["\']select["\']|<select\b|["\']listbox["\']|\.type\s*=\s*["\'](?:time|datetime-local|month|week)["\']', code, re.I)

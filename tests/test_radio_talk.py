@@ -93,6 +93,24 @@ def test_replies_that_come_close_together_go_out_as_one_bulletin():
     assert T.bulletin([a]) == "מסלול: המסך מוכן."
 
 
+def test_reply_bulletin_removes_email_and_account_local_part_and_is_bounded():
+    text = T.bulletin([{"account": "secretname@example.com", "text": "חשבון secretname סיים."},
+                       {"text": "עדכון ארוך מאוד. " * 100}])
+    assert "@" not in text and "secretname" not in text
+    assert len(text) <= 600
+
+
+def test_spool_is_always_private_when_outgoing_redaction_is_disabled():
+    c = cfg()
+    c.redact_outgoing = False
+    secret = "ownerlocal@example.com"
+    rec = T.on_reply(c, secret, secret, REPLY, radio_on=lambda: True, translate=english,
+                     ask=lambda _: f"<<<{secret} ownerlocal finished.>>>")
+    raw = spooled()[0].read_text(encoding="utf-8")
+    assert secret not in raw and "ownerlocal" not in raw
+    assert secret not in json.dumps(rec) and "ownerlocal" not in json.dumps(rec)
+
+
 def test_the_spoken_line_is_short_hebrew():
     long_reply = "First thing. Second thing. Third thing. Fourth thing. " * 10
     line = T.spoken_reply("pantry: תשלומים", long_reply, lambda t: "אחת. שתיים. שלוש. ארבע. חמש.", {})

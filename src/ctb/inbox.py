@@ -52,7 +52,7 @@ MAX_TEXT = 8000
 # The /model buttons: exact names shown, exact ids typed; the one table is models.MODELS
 MODEL_CHOICES, MODEL_IDS, MODEL_LABELS = _models.CHOICES, _models.IDS, _models.LABELS
 # The /mode buttons arrive as callback queries; my_chat_member and channel_post let the owner connect an alerts channel.
-ALLOWED_UPDATES = ["message", "callback_query", "edited_message", "my_chat_member", "channel_post"]
+ALLOWED_UPDATES = ["message", "callback_query", "widget_query", "edited_message", "my_chat_member", "channel_post"]
 from .creds import SECRET, is_secret, redact  # noqa: F401  (re-exported)
 
 auto_compact_limit = compact.auto_compact_limit
@@ -82,6 +82,7 @@ def set_car_mode(on: bool) -> None:
 
 def last_session(topics: Optional[TopicMap] = None) -> Optional[str]:
     """The session the owner worked with most recently (its state file changes on every turn)."""
+    from .harness import legacy_topic_supported
     state_folder = state_dir() / "session-state"
     if not state_folder.is_dir():
         return None
@@ -90,7 +91,8 @@ def last_session(topics: Optional[TopicMap] = None) -> Optional[str]:
     for f in state_folder.glob("*.json"):
         if f.is_file():
             sid = f.stem
-            if not known or sid in known:
+            # Namespaced state keys are sanitized to filenames by session_state_path.
+            if not sid.startswith("codex_default_") and legacy_topic_supported(sid) and (not known or sid in known):
                 files.append(f)
     if not files:
         return None
@@ -1001,6 +1003,17 @@ def _refuse(bot, chat_id: int, m: dict, cfg: Config) -> None:
         pass
 
 
+def _refuse_harness(bot, cfg: Config, m: dict, q: Optional[dict] = None) -> str:
+    """Unsupported routing must not silently drop a message or leave a tap spinning."""
+    poll_log("refused unsupported harness/profile identity")
+    text = t("toast_not_available", lang=getattr(cfg, "ui_language", None) or get_lang())
+    if q is not None:
+        _answer_button(bot, q, text)
+    else:
+        _terminal_say(bot, cfg, m, text)
+    return "unsupported-harness"
+
+
 # --- /mode: the permission-mode buttons ---------------------------------------------------
 
 MODE_COMMANDS = ("/mode", "הרשאות", "permissions")
@@ -1873,9 +1886,11 @@ def general_offer(cfg, bot, m: dict, dispatcher_session: str) -> str:
 def _recent_topics(topics: TopicMap, exclude: str = "") -> list:
     """Up to five session topics, most recently active first: [(session, label)]."""
     from .topics import session_state_path
+    from .harness import legacy_topic_supported
     found = []
     for order, (sid, entry) in enumerate(topics.all().items()):
-        if not isinstance(entry, dict) or not isinstance(entry.get("thread"), int) or sid == exclude:
+        if (not legacy_topic_supported(sid) or not isinstance(entry, dict)
+                or not isinstance(entry.get("thread"), int) or sid == exclude):
             continue
         try:
             stamp = session_state_path(sid).stat().st_mtime
@@ -2052,6 +2067,9 @@ def general_offer_button(q: dict, cfg, bot, topics: TopicMap, inbox: Inbox, medi
         return "expired"
     from . import dispatcher
     dispatcher_session = dispatcher.get_dispatcher()
+    from .harness import legacy_topic_supported
+    if not legacy_topic_supported(dispatcher_session):
+        dispatcher_session = None
 
     if action == "b":
         _answer_button(bot, q, "")
@@ -2092,7 +2110,7 @@ def general_offer_button(q: dict, cfg, bot, topics: TopicMap, inbox: Inbox, medi
         entry = topics.all().get(target) or {}
         thread = entry.get("thread") if isinstance(entry.get("thread"), int) else None
         name = str(entry.get("visible_name") or entry.get("name") or "Claude")[:60]
-        if not target or thread is None:
+        if not target or thread is None or not legacy_topic_supported(target):
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
 
@@ -2656,6 +2674,10 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
             and chat.get("type", _home_type(cfg) if chat_id == home_chat(cfg) else None) == _chat_type(cfg, chat_id)
             and not (q.get("from") or {}).get("is_bot"))
     home_mine = mine and chat_id == home_chat(cfg)  # the buttons of the home group's global menus
+    from .harness import legacy_topic_supported
+    if not legacy_topic_supported(session):
+        result = _refuse_harness(bot, cfg, m, q)
+        return result if mine else "ignored"
 
     if data == "more:unbuttons":
         if not mine:
@@ -2826,7 +2848,7 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         return board.button(q, cfg, bot, inbox)
 
     if data.startswith("dg:"):  # a dialog card: owner only, this topic's own session, one press per screen
-        if not mine or not session or not re.fullmatch(r"dg:(?:s|e:[0-9a-f]{12}|d:[0-9a-f]{12}|[oxt]:\d{1,2}:[0-9a-f]{12}|k:(?:up|down|enter):[0-9a-f]{12})", data):
+        if not mine or not session or not re.fullmatch(r"dg:(?:s|[ebd]:[0-9a-f]{12}|[oxt]:\d{1,2}:[0-9a-f]{12}|k:(?:up|down|enter):[0-9a-f]{12})", data):
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
         if _terminal_background(session, lambda: dialogs.button(q, cfg, bot, m, session)):
@@ -2985,6 +3007,9 @@ def handle_edit(m: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, start
         return "ignored"
     session = topics.session_at(chat.get("id"), m.get("message_thread_id"))
     text = (m.get("text") or m.get("caption") or "").strip()
+    from .harness import legacy_topic_supported
+    if not legacy_topic_supported(session):
+        return _refuse_harness(bot, cfg, m)
     if m.get("video") or m.get("animation"):
         text = framing.sanitize(text)  # same as a new video caption
     # A removed caption is an edit too: the queued item must stop carrying it (review of PR #9).
@@ -3139,6 +3164,57 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
     ignored | unsupported | refused | queued | status | mode | edited | pin-notice.
     `off_until`: the second mirroring was last switched on (0 when it never was off); an edit made at or
     before it is not delivered."""
+    from .harness import SessionRef, legacy_topic_supported
+    if update.get("widget_query"):
+        from .widgets import handle_query
+        return handle_query(update["widget_query"], cfg, bot, inbox)
+    q = update.get("callback_query") or {}
+    service = update.get("message") or {}
+    if service.get("forum_topic_edited") is not None and pins.drop_rename_notice(service, cfg, bot):
+        return "rename-notice"
+    if service.get("forum_topic_edited"):
+        from . import topic_names
+        return topic_names.note_edit(service, cfg, topics)
+    if service.get("pinned_message") and pins.drop_pin_notice(service, cfg, bot):
+        return "pin-notice"
+    incoming = q.get("message") or update.get("message") or update.get("edited_message") or {}
+    if incoming:
+        chat_id = (incoming.get("chat") or {}).get("id")
+        route = team_topics if cfg.team.enabled and chat_id == cfg.team.chat_id else topics
+        session = route.session_at(chat_id, incoming.get("message_thread_id")) if route is not None else None
+        if not legacy_topic_supported(session):
+            # Authenticate the human, never the bot-authored callback message.
+            actor = q.get("from") if update.get("callback_query") else incoming.get("from")
+            if (not isinstance(actor, dict) or actor.get("id") != cfg.owner_chat_id
+                    or actor.get("is_bot") or chat_id not in owner_chats(cfg)
+                    or (incoming.get("chat") or {}).get("type") != _chat_type(cfg, chat_id)):
+                return "ignored"
+            try:
+                ref = SessionRef.parse(session)
+            except ValueError:
+                return _refuse_harness(bot, cfg, incoming, q if update.get("callback_query") else None)
+            text = (incoming.get("text") or "").strip()
+            attached = (cfg.codex_harness_enabled is True and ref.harness == "codex"
+                        and ref.profile == "default" and ref.native_id in cfg.codex_attached_sessions)
+            if (not attached or not update.get("message") or text.startswith("/")
+                    or _keyboard_word(text, session) or is_mode_command(text)):
+                return _refuse_harness(bot, cfg, incoming, q if update.get("callback_query") else None)
+            if any(incoming.get(k) for k in _SPEECH_KEYS):
+                if not (from_owner(incoming, cfg, started) or _owner_forward(incoming, cfg, started)):
+                    return "ignored"
+                _terminal_say(bot, cfg, incoming, t("codex_voice_unsupported", lang=cfg.ui_language))
+                return "unsupported-harness"
+            # Keep the existing owner, forward and media policy, but
+            # never run Claude dialogs, commands or terminal controls for Codex.
+            m = incoming
+            if _owner_forward(m, cfg, started):
+                if not any(m.get(k) for k in FORWARD_KINDS) or m.get("animation"):
+                    return _refuse_forward(m, cfg, bot)
+                m = {k: v for k, v in m.items() if k not in ("forward_origin", "caption", "caption_entities")}
+                m["_forwarded"] = True
+            if not from_owner(m, cfg, started):
+                return "ignored"
+            return _queue_topic_input(cfg, bot, inbox, m, session, media, topic_session=session)
     sessions_menu.note_input(cfg, bot, update)
     if update.get("my_chat_member"):
         return "alerts-" + alerts.joined(update["my_chat_member"], cfg, bot)
@@ -3151,11 +3227,6 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
         return handle_edit(update["edited_message"], cfg, bot, topics, inbox, started, off_until)
     m = update.get("message") or {}
     chat = m.get("chat") or {}
-    if m.get("forum_topic_edited"):  # a person renamed a topic: their name wins over auto-naming
-        from . import topic_names
-        return topic_names.note_edit(m, cfg, topics)
-    if m.get("pinned_message") and pins.drop_pin_notice(m, cfg, bot):
-        return "pin-notice"  # the "pinned a message" line our own pin caused: removed from the topic
     team = cfg.team
     if team.enabled and chat.get("id") == team.chat_id:
         return handle_team(m, cfg, bot, topics, inbox, started, team_topics)
@@ -3236,7 +3307,7 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
     # otherwise ordinary English text for Claude ("history of X...") was swallowed (review, PR #15)
     en_ui = getattr(cfg, "ui_language", "") == "en"
     if (m.get("text") or "").strip().lower().split("@")[0] in (("/keyboard", "מקלדת", "keyboard") if en_ui else ("/keyboard", "מקלדת")):
-        from .mirror import get_keyboard, live_keyboard
+        from .mirror import live_keyboard
         footer = ""
         try:
             footer = json.loads((state_dir() / "telegram-status-text.json").read_text(encoding="utf-8")).get(
@@ -3244,7 +3315,7 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
         except (OSError, ValueError, AttributeError):
             pass
         _terminal_say(bot, cfg, m, t("keyboard_restored"),
-                      reply_markup=live_keyboard(footer, base_kb=get_keyboard(cfg.ui_language),
+                      reply_markup=live_keyboard(footer,
                                                  lang=cfg.ui_language, thread=m.get("message_thread_id"),
                                                  fresh=True, session=topics.session_at(chat.get("id"), m.get("message_thread_id")),
                                                  chat=_chat_arg(cfg, m)))
@@ -3388,6 +3459,8 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
     in_home = chat.get("id") == home_chat(cfg)  # car mode, the dispatcher and its offer belong to the home group
     if not session and not m.get("message_thread_id") and in_home and car_mode_active():
         session = last_session(topics)
+        if not legacy_topic_supported(session):
+            session = None
     # The text after "edit the transcript" is the corrected recording: recognised here, before any General
     # routing (the offer used to hold it as a new typed message and leave the edit pending). The draft is taken
     # only once the correction is accepted: a refused one (too long, a secret) leaves it for the next text.
@@ -3410,6 +3483,8 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
     if not session and in_home:
         from . import dispatcher
         session = dispatcher.get_dispatcher()
+        if not legacy_topic_supported(session):
+            session = None
         dispatch = bool(session)
         if _offer_applies(cfg, m):  # ask first: a topic for it, the dispatcher, or an existing topic
             if _voice_needs_approval(m):
@@ -3442,6 +3517,13 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
             return "voice"
         return general_start(cfg, bot, m, task, name=_task_topic_name(
             task, (m.get("text") or m.get("caption") or "").strip(), getattr(cfg, "ui_language", "en")) if has_media else None)
+    return _queue_topic_input(cfg, bot, inbox, m, session, media, topic_session=topic_session,
+                              dispatch=dispatch, corrected=corrected)
+
+
+def _queue_topic_input(cfg, bot, inbox, m, session, media, *, topic_session=None,
+                       dispatch=False, corrected=None) -> str:
+    """Shared own-topic input: media, review, quotes and provenance for every harness."""
     # One pass over the media: the stored context and the delivered text come from the same download
     # and transcription (review of PR #9).
     media_prefix = ""
@@ -3526,6 +3608,9 @@ def handle_team(m: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, start
     session = team_topics.session_for_thread(m.get("message_thread_id"))
     if not session or session not in team.shared_sessions:
         return "ignored"
+    from .harness import legacy_topic_supported
+    if not legacy_topic_supported(session):
+        return _refuse_harness(bot, cfg, m)
     text = m.get("text")
     if is_owner:  # the owner writing in a shared topic: owner framing, text only
         if not isinstance(text, str) or not text.strip():
@@ -4928,40 +5013,67 @@ def _queue_owner(cfg: Config, bot, inbox: Inbox, m: dict, session: str, text: st
     untrusted-data header, never inside the owner's words. `parts` (instead of `text`): several held messages,
     each queued as its own item with its own origin ({"text", "voice", "button"}); never typed.
     Origin flags (framing.approval_note): "typed" ONLY when the caller passes typed=True, and exactly one caller
-    does (handle: a fresh text message the owner sent in this session's own topic, queued directly for it; see
+    does (_queue_topic_input: a fresh text message the owner sent in this session's own topic, queued directly for it; see
     tests/test_owner_typed_yes.py::test_typed_is_set_in_exactly_one_place). "voice" for a voice note, audio or
     video note (also after its transcript preview, `_voice`), "button" for a reply-keyboard word."""
-    log_delivery(session, m.get("date"))
+    from .harness import ClaudeHarness, registry
+    sender = registry(inbox=inbox, cfg=cfg) if cfg.codex_harness_enabled is True else registry(inbox=inbox)
+    # Refuse unknown harness/profile identities before any legacy side effects.
     try:
-        sessions_menu.reopen_for_message(cfg, bot, session)
+        _, ref = sender.resolve(session)
+        codex = ref.harness == "codex"
+        if codex:
+            if ref.profile != "default" or ref.native_id not in cfg.codex_attached_sessions:
+                raise ValueError("Session is not explicitly attached")
+        else:
+            session = ClaudeHarness._native(ref)
+    except ValueError:
+        _refuse_harness(bot, cfg, m)
+        return
+    if not codex:
+        log_delivery(session, m.get("date"))
+    try:
+        if not codex:
+            sessions_menu.reopen_for_message(cfg, bot, session)
     except Exception:
         pass
     from .progress import append_boundary
-    append_boundary(session)
-    hold = delivery.default_mode() == "end"
+    if not codex:
+        append_boundary(session)
+    hold = not codex and delivery.default_mode() == "end"
     base = {"at": m.get("date"), "id": m.get("message_id"), "source": "owner", "chat": _reply_chat(cfg, m)}
     if hold:
         base["hold"] = True  # waits for the turn's end; see Inbox.take(midturn=True)
-    if parts:  # held General messages: never typed in this session's topic
-        for n, part in enumerate(p for p in parts if p.get("text")):
-            item = dict(base, text=part["text"], user_text=user_text if n == 0 else "", context_prefix="")
-            if part.get("voice"):
-                item["voice"] = True
-            if part.get("button"):
-                item["button"] = part["button"]
-            inbox.put(session, item)
-    elif text:
-        item = dict(base, text=text, user_text=user_text, context_prefix=context_prefix)
-        spoken = bool(m.get("voice") or m.get("audio") or m.get("video_note") or m.get("_voice"))
-        if spoken:
-            item["voice"] = True  # a transcript reads like typed text, but it is never a typed yes (framing.py)
-        if m.get("_button"):
-            item["button"] = m["_button"]  # a reply-keyboard tap arrived as plain text
-        if typed and not spoken and not m.get("_button"):
-            item["typed"] = True  # the only positive evidence framing accepts for the typed-yes rule
-        inbox.put(session, item)
-    if forwarded_text:  # no user_text: an edit can never rewrite it as the owner's words
-        inbox.put(session, dict(base, text=forwarded_text, forwarded=True))
+    try:
+        if parts:  # held General messages: never typed in this session's topic
+            for n, part in enumerate(p for p in parts if p.get("text")):
+                item = dict(base, text=part["text"], user_text=user_text if n == 0 else "", context_prefix="")
+                if part.get("voice"):
+                    item["voice"] = True
+                if part.get("button"):
+                    item["button"] = part["button"]
+                sender.send(session, item)
+        elif text:
+            item = dict(base, text=text, user_text=user_text, context_prefix=context_prefix)
+            spoken = bool(m.get("voice") or m.get("audio") or m.get("video_note") or m.get("_voice"))
+            if spoken:
+                item["voice"] = True  # a transcript reads like typed text, but it is never a typed yes (framing.py)
+            if m.get("_button"):
+                item["button"] = m["_button"]  # a reply-keyboard tap arrived as plain text
+            if typed and not codex and not spoken and not m.get("_button"):
+                item["typed"] = True  # the only positive evidence framing accepts for the typed-yes rule
+            sender.send(session, item)
+        if forwarded_text:  # no user_text: an edit can never rewrite it as the owner's words
+            sender.send(session, dict(base, text=forwarded_text, forwarded=True))
+    except Exception:
+        if not codex:
+            raise
+        poll_log("Codex send failed; acceptance not established")
+        _terminal_say(bot, cfg, m, "Codex: message not confirmed; check the session before retrying.")
+        return
+    if codex:
+        react(bot, _reply_chat(cfg, m), m, "\U0001F440")
+        return
     if not limit_notice(bot, _reply_chat(cfg, m), m, session):
         react(bot, _reply_chat(cfg, m), m, "\U0001F440")
     try:  # a message behind an open dialog says so (not "between steps") and shows the dialog again

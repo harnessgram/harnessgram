@@ -17,7 +17,7 @@ def _site(tmp_path, record=b"ctb/__init__.py,sha256=aaa,1\n"):
     site = tmp_path / "lib" / "site-packages"
     (site / "ctb").mkdir(parents=True)
     if record is not None:
-        info = site / "harnessgram-0.1.0.dist-info"
+        info = site / "harnessgram-0.2.0.dist-info"
         info.mkdir()
         (info / "RECORD").write_bytes(record)
     return site / "ctb"
@@ -27,7 +27,7 @@ def test_an_installed_copy_is_known_by_its_record(tmp_path):
     pkg = _site(tmp_path)
     first = B.read(pkg)
     assert first and first.startswith("r") and B.read(pkg) == first  # the same code: the same stamp
-    rec = pkg.parent / "harnessgram-0.1.0.dist-info" / "RECORD"
+    rec = pkg.parent / "harnessgram-0.2.0.dist-info" / "RECORD"
     rec.write_bytes(b"ctb/__init__.py,sha256=bbb,1\n")  # new code
     assert B.read(pkg) not in (None, first)
 
@@ -35,9 +35,9 @@ def test_an_installed_copy_is_known_by_its_record(tmp_path):
 def test_a_missing_record_where_one_is_expected_is_unknown(tmp_path):
     pkg = _site(tmp_path, record=None)  # being replaced right now
     assert B.read(pkg) is None
-    (pkg.parent / "harnessgram-0.1.0.dist-info").mkdir()
-    assert B.read(pkg) is None  # the folder without its RECORD yet
     (pkg.parent / "harnessgram-0.2.0.dist-info").mkdir()
+    assert B.read(pkg) is None  # the folder without its RECORD yet
+    (pkg.parent / "harnessgram-0.3.0.dist-info").mkdir()
     assert B.read(pkg) is None  # two copies at once
 
 

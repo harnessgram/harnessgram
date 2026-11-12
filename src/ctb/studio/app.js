@@ -564,12 +564,20 @@ function cleanProject(p, pid) {
     var a = secs(sc.start), b = Math.max(a, secs(sc.end));
     return {k: k, title: sc.title, start: a, end: b, scene: sc.scene, frame: mediaPath(sc.frame)};
   });
-  var lines = list(p.sentences, 200).map(function (s, k) {
+  var lines = list(p.sentences, 200).map(function (s) {
+    var i = s.i;
+    if (typeof i !== "number" || !isFinite(i) || Math.round(i) !== i || i < 1) return null;
     var a = secs(s.start), b = Math.max(a, secs(s.end));
-    return {i: k + 1, scene_i: toInt(s.scene_i, 0, Math.max(0, scenes.length - 1)), start: a, end: b, said: s.said,
+    return {i: i, scene_i: toInt(s.scene_i, 0, Math.max(0, scenes.length - 1)), start: a, end: b, said: s.said,
       scene: s.scene, frame: mediaPath(s.frame), audio: mediaPath(s.audio),
       suggest: SUGGESTS.indexOf(s.suggest) >= 0 ? s.suggest : null, short: s.short, short_s: secs(s.short_s),
       why: s.why, flag: FLAGS.indexOf(s.flag) >= 0 ? s.flag : null, note: s.note};
+  });
+  var seen = {};
+  lines = lines.filter(function (s) {
+    if (!s || seen[s.i]) return false;
+    seen[s.i] = true;
+    return true;
   });
   if (!lines.length) return null;
   if (!scenes.length) scenes = [{k: 0, title: null, start: 0, end: lines[lines.length - 1].end, scene: lines[0].scene, frame: null}];
@@ -577,19 +585,26 @@ function cleanProject(p, pid) {
   return {id: pid, sample: p.sample === true, series: p.series, title: p.title, draft: toInt(p.draft, 0, 99),
     length_s: secs(p.length_s) || total, scenes: scenes, sentences: lines};
 }
-function cleanMarks(m, count) {
+function cleanMarks(m, sentences) {
   var out = {};
   if (!m || typeof m !== "object") return out;
+  var ids = {};
+  sentences.forEach(function (s) { ids[s.i] = true; });
   for (var k in m) {
     var v = m[k], i = Number(k);
-    if (!(i >= 1 && i <= count && Math.round(i) === i) || !v || MARKS.indexOf(v.mark) < 0) continue;
+    if (!(i >= 1 && Math.round(i) === i && ids[i]) || !v || MARKS.indexOf(v.mark) < 0) continue;
     out[i] = {mark: v.mark};
     if (v.mark === "tighten" && typeof v.text === "string" && v.text.trim()) out[i].text = v.text.trim().slice(0, 240);
   }
   return out;
 }
 function cur() { return st.proj[st.pid] || null; }
-function sentence(i) { var c = cur(); return c ? c.project.sentences[i - 1] || null : null; }
+function sentence(i) {
+  var c = cur();
+  if (!c) return null;
+  for (var k = 0; k < c.project.sentences.length; k++) if (c.project.sentences[k].i === i) return c.project.sentences[k];
+  return null;
+}
 function markOf(i) { var c = cur(), m = c && c.marks[i]; return m ? m.mark : null; }
 function stateOf(s) {  // one status vocabulary for the map, the legend and the rows
   var m = markOf(s.i);
@@ -648,7 +663,7 @@ function applyProject(r, pid) {
   else if (r.status === 503) st.pst = "off";
   else if (r.status === 0 || r.status === 504) { st.pst = "offline"; if (st.proj[pid]) st.proj[pid].offline = true; }
   else if (r.status === 200 && p) {
-    var old = st.proj[pid], marks = cleanMarks(d.marks, p.sentences.length), onWay = old ? old.saving : {};
+    var old = st.proj[pid], marks = cleanMarks(d.marks, p.sentences), onWay = old ? old.saving : {};
     for (var k in onWay) { if (old.marks[k]) marks[k] = old.marks[k]; else delete marks[k]; }  // a tap on its way wins
     st.proj[pid] = {project: p, marks: marks, saving: onWay, seq: old ? old.seq : 0, offline: false};
     st.pst = "ok";
@@ -656,7 +671,10 @@ function applyProject(r, pid) {
       var first = openSuggestions(p)[0];
       st.cur = first ? first.i : 1;
     }
-    st.cur = Math.min(st.cur, p.sentences.length);
+    if (!p.sentences.some(function (s) { return s.i === st.cur; })) {
+      var near = p.sentences.filter(function (s) { return s.i >= st.cur; })[0];
+      st.cur = near ? near.i : p.sentences[p.sentences.length - 1].i;
+    }
   } else if (r.status === 200 && d && d.ok === false && d.error === "not_found") st.pst = "notfound";
   else if (r.status === 200 && d && d.ok === false && d.error === "no_permission") st.pst = "noperm";
   else st.pst = "error";
@@ -690,7 +708,7 @@ function setMark(s, mark, text) {
     if (!c2 || c2.saving[s.i] !== n) return;  // the video was reloaded meanwhile: its own answer decides
     delete c2.saving[s.i];
     if (r.status === 200 && d && d.ok === true && d.marks && typeof d.marks === "object") {
-      var kept = cleanMarks(d.marks, c2.project.sentences.length)[s.i];
+      var kept = cleanMarks(d.marks, c2.project.sentences)[s.i];
       if (kept) c2.marks[s.i] = kept; else delete c2.marks[s.i];
       c2.offline = false;
     } else {
@@ -722,7 +740,10 @@ function setCur(i) { st.cur = i; render(); }
 // real draft brings its proxy video), skipping removed sentences
 function stopPlay() { st.playing = false; if (st.timer) clearTimeout(st.timer); st.timer = null; }
 function nextLive(p, from) {
-  for (var i = from + 1; i <= p.sentences.length; i++) if (markOf(i) !== "remove") return i;
+  for (var k = 0; k < p.sentences.length; k++) {
+    var s = p.sentences[k];
+    if (s.i > from && markOf(s.i) !== "remove") return s.i;
+  }
   return 0;
 }
 function tick() {
@@ -739,7 +760,7 @@ function togglePlay() {
   var c = cur();
   if (!c) return;
   if (st.playing) { stopPlay(); render(); return; }
-  if (markOf(st.cur) === "remove" || st.cur >= c.project.sentences.length) st.cur = nextLive(c.project, 0) || 1;
+  if (!sentence(st.cur) || markOf(st.cur) === "remove") st.cur = nextLive(c.project, 0) || c.project.sentences[0].i;
   st.playing = true; render(); tick();
 }
 function still(sceneId, frame, kids, cls) {

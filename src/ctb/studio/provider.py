@@ -1,9 +1,9 @@
 """Where the Studio's data comes from: two functions, `desk()` and `project(id)`.
 
-Today they return a small invented sample (a few generic videos, so the screens and their states can be built and
-checked end to end). A later step replaces their bodies with what the video studio keeps on disk and keeps the shapes
-below, so nothing in the page changes. The page shows a notice whenever `sample` is true, so a sample is never mistaken
-for the real desk. Both are read-only: the only thing the Studio writes is the owner's draft marks (marks.py).
+With `Config.studio_adapter` set, a trusted private Python module supplies these shapes. With no adapter configured
+they return the invented sample. Adapter failures return a clearly labelled sample with a bilingual `notice`; its
+existing title slot also shows the reason, without changing the page. Exception text and private paths never leave
+the loader. Both are read-only: the only thing the Studio writes is the owner's draft marks (marks.py).
 
 The shape (every text is `{"he": ..., "en": ...}` or a plain string; `scene` names one of the kit's placeholder
 pictures until a real poster frame exists):
@@ -24,8 +24,9 @@ One video, as the project page ("the desk") shows it (`project(id)`, None when t
      "sentences": [{"i", "scene_i", "start", "end", "said", "scene", "frame", "audio",
                     "suggest", "short", "short_s", "why", "flag", "note"}]}
 
-Scenes and sentences are in order; `i` counts from 1; `start`/`end` are seconds; `scene_i` is the index of the scene a
-sentence belongs to. `suggest` is the team's suggestion (`tighten`, `remove` or None) with `why` (a short reason) and,
+Scenes and sentences are in order; `i` starts at 1. Sentence IDs retain their original source index when malformed
+rows are dropped, so gaps are valid. `start`/`end` are seconds; `scene_i` is the index of the scene a
+sentence belongs to (zero-based, unlike `i`). `suggest` is the team's suggestion (`tighten`, `remove` or None) with `why` (a short reason) and,
 for `tighten`, `short` (the shorter wording) and `short_s` (its estimated length). `flag` marks a sentence the team
 already changed or found a problem in (`visual`: a new picture, `take`: a new recording, `fix`: needs a fix; `note`
 says what). Stills: `scene` names a placeholder picture of the kit; `frame` is the engine's real still (`--frame`),
@@ -101,13 +102,33 @@ PROJECTS = {"weekly-12": _leaves, "weekly-13": _bees}
 
 def desk() -> dict:
     """The desk as the page shows it (see the module docstring for the shape). Read-only."""
-    return sample()
+    from . import adapter
+    configured, value, reason = adapter.read("desk")
+    if configured and reason is None:
+        return value
+    out = sample()
+    if reason:
+        out["notice"] = dict(adapter.REASONS[reason])
+        out["waiting"][0]["title"] = dict(out["notice"])
+    return out
 
 
 def project(pid: str):
     """One video as the desk page shows it (see the module docstring), or None when there is no such video.
     Read-only."""
-    make = PROJECTS.get(pid) if isinstance(pid, str) else None
+    from . import adapter
+    if not adapter.ident(pid):
+        return None
+    configured, value, reason = adapter.read("project", pid)
+    if configured and reason is None:
+        return value
+    make = PROJECTS.get(pid)
+    if reason:
+        # The requested desk stays open with a labelled sample; marks refuse this fallback.
+        out = (make or _leaves)()
+        out.update(id=pid, sample=True, notice=dict(adapter.REASONS[reason]))
+        out["title"] = dict(out["notice"])
+        return out
     if make is None:
         return None
     out = make()

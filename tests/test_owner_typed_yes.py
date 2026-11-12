@@ -285,11 +285,11 @@ def _typed_stores():
 
 
 def test_typed_is_set_in_exactly_one_place(rig, monkeypatch):
-    """Static: typed is written only by _queue_owner, and only handle passes typed= (the own-topic path).
+    """Static: typed is written only by _queue_owner, and only _queue_topic_input passes typed= (the own-topic path).
     Dynamic: every producer of queued owner items yields typed=True only for fresh text in the session's topic."""
     stores = {(f, fn, how) for f, fn, how in _typed_stores()}
     stores.discard(("dialogs.py", "send_card", "{typed: ...}"))  # a dialog card's record, never a queued item
-    assert stores == {("inbox.py", "_queue_owner", "item[typed] ="), ("inbox.py", "handle", "_queue_owner(typed=...)")}
+    assert stores == {("inbox.py", "_queue_owner", "item[typed] ="), ("inbox.py", "_queue_topic_input", "_queue_owner(typed=...)")}
 
     from ctb import dispatcher, replay
     outcomes = {}

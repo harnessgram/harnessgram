@@ -161,6 +161,32 @@ def clean_token(token: str) -> str:
     return token
 
 
+# A token inside longer text, such as BotFather's whole "Done! Congratulations on your new bot" message: digits that
+# start a word, a colon, then 30 or more token characters that end the word. Starts only at the start of a digit run,
+# so the search stays linear.
+_TOKEN_IN_TEXT = re.compile(r"(?<![A-Za-z0-9_:/-])\d+:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_:-])")
+MAX_PASTE = 64 * 1024
+
+
+def find_token(text) -> Optional[str]:
+    """The one bot token in `text` (just the token, or a whole pasted BotFather message), or None when there is
+    none. TelegramError when it holds two different tokens (guessing would pair the wrong bot) or is longer than
+    MAX_PASTE (cutting it could hide a second token past the cut). Never echoes text."""
+    if not isinstance(text, str):
+        return None
+    if len(text) > MAX_PASTE:
+        raise TelegramError("the text is too long to hold just a bot token; copy only the token")
+    found = set(_TOKEN_IN_TEXT.findall(text))
+    if len(found) > 1:
+        raise TelegramError("the text holds more than one bot token; copy only the one for your new bot")
+    return clean_token(found.pop()) if found else None
+
+
+def holds_token(text) -> bool:
+    """True when `text` has anything shaped like a bot token, wherever it is (also past MAX_PASTE)."""
+    return isinstance(text, str) and _TOKEN_IN_TEXT.search(text) is not None
+
+
 MAX_FLOOD_WAIT = 5.0
 
 

@@ -1,0 +1,12 @@
+⏺ Bash(sleep 20; echo done)
+  ⎿  Running…
+     sleep 20; echo done (12s)
+     (ctrl+b ctrl+b (twice) to run in background)
+
+✽ Finagling… (24s · ↓ 615 tokens)
+
+──────────────────────────────────────────────────── [redacted] ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 · week 75%
+  ⏵⏵ bypass permissions on · 1 monitor · /tasks to see subagents · ← 47 agents

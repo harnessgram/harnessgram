@@ -271,12 +271,18 @@ def test_a_part_that_cannot_be_sent_is_dropped_alone_and_logged_without_content(
     m.send_reply("P", "s", "First fine part.")
     n = m._emit("s", "P", "BAD part")
     m.send_reply("P", "s", "Last fine part.")
-    assert n == 0 and m.dropped == 1
+    assert n == 0 and m.dropped == 0 and m.queued == 2
     ok = [p["text"] for p in bot.methods("sendMessage") if "BAD" not in p["text"]]
-    assert ok == ["First fine part.", "Last fine part."]
+    assert ok == ["First fine part."]
     log = (state_dir() / "mirror.log").read_text()
-    assert "part dropped" in log and "BAD" not in log and "fine part" not in log
+    assert "queued for redelivery" in log and "BAD" not in log and "fine part" not in log
     assert oct((state_dir() / "mirror.log").stat().st_mode & 0o777) == "0o600"
+    from ctb import reply_outbox
+    bot.call = lambda *a, **kw: FakeBot.call(bot, *a, **kw)
+    bot.calls.clear()
+    assert reply_outbox.drain(m.cfg, bot) == 2
+    assert [p["text"] for p in bot.methods("sendMessage")] == ["(delayed)\nBAD part", "(delayed)\nLast fine part."]
+    assert reply_outbox.drain(m.cfg, bot) == 0
 
 
 def test_html_failure_is_retried_as_plain_text(tmp_path):

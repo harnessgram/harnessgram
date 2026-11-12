@@ -9,6 +9,7 @@ Run it as `harnessgram heartbeat` under a service manager (launchd KeepAlive, sy
 from __future__ import annotations
 
 import os
+import logging
 import re
 import time
 from typing import Callable, Optional
@@ -227,13 +228,25 @@ def escaped_in_claude(cfg: Config, bot, session: str,
 def run_once(cfg: Config, bot=None, now: Optional[float] = None,
              find: Callable[[str], Optional[str]] = status.transcript_of) -> int:
     """One round: refresh the placeholder of one busy, recently active session, in turn. Returns 0 or 1."""
-    if not cfg.ready:
+    from . import reply_outbox, policy
+    if not cfg.ready or not cfg.mirror or not policy.on():
         return 0
     now = time.time() if now is None else now
+    bot = bot or Bot.from_config(cfg)
+    try:
+        reply_outbox.drain(cfg, bot, now)
+    except Exception as exc:  # a damaged outbox never stops the heartbeat
+        from .mirror import log
+        log(f"reply outbox drain failed ({type(exc).__name__})")
     chats = {home_chat(cfg), *(p.chat_id for p in cfg.projects)}
     if not any(flood.is_open(chat, now) for chat in chats):
         return 0  # every chat is flooded: the placeholder can wait, replies cannot
-    bot = bot or Bot.from_config(cfg)
+    if cfg.codex_harness_enabled is True:
+        try:
+            from . import codex_mirror
+            codex_mirror.poll(cfg, bot)
+        except Exception:
+            logging.getLogger(__name__).warning("Codex mirror poll failed")
     try:
         refresh_cards(cfg, bot, now, find=find)
     except Exception:
@@ -254,6 +267,8 @@ def run_once(cfg: Config, bot=None, now: Optional[float] = None,
     topics = TopicMap(state_dir() / "topics.json", bot, home_chat(cfg), cfg=cfg)
     for session in sorted(topics.all_places()):
         try:
+            if cfg.codex_harness_enabled is True and session.startswith("codex:"):
+                continue  # Codex lifecycle events own this topic's working/idle state
             if not flood.is_open(topics.place_of(session).chat, now):
                 continue  # that session's group is flooded; the others go on
             cur = session_state(session)

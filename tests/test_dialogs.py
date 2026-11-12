@@ -119,7 +119,9 @@ def rig(tmp_path, monkeypatch, bot):
     return SimpleNamespace(scr=scr, cfg=cfg, topics=topics, thread=thread, box=box, bot=bot)
 
 
-def press(rig, data, user=OWNER, message_id=50, thread=None):
+def press(rig, data, user=OWNER, message_id=None, thread=None):
+    if message_id is None:
+        message_id = D.rec_get("s").get("message_id", 50)
     m = {"chat": {"id": OWNER, "type": "private"}, "message_thread_id": thread or rig.thread, "message_id": message_id}
     q = {"id": "q", "from": {"id": user}, "message": m, "data": data}
     return I.handle_button(q, rig.cfg, rig.bot, rig.topics, rig.box)

@@ -13,6 +13,7 @@ import fcntl
 import fnmatch
 import json
 import logging
+import math
 import os
 import re
 import stat
@@ -329,6 +330,7 @@ class Config:
     api_local: bool = False
     api_files_dir: str = ""
     owner_chat_id: int = 0
+    widgets_enabled: bool = False
     # Optional supergroup id (negative number). Default = 0 (private chat, uses owner_chat_id).
     chat_id: int = 0
     # UI language for menus, buttons, toasts, and alerts: "en" or "he".
@@ -379,6 +381,10 @@ class Config:
     # The Cockpit's Morning Brief (brief.py, docs/panel.md): where its work lines come from ("ledger_dir" or
     # "ledger_command"; the radio's ledger_dir otherwise), "project_names", and an optional "events_file".
     brief: dict = field(default_factory=dict)
+    # Optional trusted local Studio data adapter; empty keeps the built-in sample.
+    studio_adapter: str = ""
+    # Read-only media folder; empty uses the adapter's MEDIA_ROOT when provided.
+    studio_media_root: str = ""
     # A pinned control-panel button in every session topic (docs/panel.md). It only helps once the panel Mini App
     # is set up, so None (default) = on only when the panel service is installed; true or false forces it.
     panel_button: Optional[bool] = None
@@ -439,7 +445,13 @@ class Config:
     # to show its 5-hour and weekly limits. `quota_files`: JSON files any
     # tool can write, [{"label": "My tool", "path": "~/usage.json"}]; the file format is in the README.
     codex_sessions_dir: str = ""
+    # Existing persisted sessions only; discovery alone never attaches a session.
+    codex_harness_enabled: bool = False
+    codex_attached_sessions: List[str] = field(default_factory=list)
+    codex_commentary: bool = False
     quota_files: List[dict] = field(default_factory=list)
+    # USD per million tokens: input, output, cache write, cache read.
+    usage_prices: dict = field(default_factory=dict)
     # Other tools your sessions delegate work to (all off by default). Each entry is
     # {"match": "text in the command line", "label": "Name shown"}: a running process whose command
     # line contains `match` is listed on the dashboard ("Background jobs now"), and a Bash call that
@@ -564,6 +576,12 @@ def from_dict(raw: dict) -> Config:
             if value and (not os.path.isabs(os.path.expanduser(value)) or os.path.normpath(value) == os.sep):
                 raise ConfigError("api_files_dir must be an absolute folder path (not /)")
             value = os.path.expanduser(value)
+        elif key in ("studio_adapter", "studio_media_root"):
+            if not isinstance(value, str):
+                raise ConfigError(f"{key} must be a path string")
+            value = os.path.expanduser(value.strip())
+            if value and (not os.path.isabs(value) or "\x00" in value or os.path.normpath(value) == os.sep):
+                raise ConfigError(f"{key} must be an absolute path (not /)")
         elif key == "panel_base_url":
             value = str(value).strip().rstrip("/")
             if value and not re.fullmatch(r"https://[A-Za-z0-9.-]{1,253}(?::\d{1,5})?", value):
@@ -572,7 +590,8 @@ def from_dict(raw: dict) -> Config:
             value = str(value).strip()
             if value and not value.startswith("https://"):
                 raise ConfigError("share_base_url must be an https:// URL (a share link must be secure)")
-        elif key in ("engines", "stop_words", "bot_token_command", "gemini_token_command", "gemini_key_command"):
+        elif key in ("engines", "stop_words", "bot_token_command", "gemini_token_command", "gemini_key_command",
+                     "codex_attached_sessions"):
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise ConfigError(f"{key} must be a list of strings")
         elif key in ("radio", "brief"):
@@ -591,6 +610,15 @@ def from_dict(raw: dict) -> Config:
         elif key == "quota_files":
             if not isinstance(value, list) or not all(isinstance(v, dict) and isinstance(v.get("path"), str) for v in value):
                 raise ConfigError('quota_files must be a list of objects like {"label": "...", "path": "..."}')
+        elif key == "usage_prices":
+            if not isinstance(value, dict) or not all(
+                isinstance(k, str) and re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", k)
+                and isinstance(v, list) and len(v) == 4
+                and all(not isinstance(n, bool) and isinstance(n, (int, float))
+                        and (isinstance(n, int) or math.isfinite(n)) and 0 <= n <= 1_000_000_000 for n in v)
+                for k, v in value.items()
+            ):
+                raise ConfigError("usage_prices must map model id prefixes to four finite non-negative numbers")
         elif key == "delegates":
             if not isinstance(value, list) or not all(
                     isinstance(v, dict) and isinstance(v.get("match"), str) and v["match"].strip()

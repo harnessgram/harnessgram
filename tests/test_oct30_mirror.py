@@ -197,14 +197,6 @@ def test_live_keyboard_empty_or_plain_footer_keeps_default_keyboard():
     assert "input_field_placeholder" not in kb2
 
 
-def test_live_keyboard_custom_base_keyboard():
-    # custom base keyboard preserved
-    custom = {"keyboard": [[{"text": "Custom Button"}]]}
-    kb = live_keyboard("הקשר 80 אלף", base_kb=custom)
-    assert kb["keyboard"][0] == [{"text": "📏 80 אלף"}]
-    assert kb["keyboard"][1] == [{"text": "Custom Button"}]
-
-
 def test_status_message_sends_and_deletes_previous_message(tmp_path, bot):
     # With "new card after every reply" on, the status message in the topic is replaced on each update.
     # (Without it the card is edited in place: see tests/test_port_1101_later.py.)

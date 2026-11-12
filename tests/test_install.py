@@ -136,6 +136,7 @@ import pytest
 
 @pytest.fixture
 def svc_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(I, "_uninstall_radios", lambda dry_run: True)
     """A private home and a recording runner: no test ever calls launchctl or systemctl."""
     home = tmp_path / "svc-home"
     home.mkdir()

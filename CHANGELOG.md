@@ -6,7 +6,46 @@ change a setting or a command, and the change is listed here under "Changed" or 
 
 ## [Unreleased]
 
-Nothing yet.
+## [0.2.0] - 2026-11-12
+
+### Added
+
+- The Cockpit has a bottom tab bar with icons, badges and a More sheet for less common destinations.
+- Studio can show real data through a trusted local adapter with a bounded public data contract.
+- Experimental, off by default: attached Codex sessions can be mirrored into their own topics through the shared harness boundary.
+- A blocking command offers a Move to background button when the terminal supports it.
+- Progress cards update themselves with reply summaries, the current task, background jobs and a reminder when work looks stale.
+- Experimental, off by default: private chats can show decision widgets on supported Telegram clients.
+- Optional radio diagnostics and outgoing-stream taps make live listening checks possible without changing the default setup.
+- The Cockpit shows token use and estimated cost for each session.
+
+### Changed
+
+- The radio sends a steady 15 fps stream with two-second keyframes and a jitter buffer instead of releasing encoder bursts.
+- Radio bulletins say what each active topic is doing, identify waits and summarize completed work without speaking email addresses or account identifiers.
+- Tap answers belong to one exact recorded question, can be used only once and cannot answer money, messaging or repository questions.
+- Cockpit task cards refresh faster, remind you about long work and present translated tasks and results as complete sentences.
+- Radio narration uses clean whole sentences, natural pauses and digital silence between updates, with safer handling of dates and fractions.
+- Setup accepts a complete BotFather message or clipboard paste and clears copied tokens when it exits.
+- Usage totals use current configurable prices, distinguish cache costs and normalize model families consistently across sessions.
+
+### Fixed
+
+- Reply delivery retries temporary failures, keeps every pending part in a durable outbox and prevents an accepted part from being sent twice.
+- Deleted or uneditable pinned dashboards are replaced without duplicates, and already-removed pins no longer cause an error.
+- Linux service names are escaped safely, radio shutdown cannot prevent uninstall, and service status detection is more reliable.
+- Studio serves media only from its verified descriptor, limits adapter memory and diagnostics, and keeps sentence marks stable.
+- Cockpit controls remain usable while chat data loads, and frames, notices and the More sheet layer correctly above the bottom bar.
+- Radio readers do not stall when queues fill or a sender stops, and delayed audio is bounded so narration stays current.
+- Progress cards keep their last real outcome when a later summary has no news and count jobs and visible replies for the correct session.
+- Alerts without a reply link open the session topic or group instead of the bot chat.
+- Usage refreshes no longer deadlock, and Cockpit message and tool-call totals avoid duplicate or blocked counting.
+- Topic names, bidirectional brackets and Telegram service notices render without misleading renames or reversed punctuation.
+- A topic's reply keyboard has one source of truth. The pre-redesign layout builder is removed, every sender
+  (replies, the question follow-up, the status card and its repost, /keyboard, the wake and card refreshes)
+  takes the layout from one function, and a layout change is detected by itself: a card, label signature or
+  "already got the keyboard" mark kept for an older layout is redrawn once, so a phone never keeps or gets
+  back a keyboard of an older layout.
 
 ## [0.1.0]
 

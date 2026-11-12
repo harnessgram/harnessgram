@@ -34,6 +34,11 @@ def projects_dir() -> Path:
 
 
 def transcript_of(session: str) -> Optional[str]:
+    from .harness import ClaudeHarness, SessionRef
+    try:
+        session = ClaudeHarness._native(SessionRef.parse(session))
+    except ValueError:
+        return None
     if not session or "/" in session or ".." in session:
         return None
     found = glob.glob(os.path.join(glob.escape(str(projects_dir())), "*", glob.escape(session) + ".jsonl"))

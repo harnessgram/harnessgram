@@ -49,13 +49,22 @@ If something looks wrong later: `harnessgram doctor` prints one line per check a
 
 ### BotFather checklist
 
-1. Send `/newbot` to [@BotFather](https://t.me/BotFather), pick a name and a username ending in `bot`.
-2. Copy the token (`123456789:AAE...`) and keep it private. `harnessgram setup` asks for it with hidden input.
+1. Send `/newbot` to [@BotFather](https://t.me/BotFather). Setup shows a ready name and a random username
+   (`harnessgram_…_bot`) to copy; any free username ending in `bot` works.
+2. BotFather answers with a message holding the token (`123456789:AAE...`). Tap the token to copy it (or copy
+   the whole message) and press Enter at the setup prompt: setup reads the token from the clipboard, then clears
+   the clipboard. You can also paste it (hidden input). On the setup page, paste the whole message: only the
+   token is kept. Keep the token private.
 3. **Topics: on.** BotFather > `/mybots` > your bot > **Bot Settings** > **Threaded Mode** > turn on. This gives
    your private chat with the bot one topic per Claude Code session. Without it nothing can be routed.
 4. Open your bot once and press **Start**, so it is allowed to message you.
 5. Optional, only for the [team group](#team-group-opt-in-off-by-default): BotFather > Bot Settings > Group Privacy
    (or simply make the bot an admin of the group).
+
+**Why still BotFather?** Telegram's managed bots let a "manager" bot create a bot for you with one tap, but the
+manager can read and replace your bot's token at any time, must stay online to hand the token over, and
+Threaded Mode can still only be switched on in BotFather. Harnessgram keeps your token only on your computer,
+so it does not use them. Details: [docs/setup-research.md](docs/setup-research.md).
 
 ## Security model
 
@@ -203,6 +212,12 @@ pipx inject harnessgram ctranslate2 sentencepiece      # NLLB-200
 
 **Upgrading while sessions are active:** run `harnessgram wait-idle` (or `ctb wait-idle`) before `uv tool install --force`; it waits up to 30 s until no session's Stop worker is mid-reply (`harnessgram install` does the same). A delivery that fails from a half-installed package is retried once in a fresh process before the owner sees any notice.
 
+**Reply delivery semantics:** Telegram provides no idempotency key, so reply-outbox delivery is
+at-least-once. Pending parts are retained across transient failures until Telegram accepts them.
+There is a narrow duplicate window if the process crashes after Telegram accepts a part but before
+the local outbox commit. A permanent per-message rejection can be retried manually with
+`ctb outbox retry` (or `harnessgram outbox retry`).
+
 Your configuration and data are kept in the same folders (`~/.config/claude-telegram-bridge/` and
 `~/.local/state/claude-telegram-bridge/`), and the background service keeps its old name. Run:
 
@@ -335,8 +350,11 @@ is labelled `label` from the setting, plus the row's own label when it has one. 
 ```bash
 harnessgram install --dry-run     # shows exactly what would change, writes nothing
 harnessgram install               # LaunchAgents (macOS) / systemd units (Linux) + hooks in ~/.claude/settings.json
-harnessgram doctor                # config, bot, Threaded Mode, listener, hooks
+harnessgram doctor                # config, bot, Threaded Mode, listener, hooks, status line
 ```
+
+`harnessgram install --wire-statusline` explicitly replaces the Claude Code status line. Without that option,
+install preserves an existing status line and reports whether it is connected.
 
 `harnessgram install` makes a timestamped backup of `~/.claude/settings.json`, adds five hooks and leaves every
 other hook alone. Running it again updates in place. `harnessgram uninstall` removes only what it added.
@@ -871,7 +889,7 @@ Use a tagged release rather than the moving `main` branch, and keep the version 
 harnessgram --version                       # note the version you have now
 harnessgram wait-idle                       # waits up to 30 s until no session is mid-reply
 uv tool upgrade harnessgram                 # or: pipx upgrade harnessgram
-                                            # from the repository, pin a tag: uv tool install --force git+https://github.com/harnessgram/harnessgram@v0.1.0
+                                            # from the repository, pin a tag: uv tool install --force git+https://github.com/harnessgram/harnessgram@v0.2.0
 harnessgram install                         # re-applies the hooks and restarts the services it owns
 harnessgram doctor                          # one line per check; it names any service still running old code
 ```
@@ -885,17 +903,16 @@ yourself (for example `harnessgram panel serve` run by your own job, or the team
 
 ### Uninstalling
 
-`harnessgram uninstall` removes only what `harnessgram install` added: the Claude Code hooks (a backup of your
-settings file is made first) and the listener and scheduled jobs. Add `--dry-run` to see what it would remove.
+`harnessgram uninstall` attempts to stop the team radio and YouTube staff edition and their owned streams.
+It removes its own status line and Claude Code hooks (backing up settings first), listener and scheduled jobs. Add `--dry-run` to see what it would remove.
 It leaves your configuration (`~/.config/claude-telegram-bridge/`, with the bot token unless you used a token
 command) and state (`~/.local/state/claude-telegram-bridge/`) in place, so a later install picks up where you
 left off. To remove everything, in this order:
 
-1. Stop what you started yourself: `harnessgram radio youtube stop` and `harnessgram radio stop` (if you used the
-   radio), your own `harnessgram panel serve` job, and any Tailscale Serve or reverse-proxy route you made for the
+1. Stop your own `harnessgram panel serve` job, and any Tailscale Serve or reverse-proxy route you made for the
    Cockpit or `share_base_url`. Remove only the routes you created; they may be shared with other tools.
-2. `harnessgram radio youtube disconnect` (if you connected YouTube): forgets the channel and removes the stored keys.
-3. `harnessgram uninstall`.
+2. `harnessgram uninstall` (retry any reported radio stop failure before removing the package).
+3. `harnessgram radio youtube disconnect` (if you connected YouTube): forgets the channel and removes the stored keys.
 4. Remove the package: `uv tool uninstall harnessgram` (or `pipx uninstall harnessgram`).
 5. Delete the two folders above when you no longer want the config, queues and logs. Also remove any Keychain
    items you created for the bot token (`security delete-generic-password -s <service>`) and, in BotFather,

@@ -147,6 +147,18 @@ _SANDBOX_VARS = ("CTB_CONFIG_DIR", "CTB_STATE_DIR", "CTB_PROFILES_DIR", "CTB_CLA
                  "HOME", "TMUX_TMPDIR", "CLAUDE_CONFIG_DIR")
 
 
+def pytest_configure(config):
+    """Collection runs before any fixture: a test module that builds data at import time (e.g. from the Studio
+    provider) must not read the owner's real config or state, so the sandbox variables are set this early too."""
+    config.addinivalue_line("markers", "real_type_command: use the real inbox.type_command gate, not the plain typist")
+    root = tempfile.mkdtemp(prefix="ctb-collect-")
+    for var in _SANDBOX_VARS:
+        path = os.path.join(root, var.lower())
+        if var != "CTB_CLAUDE_JSON":
+            os.makedirs(path, exist_ok=True)
+        os.environ[var] = path
+
+
 @pytest.fixture(scope="session", autouse=True)
 def session_sandbox(tmp_path_factory):
     """The baseline every per-test restore goes back to: private dirs, no tmux session, no Claude session id.
@@ -305,7 +317,8 @@ class FakeBot:
     def call(self, method, params=None, timeout=15):
         self.calls.append((method, params or {}))
         if method in self.fail:
-            raise TelegramError(self.fail.pop(method))
+            error = self.fail.pop(method)
+            raise error if isinstance(error, TelegramError) else TelegramError(error)
         if method == "createForumTopic":
             self.next_thread += 1
             return {"message_thread_id": self.next_thread}
@@ -347,6 +360,15 @@ def _claude_probe_answers_found(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_clipboard(monkeypatch):
+    """The setup wizard reads (and clears) the system clipboard when Enter is pressed at the token prompt. A test
+    must never read or empty the developer's real clipboard: every test sees an empty one that cannot be cleared.
+    The clipboard helpers' own tests in test_setup_clipboard.py run them against stand-in programs."""
+    from ctb import clipboard
+    monkeypatch.setattr(clipboard, "_commands", lambda table, platform=None: [])
+
+
+@pytest.fixture(autouse=True)
 def _slash_typing_gate_is_a_plain_typist(request, monkeypatch):
     """Most tests have a fake tmux with no readable input box, and their subject is not the typing gate. For them
     `inbox.type_command` (a verified read of an empty box, the exact line, a verified send) is a plain typist:
@@ -366,8 +388,6 @@ def _slash_typing_gate_is_a_plain_typist(request, monkeypatch):
     monkeypatch.setattr(inbox, "type_command", plain)
 
 
-def pytest_configure(config):
-    config.addinivalue_line("markers", "real_type_command: use the real inbox.type_command gate, not the plain typist")
 
 
 class BoxedTmux:

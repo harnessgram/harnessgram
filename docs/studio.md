@@ -71,12 +71,62 @@ answers `503` before the command runs, and the app shows its off state.
 
 ## Where the data comes from
 
-`ctb/studio/provider.py` has two functions, `desk()` and `project(id)`. Today they return a small invented sample (the
-page shows a notice whenever `sample` is true). A later step replaces their bodies with what the video studio keeps on
-disk and keeps the shapes documented at the top of that file, so the page does not change. Each scene and sentence
+`ctb/studio/provider.py` has two functions, `desk()` and `project(id)`. With no adapter configured they return a small
+invented sample (the page shows a notice whenever `sample` is true). An optional private adapter supplies real data
+using the shapes documented at the top of that file, so the page does not change. Each scene and sentence
 already has a `frame` (the engine's real still, `--frame`) and each sentence an `audio` (its own clip): paths under the
 app's media root, `None` until they exist. When they are there the page draws the still over the placeholder and plays
 the clip through `media/<path>?auth=`; a path that is not a plain relative path is ignored.
+
+## Step 4: a private data adapter
+
+Set these optional fields in the bridge's existing private configuration, then run `harnessgram studio install`:
+
+```json
+{
+  "studio_adapter": "/srv/private-studio/adapter.py",
+  "studio_media_root": "/srv/private-studio/media"
+}
+```
+
+Both default to `""`. `studio_adapter` is an absolute path to trusted Python code outside the public repository.
+It exposes `desk()` and `project(id)`; `project` returns `None` for an unknown id. `studio_media_root` overrides the
+adapter's optional absolute `MEDIA_ROOT` directory. No media root means frames and audio stay `None`. The root must
+already exist and meet the Cockpit host's protected-folder policy. The install pins the root in its manifest and API
+wrapper, along with the selected configuration path, so both agree even with a custom configuration directory.
+Reinstall after moving or changing the root, or upgrading the installed API wrapper. Clearing `studio_adapter`
+restores the sample; draft marks are kept.
+
+An adapter runs with the app user's normal permissions: this is a trusted local extension, not a Python sandbox.
+Only its documented data fields reach the page. The loader drops malformed rows, duplicates and unknown series;
+checks finite times, ranges, identifiers and text; and bounds lists (50 home items per category, 60 scenes and 200
+caption cues per project) and the JSON response size. `scene_i` is zero-based; scene and sentence `i` start at one.
+Surviving sentences keep their original row numbers when malformed rows are dropped. Gaps are valid: saved marks,
+selection and playback use those IDs rather than positions in the filtered list.
+Production projects without subtitle cues keep an empty sentence list; the current desk cannot play those projects
+yet. No transcript or suggestion is invented to fill the gap.
+
+Frames and sentence audio must be existing regular files, using plain relative ASCII paths below the media root
+(at most 200 characters). Absolute paths, dot segments, hidden names, backslashes, missing files and links below the
+root are rejected. Reads reuse `safefs` with directory descriptors and `O_NOFOLLOW`, and create nothing. Media uses
+the Cockpit's existing authenticated route, which streams the verified descriptor directly without reopening its
+path. Adapters remain responsible for reading their own source files safely.
+
+The dedicated API process applies a 256 MiB memory limit before importing the private adapter (address space where
+supported, or the data limit on macOS), preserving stricter inherited limits. Import and call diagnostics go to the
+null device rather than a memory buffer. Memory exhaustion, or a host that refuses both resource limits, returns the
+labelled sample with reason `call`; the private adapter is not loaded when no limit can be applied. This limits the
+API subprocess only, not the panel process or an installer importing trusted adapter code to discover its media root.
+
+Import, call, configuration and top-level shape errors return a labelled sample with a bilingual `notice`. Because
+the existing page has no notice field slot, the same safe reason appears in its existing first card/project title.
+Exception text and local paths are never returned. Draft mark writes are refused while a project is an error
+fallback, so sample sentences cannot become marks on a real video. The ordinary unconfigured sample remains editable.
+Loading reads configuration without migrations or credential commands, and reloads adapter code when its file changes.
+
+Keep owner folders, engine conventions and the adapter itself outside the public repository. `.private/` is ignored
+for local handoffs; it is never part of a distributable adapter implementation. This step starts no engine process,
+renders nothing and adds no publication action.
 
 ## Files
 
@@ -86,6 +136,7 @@ the clip through `media/<path>?auth=`; a path that is not a plain relative path 
 | `src/ctb/studio/kit.css`, `sprite.svg` | The brand kit: the Cockpit's tokens plus the Studio layer, icons and scene placeholders. |
 | `src/ctb/studio/app.js`, `page.py` | The page. |
 | `src/ctb/studio/provider.py`, `api.py` | The data and the command. |
+| `src/ctb/studio/adapter.py` | Generic trusted-module loader, shape validation and read-only media checks. |
 | `src/ctb/studio/marks.py`, `safefs.py` | The owner's draft marks, and the writer that never follows a link. |
 | `src/ctb/studio/install.py` | Writes the app folder. |
 | `tests/studio_must_keep.json` | The must-keep contract: the elements each screen may never lose (`tests/test_studio_app_browser.py`). |

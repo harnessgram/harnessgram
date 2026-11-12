@@ -264,10 +264,11 @@ def listing() -> list:
 
 # --- media -------------------------------------------------------------------------------------
 
-def media_file(app: App, rel: str) -> Optional[Tuple[str, str]]:
-    """(real path, content type) of the media file `rel` (already URL-decoded) under the app's media root, or
+def media_file(app: App, rel: str) -> Optional[Tuple[int, str]]:
+    """(open descriptor, content type) of media `rel` (already URL-decoded) under the app's media root, or
     None. Refused: no media root, a control character, a segment that is empty, ".", ".." or a dotfile, a type outside MEDIA_TYPES,
-    a path whose real location (after every symlink) leaves the root or passes through a dot name, a non-file."""
+    a path whose real location (after every symlink) leaves the root or passes through a dot name, a non-file.
+    The caller owns the descriptor and must serve it directly, never reopen a checked path."""
     if app.media_root is None or not isinstance(rel, str) or len(rel) > MAX_MEDIA_PATH or CONTROL.search(rel):
         return None
     parts = _clean_parts(rel)
@@ -277,12 +278,19 @@ def media_file(app: App, rel: str) -> Optional[Tuple[str, str]]:
     real = os.path.realpath(os.path.join(root, *parts))
     if not _inside(real, root) or real == root:
         return None
-    if _clean_parts(os.path.relpath(real, root).replace(os.sep, "/")) is None:
+    relative = os.path.relpath(real, root).replace(os.sep, "/")
+    if _clean_parts(relative) is None:
         return None  # a symlink inside the root that points at a dotfile or dot folder
     ctype = MEDIA_TYPES.get(os.path.splitext(real)[1].lower())
-    if ctype is None or not os.path.isfile(real):
+    if ctype is None:
         return None
-    return real, ctype
+    from .studio import safefs
+    try:
+        # Resolve benign in-root aliases first, then walk every resolved component without following links.
+        # If any directory is replaced after resolution, the descriptor walk refuses the replacement.
+        return safefs.open_readonly(root, relative), ctype
+    except (OSError, ValueError):
+        return None
 
 
 RANGE = re.compile(r"bytes=(\d{0,18})-(\d{0,18})")

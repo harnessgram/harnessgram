@@ -92,7 +92,18 @@ local MLX model, network engines only when external translation is allowed); `pe
 page asks again after 2.5 seconds. The page shows the Hebrew and keeps the original under a small "מקור"
 toggle. All UI copy is in one strings table (`panel_page.STRINGS`), the CSS uses logical properties only and
 the colours follow Telegram's theme parameters (light and dark). Pull down or tap the refresh button to
-refresh; the page also refreshes every 15 seconds while visible.
+refresh; the page also refreshes by itself: every 10 seconds while it is visible and a session works, every 20
+seconds while it is visible and nothing works, and from once a minute up to once every five minutes while it is
+hidden. Transcript reads behind `/api/state` are cached by each file's size and mtime, so a frequent refresh reads
+only what changed.
+
+**Automatic progress cards.** A working session whose agent made no progress card of its own gets one from the
+bridge (`auto_progress.py`, marked `automatic` in the card data): the topic's name as its title, the subjects of
+the session's task list (TaskCreate / TaskUpdate or TodoWrite in the transcript) as its steps and percent, and
+how many background tasks it runs. No tool output or file contents reach it. It is replaced as soon as the agent
+publishes its own card and closed when the session goes idle (with no background task left) or ends. The hooks
+also remind a session on a long task (background tasks, three minutes, or 25 tool calls in a turn) that has no
+card of its own to publish one, at most once every ten minutes.
 
 **Newest first, stale folded away.** Decisions and reminders come newest first. A decision whose session has
 ended, or that the same session asked again later (the same words once ids and numbers are dropped), is marked
@@ -446,3 +457,15 @@ callback needs the unexpired state (used up by its first use) and the same brows
 the code; the refresh token goes to the radio's Keychain item. The redirect URI comes from `panel_base_url`
 only, never from the Host header. Replies are no-store and no-referrer; nothing of the flow is logged; signing
 in creates nothing on YouTube. Both routes answer 503 while mirroring is off.
+
+### Session usage prices
+
+The panel estimates API-equivalent cost; it does not measure subscription billing. Built-in prices are limited defaults and may be out of date. Set `usage_prices` in the existing JSON configuration to override or extend them. Each key is a lowercase model ID prefix, and each value contains exactly four finite numbers from 0 to 1,000,000,000 in USD per million tokens: input, output, cache write, cache read. Numbers below are examples only, not actual prices:
+
+```json
+{"usage_prices": {"claude-opus-5-5": [1, 2, 3, 4]}}
+```
+
+Configured prefixes take precedence over defaults; the longest matching configured prefix wins. A prefix matches the entire ID or a hyphen-delimited beginning, so it also covers dated variants. Rates must be verified and maintained by the user. Models without a configured or built-in price show “no price set”; the totals show how many tokens have no price. A displayed partial estimate excludes those tokens.
+
+The built-in model prices are estimates: prices as of 2026-11-03.

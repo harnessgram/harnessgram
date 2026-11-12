@@ -120,20 +120,34 @@ def test_index_recreated_when_it_was_deleted(bot, tmp_path):
 def test_gate_closed_skips_the_edit_and_the_next_reply_heals_it(bot, tmp_path):
     m, _ = make(bot, tmp_path)
     reply(m)
+    from ctb import reply_outbox
+    sent = len(bot.methods("sendMessage"))
     flood.record_429(GROUP, 30)
-    assert reply(m, "Next.\n\nSummary: next one") == 1  # the reply itself still goes out
+    assert reply(m, "Next.\n\nSummary: next one") == 0
+    assert len(bot.methods("sendMessage")) == sent
     assert not bot.methods("editMessageText")
     (state_dir() / "flood.json").unlink()  # gate open again
+    assert reply_outbox.drain(m.cfg, bot) == 1
+    assert "next one" in bot.methods("editMessageText")[-1]["text"]
+    assert reply_outbox.drain(m.cfg, bot) == 0
     reply(m, "Last.\n\nSummary: last one")
-    text = bot.methods("editMessageText")[0]["text"]
+    text = bot.methods("editMessageText")[-1]["text"]
     assert all(w in text for w in ("all good", "next one", "last one"))
 
 
 def test_gate_closed_skips_creation_too(bot, tmp_path):
     m, _ = make(bot, tmp_path)
     flood.record_429(GROUP, 30)
-    assert reply(m) == 1
+    assert reply(m) == 0
+    assert not bot.methods("sendMessage")
     assert not index_sends(bot) and not bot.methods("pinChatMessage")
+    from ctb import reply_outbox
+    assert reply_outbox.drain(m.cfg, bot) == 0
+    (state_dir() / "flood.json").unlink()
+    assert reply_outbox.drain(m.cfg, bot) == 1
+    assert len(index_sends(bot)) == 1 and len(bot.methods("pinChatMessage")) == 1
+    assert "all good" in index_sends(bot)[0]["text"]
+    assert reply_outbox.drain(m.cfg, bot) == 0
 
 
 def test_edit_and_creation_both_use_the_budget(bot, tmp_path):
@@ -321,3 +335,23 @@ def test_config_keys():
     for bad in ({"pin_limit": -1}, {"pin_limit": "3"}, {"pin_replies": "yes"}):
         with pytest.raises(ConfigError):
             from_dict(bad)
+
+
+def rename_notice(sender_id, is_bot=True, chat=GROUP):
+    return {"update_id": 2, "message": {"message_id": 901, "chat": {"id": chat, "type": "supergroup"},
+            "from": {"id": sender_id, "is_bot": is_bot}, "message_thread_id": 55,
+            "forum_topic_edited": {"name": "⚙️ Build the parser"}}}
+
+
+def test_notice_of_our_topic_rename_is_deleted(bot, tmp_path):
+    _, cfg = make(bot, tmp_path)
+    assert inbox.handle(rename_notice(BOT_ID), cfg, bot, None, None, None, 0.0) == "rename-notice"
+    assert bot.methods("deleteMessage") == [{"chat_id": GROUP, "message_id": 901}]
+
+
+def test_notice_of_the_owners_rename_is_kept(bot, tmp_path):
+    _, cfg = make(bot, tmp_path)
+    assert not pins.drop_rename_notice(rename_notice(OWNER, is_bot=False)["message"], cfg, bot)
+    assert not pins.drop_rename_notice(rename_notice(999)["message"], cfg, bot)
+    assert not pins.drop_rename_notice(rename_notice(BOT_ID, chat=-5)["message"], cfg, bot)
+    assert not bot.methods("deleteMessage")

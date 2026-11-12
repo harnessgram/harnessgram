@@ -413,6 +413,11 @@ def collect(offline: bool = False, bot=None, listener=None) -> list:
         results += check_bot(cfg, bot)
     if has_token and not offline:
         results += check_group(cfg, bot) + check_team(cfg, bot) + check_projects(cfg, bot)
+    from .install import _read_settings, statusline_check
+    try:
+        results.append(statusline_check(_read_settings(settings_path())))
+    except (SystemExit, OSError):
+        results.append(("warn", "Could not read Claude Code settings to check the status line."))
     results += check_tmux() + check_claude()
     results += (check_listener() if listener is None else list(listener)) + check_hooks() + check_running_code()
     if cfg is not None:
