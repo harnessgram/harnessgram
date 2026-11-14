@@ -70,7 +70,7 @@ def test_page_languages():
         page = panel_page.render_page(lang, "nonce").decode()
         assert text in page
         assert 'usageCard(d.usage_totals)' in page
-        assert 'usageDetails(s.usage,host)' in page
+        assert 'usageDetails(s.usage,host,s.id)' in page
 
 
 def test_snapshot_does_not_wait_for_transcript_read(monkeypatch, tmp_path):
@@ -137,7 +137,8 @@ def test_model_display_and_unpriced_labels():
         page = panel_page.render_page(lang, "nonce").decode()
         assert label in page
         assert 'shortUsageModel(m)' in page
-        assert 'nf.format(x[1].unpriced_tokens)' in page
+        assert '[S.usageUnpriced,v.unpriced_tokens]' in page
+        assert 'if(x[1]>0)' in page
         assert 'el("div","lbl",iso(m))' not in page
 
 

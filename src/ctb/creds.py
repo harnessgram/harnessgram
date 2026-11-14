@@ -425,6 +425,8 @@ FLAG_P = re.compile(r"(?i)(?P<pre>\b(?:mysql\w*|mariadb\w*|sshpass)\b[^\n]{0,300
 CURL_USER = re.compile(r"(?i)(?P<pre>\bcurl\b[^\n]{0,300}?[ \t](?-i:-u|-U|--user|--proxy-user)(?:[ \t]+|=)[\"']?[^\s:\"']+:)"
                        r"(?P<val>[^\s\"']{1,200})")
 BASIC = re.compile(r"(?i)(?P<pre>authorization[\"']?[ \t]*[:=][ \t]*[\"']?basic[ \t]+)(?P<val>[^\s\"']{4,})")
+# A cookie header carries session secrets in any value shape ("Cookie: sessionid=amberfox"), so the whole header value goes.
+COOKIE = re.compile(r"(?i)(?P<pre>\b(?:set-)?cookie[\"']?[ \t]*[:=][ \t]*[\"']?)(?P<val>[^\n\"']+)")
 # user:password@ in a URL: the password goes, the user and the host stay.
 USERINFO = re.compile(r"((?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,63}://[^/?#@\s:]*):[^/?#@\s]*@")
 # Values that are not secrets even after a label: types, switches, "see the docs"-style words, a count.
@@ -493,7 +495,7 @@ def _redact_channel(text: str) -> str:
         return m.group("pre") + "[redacted]"
     text = USERINFO.sub(lambda m: m.group(1) + ":[redacted]@", text)
     text = FLAG_VALUE.sub(flag, text)
-    for pattern in (FLAG_P, CURL_USER, BASIC):
+    for pattern in (FLAG_P, CURL_USER, BASIC, COOKIE):
         text = pattern.sub(after, text)
     for pattern in (LABEL_VALUE, LABEL_NEXT, LABEL_IS, LABEL_HE):
         text = pattern.sub(swap(_label_hides), text)

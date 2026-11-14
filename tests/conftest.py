@@ -432,3 +432,13 @@ class BoxedTmux:
             out = (inner_out if isinstance(inner_out, str) else "") + f"\n{self.RULE}\n❯ {self.box}\n{self.RULE}\n"
             return _sp.CompletedProcess(args, 0, out, "")
         return res
+
+
+@pytest.fixture(autouse=True)
+def _no_hook_health_alert(request, monkeypatch):
+    """The heartbeat's hook-health alert reads the real Claude settings; tests that count bot calls must not see it.
+    test_hook_health exercises it directly."""
+    if request.module.__name__.endswith("test_hook_health"):
+        return
+    from ctb import hook_health
+    monkeypatch.setattr(hook_health, "check", lambda *a, **kw: None)

@@ -127,7 +127,7 @@ def test_state_shape_from_state_dirs(server, tmp_path):
     assert {s["id"] for s in body["sessions"]} == {"abcd1234", "zzzz9999"}
     s = body["sessions"][0]
     assert set(s) == {"id", "name", "state", "age", "context", "compact", "model", "account", "bg", "now", "summary", "url", "here",
-                      "waiting", "folder", "branch", "left", "usage"}
+                      "waiting", "folder", "branch", "left", "usage", "forkable"}
     assert "topic" not in body
     assert s["state"] in ("working", "idle", "ended")
     q = body["quota"][0]
@@ -230,7 +230,8 @@ def test_topic_button_opens_that_topics_view(server):
     body = json.loads(data)
     assert code == 200 and body["topic"]["name"] == "Pantry deploy"
     b = body["topic"]["board"]
-    assert b["remind"] == [{"text": "Approve the banner", "due": ""}]
+    assert [{k: r[k] for k in ("text", "due")} for r in b["remind"]] == [{"text": "Approve the banner", "due": ""}]
+    assert all(r["ref"] and "old" in r for r in b["remind"])  # each reminder can be cleared from the Cockpit
     assert b["check"] == [{"text": "Ship it", "done": True}]
     assert b["link"] == [{"text": "Preview", "url": "https://example.com/p"}]
     assert {d["title"]: d["here"] for d in body["decisions"]} == {"Merge now?": True, "Elsewhere?": False}

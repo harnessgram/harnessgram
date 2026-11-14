@@ -65,6 +65,7 @@ class Translator:
         self.enabled = self.cfg is not None or translate_fn is not None
         self._fn = translate_fn
         self._memo: "collections.OrderedDict[str, str]" = collections.OrderedDict()
+        self._items: "collections.OrderedDict[tuple, str]" = collections.OrderedDict()
         self._failed: Dict[str, float] = {}
         self._queue: "collections.deque[str]" = collections.deque()
         self._queued: set = set()
@@ -100,6 +101,26 @@ class Translator:
         return None
 
     # --- filling -------------------------------------------------------------------------------
+
+    def he_item(self, project: str, ident: int, updated: float, text: str) -> Optional[str]:
+        """An item's Hebrew title, invalidated on a ledger update, isolated between projects.
+
+        Pending/failed translations are never frozen here: `he` owns retry and privacy policy.
+        The text digest also tolerates hand edits that forgot to advance `updated`.
+        """
+        key = (project, ident, updated, _key(text))
+        with self._lock:
+            if key in self._items:
+                self._items.move_to_end(key)
+                return self._items[key]
+        value = self.he(text)
+        if value:
+            with self._lock:
+                self._items[key] = value
+                self._items.move_to_end(key)
+                while len(self._items) > MEMO:
+                    self._items.popitem(last=False)
+        return value
 
     def _remember(self, key: str, value: str) -> None:
         with self._lock:

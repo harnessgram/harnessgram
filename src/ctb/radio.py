@@ -67,6 +67,7 @@ DEFAULTS = {
     # the brainstorming room (radio_room.py): its own paid-voice minutes per day (at most
     # radio_room.ROOM_TTS_CEILING_MINUTES, counted apart from tts_daily_minutes) and an optional suitability rule file
     "room_tts_daily_minutes": 15, "room_suitability_file": "",
+    "radio_player": True,
 }
 
 
@@ -272,6 +273,28 @@ def settings(cfg: Config) -> dict:
 
 def folder() -> Path:
     return private_dir(state_dir() / "radio")
+
+
+def clear_hls() -> None:
+    """Drop this run's private audio, including temporary segments; never follow a directory link."""
+    try:
+        path = folder() / "hls"
+        if path.is_symlink():
+            path.unlink()
+            return
+        if path.exists():
+            for child in path.iterdir():
+                child.unlink()
+    except OSError:
+        log("radio player: cleanup failed")
+
+
+def prepare_hls() -> Path:
+    clear_hls()
+    path = folder() / "hls"
+    if path.is_symlink():
+        raise OSError("linked HLS directory")
+    return private_dir(path)
 
 
 def _read(path: Path) -> dict:
@@ -617,6 +640,15 @@ def give_up(s: dict) -> int:
 
 # --- control (start / stop / status / say) -----------------------------------------------------
 
+def _sync_copy(cfg: Config, on: bool) -> None:
+    """Only the explicitly armed mirror follows home start/stop (explicit owner approval)."""
+    try:
+        from . import radio_youtube
+        radio_youtube.home_changed(cfg, on)
+    except Exception:
+        log("YouTube mirror: lifecycle update failed; home radio continues")
+
+
 def start(cfg: Config) -> str:
     """Start the radio; returns an i18n key for the result. Raises RadioError."""
     s = _ready(cfg)
@@ -636,6 +668,7 @@ def _ready(cfg: Config) -> dict:
 def _start_locked(cfg: Config, s: dict) -> str:
     """The start itself; the caller holds the control lock (start, or the resume's one locked decision)."""
     if job_pid():
+        _sync_copy(cfg, True)
         return "radio_already_on"
     _end_room("radio_off")  # a fresh start never carries on a room of an earlier run
     res = call_helper(s, "ensure", call=owned_call(_read(folder() / "state.json")))
@@ -671,6 +704,7 @@ def _start_locked(cfg: Config, s: dict) -> str:
             raise
         log("start: the job could not be set up (%s)" % e.__class__.__name__)
         raise RadioError("radio_job_failed") from None
+    _sync_copy(cfg, True)
     log("start: on (stream %s)" % ("created" if res.get("created") else "taken back"))
     return "radio_started"
 
@@ -748,6 +782,8 @@ def stop(cfg: Config) -> str:
             saved = False  # the radio is still stopped below, but the owner is told the stop did not stick
         _unload()
         _kill_leftover_encoder()
+        clear_hls()
+        _sync_copy(cfg, False)
         st = _read(folder() / "status.json")
         if st:
             st.update(pipeline="stopped", ffmpeg_pid=None)
@@ -979,7 +1015,8 @@ def out_fps() -> int:
 
 def encoder_args(encoder: str, video_fd: int = 3, marker: str = MARKER, fps: int = FPS, codec: str = "png",
                  bitrate: Tuple[str, str, str] = ("250k", "300k", "600k"), strip_fd: Optional[int] = None,
-                 strip: Optional[Tuple[int, int, int]] = None) -> List[str]:
+                 strip: Optional[Tuple[int, int, int]] = None, hls: bool = False,
+                 hls_input: Optional[Path] = None, output_fps: Optional[int] = None) -> List[str]:
     """ffmpeg: raw audio on stdin + the picture as image frames on `video_fd` (both paced by our clock: the card
     as PNG at 2 fps, the project show as JPEG at its own rate) -> FLV on stdout. No URL or key in here.
     With `strip_fd` and `strip` = (visible width, row, pixels per frame): a ticker strip on that fd (same rate),
@@ -987,7 +1024,7 @@ def encoder_args(encoder: str, video_fd: int = 3, marker: str = MARKER, fps: int
     video = (["-c:v", "h264_videotoolbox", "-realtime", "1", "-allow_sw", "1", "-profile:v", "main", "-bf", "0"]
              if encoder == "h264_videotoolbox" else
              ["-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage,zerolatency", "-bf", "0"])
-    out = out_fps()
+    out = output_fps or out_fps()
     picture = ["-map", "1:v", "-map", "0:a", "-vf", f"fps={out},format=yuv420p"]
     ticker: List[str] = []
     if strip_fd is not None and strip:
@@ -999,16 +1036,20 @@ def encoder_args(encoder: str, video_fd: int = 3, marker: str = MARKER, fps: int
                    f"[2:v]crop=w={width}:h=ih:x='iw-{width}-mod(n*{speed},iw/2)':y=0[t];"
                    f"[1:v][t]overlay=x=0:y={row}:eof_action=repeat,fps={out},format=yuv420p[v]",
                    "-map", "[v]", "-map", "0:a"]
-    return ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
-            "-probesize", "32", "-analyzeduration", "100000",  # raw audio: nothing to probe (0 means 5 s)
-            "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-thread_queue_size", "64", "-i", "pipe:0",
+    # Always one output: optional HLS is made by an isolated process in radio_rtmp, never this encoder.
+    output = ["-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1"]
+    audio = (["-re", "-live_start_index", "-1", "-max_reload", "3", "-m3u8_hold_counters", "3",
+              "-protocol_whitelist", "file,crypto", "-thread_queue_size", "64", "-i", str(hls_input)]
+             if hls_input is not None else
+             ["-probesize", "32", "-analyzeduration", "100000",  # raw audio: nothing to probe (0 means 5 s)
+              "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-thread_queue_size", "64", "-i", "pipe:0"])
+    return ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", *audio,
             "-analyzeduration", "100000", "-f", "image2pipe", "-c:v", codec, "-framerate", str(fps),
             "-thread_queue_size", "8", "-i", f"pipe:{video_fd}", *ticker,
             *picture, "-g", str(2 * out), "-keyint_min", str(2 * out), *video,
             "-b:v", bitrate[0], "-maxrate", bitrate[1], "-bufsize", bitrate[2],
             "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2",
-            "-metadata", f"comment={marker}", "-flush_packets", "1", "-max_interleave_delta", "100000", "-f", "flv", "-flvflags", "no_duration_filesize",
-            "pipe:1"]
+            "-metadata", f"comment={marker}", "-flush_packets", "1", "-max_interleave_delta", "100000", *output]
 
 
 def feed_behind(start: float, sent: int, now: float) -> float:
@@ -1040,12 +1081,16 @@ class Pipeline:
 
     def __init__(self, url: str, key: str, card: Path, encoder: str, mixer: Mixer, on_pid: Callable[[int], None],
                  quit: Optional[threading.Event] = None, err_path: Optional[Path] = None, marker: str = MARKER,
-                 source=None, keep: Optional[Callable[[], bool]] = None):
+                 source=None, keep: Optional[Callable[[], bool]] = None, hls: bool = False,
+                 hls_input: Optional[Path] = None, output_fps: Optional[int] = None,
+                 bitrate: Optional[Tuple[str, str, str]] = None):
         """`err_path` and `marker`: a second, independent pipeline (the staff edition, radio_youtube) keeps its
         own encoder log and its own recognisable encoder. `source` (radio_show.BoardShow): the moving picture
         instead of the card file, with its own frame rate and codec; `keep`: checked each second, False ends the
         run with MODE_CHANGED (the station then starts the other picture)."""
+        self.hls_input, self.output_fps, self.bitrate = hls_input, output_fps, bitrate
         self.source, self.keep = source, keep
+        self.hls, self.hls_dir = hls, None
         self.strip_out = None
         self._url, self._key = url, key
         self.err_path, self.marker = err_path, marker
@@ -1056,6 +1101,22 @@ class Pipeline:
         self.stalls: "collections.deque[float]" = collections.deque(maxlen=20)  # seconds, appended by _writer
         self.stalled = threading.Event()  # set by the writer (never blocks); the log thread wakes on it
         self.diag = None
+        self.hls_fresh = False
+
+    def _hls_freshness(self) -> None:
+        """Do all player filesystem probing off the pipeline supervision thread."""
+        while not self.stop.wait(2.0):
+            now = time.time()
+            try:
+                self.hls_fresh = now - (self.hls_dir / "live.m3u8").stat().st_mtime <= 15
+                for segment in self.hls_dir.glob("segment-*.ts"):
+                    try:
+                        if now - segment.stat().st_mtime > 120:
+                            segment.unlink()
+                    except OSError:
+                        pass
+            except OSError:
+                self.hls_fresh = False
 
     def report_stalls(self) -> None:
         """Write the stalls the audio writer noted (on the log thread only)."""
@@ -1180,6 +1241,9 @@ class Pipeline:
                 except Exception:
                     pass
             err = open(self.err_path or folder() / "ffmpeg.err", "ab")
+            if self.hls:
+                self.hls_dir = folder() / "hls"
+                pub.player_output(self.hls_dir, log)
             rfd, wfd = os.pipe()
             sfd = swfd = None
             try:
@@ -1192,7 +1256,13 @@ class Pipeline:
                     args = encoder_args(self.encoder, rfd, self.marker, fps=self.source.fps, codec=self.source.codec,
                                         bitrate=BOARD_BITRATE, strip_fd=sfd,
                                         strip=(*self.source.strip_window, self.source.strip_speed) if ticker else None)
-                self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+                if self.hls_input is not None:
+                    args = encoder_args(self.encoder, rfd, self.marker, fps=self.source.fps, codec=self.source.codec,
+                                        bitrate=self.bitrate or BOARD_BITRATE, strip_fd=sfd,
+                                        strip=(*self.source.strip_window, self.source.strip_speed) if ticker else None,
+                                        hls_input=self.hls_input, output_fps=self.output_fps)
+                self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL if self.hls_input is not None else subprocess.PIPE,
+                                             stdout=subprocess.PIPE, stderr=err,
                                              pass_fds=(rfd,) if sfd is None else (rfd, sfd))
             except BaseException:
                 os.close(wfd)
@@ -1216,11 +1286,23 @@ class Pipeline:
                 except Exception as e:
                     reason["why"] = str(e) if e.__class__.__name__ == "RtmpError" else e.__class__.__name__
                 failed.set()
-            for target, args in ((forward, ()), (self._writer, (failed,)), (self._pictures, (video, failed)),
-                                 (self._stall_logger, ())):
+            workers = [(forward, ())]
+            if self.hls_input is None:
+                workers.append((self._writer, (failed,)))
+            workers.append((self._pictures, (video, failed)))
+            if self.hls_input is None:
+                workers.append((self._stall_logger, ()))
+            for target, args in workers:
                 threading.Thread(target=target, args=args, daemon=True).start()
+            if self.hls_dir is not None:
+                threading.Thread(target=self._hls_freshness, daemon=True, name="radio-player-freshness").start()
             from . import policy
+            hls_started, hls_warned = time.time(), False
             while not failed.wait(1.0):
+                if (self.hls_dir is not None and time.time() - hls_started > 15 and
+                        not self.hls_fresh and not hls_warned):
+                    log("radio player: output stalled or failed; continuing the broadcast")
+                    hls_warned = True
                 if self.diag:
                     self.diag.log_error(log)
                 if self.quit.is_set():
@@ -1260,13 +1342,16 @@ class Pipeline:
                     pass
             for f in (p.stdin, p.stdout):
                 try:
-                    f.close()
+                    if f is not None:
+                        f.close()
                 except (OSError, ValueError):
                     pass
         if pub is not None:
             pub.close()
         if err is not None:
             err.close()
+        if self.hls:
+            clear_hls()
 
 
 # --- the daemon ------------------------------------------------------------------------------------
@@ -1275,6 +1360,7 @@ class Station:
     """`ctb radio run`: the launchd job. Keeps the stream going and speaks updates."""
 
     def __init__(self, cfg: Config):
+        clear_hls()  # remove audio left by SIGKILL or power loss before the service starts
         self.cfg = cfg
         self.s = settings(cfg)
         self.dir = folder()
@@ -1771,6 +1857,7 @@ class Station:
         signal.signal(signal.SIGTERM, lambda *_: self.quit.set())
         signal.signal(signal.SIGINT, lambda *_: self.quit.set())
         try:
+            _sync_copy(self.cfg, True)  # launchd restarts enter here without going through owner start()
             return self._run()
         except Exception as e:
             log("run: unexpected failure (%s)" % e.__class__.__name__)
@@ -1781,6 +1868,8 @@ class Station:
                 return self.give_up()
             return 1  # launchd starts the job again after its throttle
         finally:
+            clear_hls()
+            _sync_copy(self.cfg, False)
             try:  # a room never outlives the station that ran it
                 from . import radio_room
                 radio_room.stop_live("radio_off")
@@ -1821,7 +1910,7 @@ class Station:
                     return False
                 return (show is not None) == self.board_wanted()
             self.pipe = Pipeline(url, key, self.card, encoder, self.mixer, lambda pid: self._status(ffmpeg_pid=pid),
-                                 quit=self.quit, source=show, keep=keep)
+                                 quit=self.quit, source=show, keep=keep, hls=self.s["radio_player"])
             self._status(pipeline="live", picture="board" if show is not None else "card")
             why = self.pipe.run()
             if self.quit.is_set():

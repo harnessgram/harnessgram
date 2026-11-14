@@ -384,7 +384,7 @@ def test_a_confirmed_start_hands_its_channel_to_the_start_process(srv):
     token = yt(srv, {"action": "arm"})[2]["armed"]
     assert yt(srv, {"action": "start", "armed": token})[0] == 202 and srv.spawned == ["start"]
     rid = srv.requests[0]
-    assert Y.take_start_request(rid) == {"generation": gen, "channel_id": "UCchannelA"}
+    assert Y.take_start_request(rid) == {"generation": gen, "channel_digest": Y._channel_digest("UCchannelA")}
     with pytest.raises(Y.YouTubeError):  # once
         Y.take_start_request(rid)
 

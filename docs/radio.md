@@ -14,6 +14,29 @@ ctb radio say "text"       # speak one line now
 The same switch is in the control panel (the "Team radio" card) and in the home group as `/radio`,
 `/radio on`, `/radio off` (owner only).
 
+## Private Cockpit player
+
+The Cockpit home tab has a compact Listen/Pause control, a live indicator and an off state. On iPhone it uses
+native audio-only HLS, avoiding Telegram's live-video player. Tap Listen to start; pausing affects only your
+player. The audio element survives Cockpit refreshes and tab changes. No player library or public stream is added.
+
+`radio.radio_player` defaults to `true` for the home radio; set it to `false` to disable this output. The same
+ffmpeg encoder tees its 48 kHz, 96 kbps AAC packets into two-second MPEG-TS segments in `radio/hls/` (directory
+mode 0700), keeping six playlist entries and deleting old segments. The optional output has its own bounded,
+dropping FIFO and ignores failures, so disk trouble does not block RTMP. A missing/stale output produces a
+content-free diagnostic; stopping the pipeline/radio clears the files. The YouTube staff edition is unaffected.
+
+`POST /api/radio-player` requires the usual owner's Telegram auth header. It returns availability and a
+ten-minute HMAC capability scoped to this owner and the radio routes. `GET /radio/live.m3u8?token=...` signs
+each relative segment URI; only that playlist and `segment-<digits>.ts` are served, with no-store responses.
+Expired/forged tokens, symlinks, stale playlists and other file names are refused. Tokens cannot authorize
+other Cockpit routes, and requests are not logged. Keep any front proxy's access logs disabled/redacted for
+these routes too. An independent timer refreshes authorization two minutes before token expiry, with state
+polls as a fallback; renewal reconnects and can briefly buffer. Temporary radio restarts resume listening
+unless Pause was tapped; segments use increasing epoch-based numbers and mark discontinuities. After an
+expired Telegram login, reopen the Mini App. Actual iPhone playback and
+background behavior must be checked on the device; browser support alone is not device verification.
+
 ## How it works
 
 - **It comes back after a restart.** `start` records that the radio is wanted (`radio/wanted.json`); only `stop`
@@ -165,6 +188,59 @@ room on the radio" switch in the control panel's radio settings; turning it off 
 Files live in `<state>/radio/room/` (private): `room.json` (the room, its lines and the owner's words),
 `topic.json` (the room topic's chat and thread) and the room's voice usage.
 
+## YouTube mirror edition (explicit standing owner start)
+
+The mirror is for a maintainer who wants the unlisted YouTube copy to carry the full home radio (same
+summaries and voice, plus the moving flight board) whenever the radio is on. It starts following only after
+an explicit "mirror on" from the owner, and "mirror off" ends it.
+
+`radio.youtube.edition` accepts `"staff"` (the default, unchanged) or `"mirror"`. A missing or invalid value
+selects staff. **Mirror publishes the full home radio content**, including the owner's summaries and voice;
+the staff allowlist does not apply. It uses the existing connected YouTube channel, reusable ingest stream,
+unlisted broadcast settings and Keychain credentials. It adds no voice calls or separate narration.
+
+```
+harnessgram radio youtube mirror on     # explicit standing owner start; select mirror and enable it
+harnessgram radio start                  # home radio and its armed mirror follow the same lifecycle
+harnessgram radio stop                   # stops both; standing mirror permission remains for the next start
+harnessgram radio youtube mirror off    # stop the mirror and revoke its standing owner start
+```
+
+The Cockpit also offers **Enable standing mirror**, followed by a second confirmation naming the channel and
+explicitly covering all home content whenever the radio runs. **Stop mirror and revoke permission** works
+even with the bridge off. These actions run the same CLI implementation. Status includes `edition` and
+`mirror_owner_start`; the Cockpit shows the mirror's content description rather than the staff privacy claim.
+The explicit action selects `mirror` and enables it through `cockpit.json`; these saved choices override the
+configuration file, just like the existing feature switch. To return to staff, turn the mirror off,
+then enable the safely disabled staff edition with the usual feature switch. `mirror off` selects staff again
+and turns its feature switch off; it never starts a staff broadcast.
+
+Only `mirror on` writes `<state>/radio-youtube/mirror-start.json`, recording the owner's standing start,
+approval date, channel and connection generation. Configuring `edition: "mirror"`, starting the home radio,
+reboot/resume, a scheduled job or ordinary YouTube `start` never grants that permission. Changing/reconnecting
+the channel invalidates it; the owner must explicitly enable the mirror again. Home start/resume only loads
+an already-authorized mirror job. Turning the mirror off revokes permission before attempting network cleanup.
+
+Audio comes from the home encoder's private `<state>/radio/hls/live.m3u8`, enabled by `radio.radio_player`.
+The mirror waits quietly while that playlist is absent, stale, ended, or the home radio/player is off; it
+creates no broadcast during the wait. ffmpeg reads the local live edge at real-time pace. Bounded playlist
+reloads and pipeline reconnects handle disappearing/restarted playlists. Losing the home feed ends the
+YouTube broadcast; when a fresh live feed returns the existing standing start permits a replacement.
+
+The picture uses the same `radio_board.gather` / `collect` and `radio_show.BoardShow` renderer as the home
+flight board, with separate private drawing files. The board and scrolling ticker are encoded at a steady
+25 fps, 2-second keyframes and a 1.8 Mbps video target/max rate with a 3.6 Mb VBV buffer. Prepared motion units
+are reused from the home radio. The mirror never calls the staff script, voice or card. Telegram retains its
+existing still-card setting; enabling the mirror never changes `radio-board-on`.
+
+The bridge's `policy.on()` switch stops publication and ends the current mirror broadcast, regardless of
+the standing start. While it remains off no broadcast is created. A still-authorized mirror waits and may
+resume after the bridge and home HLS return; staff still requires a new explicit `start`. Home stop ends the
+mirror job, while mirror errors or revocation never stop or reconfigure Telegram. Broadcasts rotate at
+`max_hours` while the mirror is authorized and the home feed remains live. Repeated actual pipeline failures
+use the existing bounded retry budget and stop only the YouTube job. Credentials stay in Keychain/in memory:
+ffmpeg only sees a local playlist, image pipes and FLV on stdout, never ingest addresses or stream keys.
+
 ## Staff edition on YouTube (off by default)
 
 An unlisted YouTube live stream the owner can share with his staff. It is a **separate radio**, not a copy of
@@ -183,6 +259,7 @@ harnessgram radio youtube disconnect        # revoke the sign-in and remove the 
 "radio": {
   "youtube": {
     "enabled": false,
+    "edition": "staff",
     "projects": {"my-app": "My app"},
     "sections": ["station_id", "done_today", "in_work"],
     "client_command": ["/bin/cat", "/path/to/google-oauth-desktop-client.json"],
@@ -194,6 +271,7 @@ harnessgram radio youtube disconnect        # revoke the sign-in and remove the 
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Nothing runs and `start` refuses until this is `true` |
+| `edition` | `"staff"` | `"staff"` keeps the independent allowlisted station; `"mirror"` needs the explicit standing owner start described above |
 | `projects` | `{}` (nothing) | Ledger project key → the name staff hear. Only these projects are ever read. Empty = the station only identifies itself |
 | `sections` | all three | Subset of the fixed list `station_id` (always on), `done_today`, `in_work` |
 | `client_command` | none | Prints a Google OAuth client file (`installed` or `web`) or `{client_id, client_secret}` |

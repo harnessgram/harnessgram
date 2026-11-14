@@ -29,6 +29,23 @@ def test_both_languages_have_the_new_tab_and_card_strings():
     assert he["tabMe"] == "בשבילי" and he["tabAgents"] == "סוכנים" and he["settings"] == "הגדרות"
 
 
+def test_session_fork_button_requires_arm_then_explicit_confirmation():
+    from ctb.i18n import t
+
+    for lang in ("he", "en"):
+        assert panel_page.STRINGS[lang]["forkAction"] == t("fork_action", lang=lang)
+        assert panel_page.STRINGS[lang]["forkConfirm"] == t("fork_confirm", lang=lang)
+    assert panel.ACTIONS["/api/fork"] == "_fork"
+    assert 'if(!skipFork&&s.forkable&&s.state!=="ended")host.appendChild(forkRow(s));' in func("details")
+    assert 'if(s.forkable&&s.state!=="ended")b.appendChild(forkRow(s));' in func("sessionRow")
+    row = func("forkRow")
+    assert 'armed?{action:"start",session:s.id,armed:armed}:{action:"arm",session:s.id}' in row
+    assert 'post("/api/fork",body)' in row and 'if(armed)box.appendChild(el("div",null,S.forkConfirm))' in row
+    assert "S.cancelIt" in row and "delete forkArmed[s.id];draw()" in row
+    assert "if(forkBusy[s.id])return" in row and "go.disabled=!!forkBusy[s.id]" in row
+    assert row.count("e.preventDefault();e.stopPropagation()") == 2  # no summary toggle on action taps
+
+
 def test_the_page_has_three_tabs_and_keeps_the_topic_view():
     code = js()
     tabs = func("tabs")
@@ -115,10 +132,10 @@ def test_the_tap_note_and_motion_guards_stay():
     assert '"+ "+S.' not in page  # no plus-shaped marks in the copy
 
 
-def test_the_policy_is_unchanged():
+def test_the_policy_only_adds_same_origin_radio_media():
     assert panel_page.csp("N", "https://web.telegram.org") == (
         "default-src 'none'; script-src https://telegram.org/js/telegram-web-app.js 'nonce-N'; style-src 'nonce-N'; "
-        "connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; "
+        "connect-src 'self'; media-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; "
         "frame-ancestors https://web.telegram.org")  # frame-src: cockpit apps' sandboxed frames, this server only
     page = panel.render_page("he", "N").decode()
     assert page.count('nonce="N"') == 2 and len(re.findall(r"<script\b", page)) == 2
@@ -133,7 +150,7 @@ def test_the_youtube_staff_radio_card_keeps_its_guards():
     card = func("youtubeCard")
     assert 'ytPost({action:"connect"},cn)' in card and "openSafe(j.url)" in card and "/^https:\\/\\//i.test(j.url)" in card
     assert 'ytPost({action:"arm"},st)' in card and 'action:"start"' not in card  # the card itself never starts
-    assert 'ytPost({action:"start",armed:t},yes)' in func("ytConfirm") and "ytArmed.channel" in func("ytConfirm")
+    assert 'ytPost({action:mirror?"mirror-on":"start",armed:t},yes)' in func("ytConfirm") and "ytArmed.channel" in func("ytConfirm")
     assert 'ytPost({action:"stop"},sp)' in card and 'ytPost({action:"disconnect"},dc)' in card
     assert "if(!y.setup||!y.setup.client||!y.setup.base){c.appendChild(el(\"div\",\"safe\",S.ytSetup));return c;}" in card
     assert 'post("/api/youtube",body)' in func("ytPost")

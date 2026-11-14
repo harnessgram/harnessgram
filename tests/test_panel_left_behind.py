@@ -50,7 +50,7 @@ def test_a_reminder_is_cleared_from_the_page_without_waking_its_session(rig, ser
     now = time.time()
 
     def add(topic):
-        board.add_remind(topic, "pay the invoice", "", now - 4 * DAY)
+        board.add_remind(topic, "pay the invoice", "", now - 15 * DAY)
         return board.add_remind(topic, "call back", "", now)
     board.apply(rig.cfg, rig.bot, ORBIT, THREAD, add)
     topics = panel.TopicMap(state_dir() / "topics.json", None, HOME, cfg=rig.cfg)

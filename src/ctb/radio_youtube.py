@@ -1,19 +1,25 @@
-"""The staff edition of the team radio on YouTube: an unlisted live stream the owner can share with his staff.
+"""The staff or explicitly armed mirror edition of the team radio on YouTube: an unlisted live stream the owner can share with his staff.
 
     harnessgram radio youtube status [--live] | connect | start | stop | disconnect
 
-Off by default (`radio.youtube.enabled`). It is a second, independent radio, not a second output of the owner's:
+The default staff edition is off (`radio.youtube.enabled`). It is a second, independent radio, not a second output of the owner's:
 its own launchd job (com.claude-telegram-bridge.radio-youtube), its own script and card (radio_staff: an
 allowlist over the team's state, deny by default), its own encoder and RTMP connection, its own folder
 (<state>/radio-youtube). A failure here never touches the Telegram radio, and the Telegram radio never starts
 this one.
 
-The bridge's off switch (policy.on, `"mirror": false`) is read again each round: while off nothing is created
+For staff, the bridge's off switch (policy.on, `"mirror": false`) is read again each round: while off nothing is created
 or streamed, a live broadcast is ended, and turning the bridge on again never resumes it by itself.
 
 Going live is a publication, so only an explicit owner action reaches it: `start` (the CLI, or a Cockpit button
 that runs the same function) creates the broadcast and loads the job. Nothing else creates a broadcast; the job
 itself refuses to stream unless `start` recorded an owner start for the broadcast it is about to feed.
+
+Mirror edition (`radio.youtube.edition = "mirror"): `mirror on` is the ONLY writer of a standing
+owner start, bound to the connected channel and generation. Per the owner's approval it follows
+the home radio, reads its private HLS audio, and draws the full moving board. No staff script, voice or card
+is made. Without that standing start or a fresh home playlist the job cannot create a broadcast. `mirror off`
+revokes the standing start. These exceptions do not change the default staff edition's explicit-start guard.
 
 Credentials: `connect` runs Google's installed-app OAuth (loopback redirect + PKCE) with the OAuth client the
 `client_command` prints (for example the Desktop client the youtube-kit tools already use). The refresh token,
@@ -26,6 +32,7 @@ from __future__ import annotations
 import base64
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import plistlib
@@ -83,6 +90,7 @@ def settings(cfg: Config) -> dict:
     raw = (getattr(cfg, "radio", None) or {}).get("youtube")
     raw = raw if isinstance(raw, dict) else {}
     s = radio_staff.profile(raw, base["lang"])
+    s["edition"] = raw.get("edition") if raw.get("edition") in ("staff", "mirror") else "staff"
     client = raw.get("client_command")
     s["client_command"] = client if isinstance(client, list) and all(isinstance(a, str) for a in client) else []
     svc = raw.get("keychain_service")
@@ -95,6 +103,8 @@ def settings(cfg: Config) -> dict:
     # The Cockpit's own choices (its "enabled" switch and project picker) override the config file's; they are
     # read here every time, so the job's every-round reload (StaffStation.refresh) follows a tap at once.
     prefs = cockpit_prefs()
+    if prefs.get("edition") in ("staff", "mirror"):
+        s["edition"] = prefs["edition"]
     if isinstance(prefs.get("enabled"), bool):
         s["enabled"] = prefs["enabled"]
     if isinstance(prefs.get("projects"), list):
@@ -118,6 +128,8 @@ def set_cockpit_prefs(**kw) -> dict:
     under the connection lock, only the fields asked for, so two saves never undo each other."""
     with connection_lock():
         prefs = cockpit_prefs()
+        if kw.get("edition") in ("staff", "mirror"):
+            prefs["edition"] = kw["edition"]
         if "enabled" in kw:
             prefs["enabled"] = bool(kw["enabled"])
         if "projects" in kw:
@@ -713,7 +725,7 @@ def web_client(store) -> Optional[dict]:
 # --- operations the Cockpit asks for (run detached; the card follows them) ----------------------------------
 
 OP_TIMEOUT = 300
-ACTIONS = ("start", "stop", "disconnect")
+ACTIONS = ("start", "stop", "disconnect", "mirror-on", "mirror-off")
 
 
 def _op(**fields) -> None:
@@ -737,10 +749,13 @@ def switch(cfg: Config, action: str, request: Optional[str] = None) -> str:
     try:
         if action == "start":
             key = start(cfg, expect=take_start_request(request)) if request is not None else start(cfg)
+        elif action in ("mirror-on", "mirror-off"):
+            key = set_mirror(cfg, action == "mirror-on",
+                             expect=take_start_request(request) if request is not None else None)
         else:
             key = {"stop": stop, "disconnect": disconnect}[action](cfg)
         ok = key in ("youtube_started", "youtube_already_on", "youtube_stopped", "youtube_disconnected",
-                     "youtube_disconnected_revoke_failed")  # disconnected here; the card shows the revoke note
+                     "youtube_disconnected_revoke_failed", "youtube_mirror_on", "youtube_mirror_off")  # disconnected here; the card shows the revoke note
         return key
     except YouTubeError as e:
         key = e.key
@@ -752,6 +767,25 @@ def switch(cfg: Config, action: str, request: Optional[str] = None) -> str:
 START_REQUESTS = "start-requests"  # one 0600 file per Cockpit start request: <id>.json
 START_REQUEST_TTL = 120
 REQUEST_ID = re.compile(r"[0-9a-f]{32}")
+CHANNEL_KEY = "mirror-channel.key"
+
+
+def _channel_digest(channel_id: str) -> str:
+    """Return a stable local handle without persisting the channel id itself."""
+    path = folder() / CHANNEL_KEY
+    try:
+        key = path.read_bytes()
+    except FileNotFoundError:
+        key = secrets.token_bytes(32)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            key = path.read_bytes()
+        else:
+            with os.fdopen(fd, "wb") as out:
+                out.write(key)
+    os.chmod(path, 0o600)
+    return hmac.new(key, channel_id.encode(), hashlib.sha256).hexdigest()
 
 
 def _requests() -> Path:
@@ -772,7 +806,8 @@ def put_start_request(gen: int, channel_id: str) -> str:
     now = time.time()
     _drop_expired_requests(now)
     rid = secrets.token_hex(16)
-    write_private(_requests() / f"{rid}.json", json.dumps({"generation": gen, "channel_id": channel_id, "at": int(now)}))
+    write_private(_requests() / f"{rid}.json", json.dumps(
+        {"generation": gen, "channel_digest": _channel_digest(channel_id), "at": int(now)}))
     return rid
 
 
@@ -793,10 +828,10 @@ def take_start_request(rid: str) -> dict:
         raise YouTubeError("youtube_confirm_missing") from None
     at = data.get("at")
     if not isinstance(at, (int, float)) or not 0 <= time.time() - at <= START_REQUEST_TTL \
-            or not isinstance(data.get("generation"), int) or not isinstance(data.get("channel_id"), str) \
-            or not data["channel_id"]:
+            or not isinstance(data.get("generation"), int) or not isinstance(data.get("channel_digest"), str) \
+            or not data["channel_digest"]:
         raise YouTubeError("youtube_confirm_missing")
-    return {"generation": data["generation"], "channel_id": data["channel_id"]}
+    return {"generation": data["generation"], "channel_digest": data["channel_digest"]}
 
 
 def operation(now: Optional[float] = None) -> dict:
@@ -818,7 +853,8 @@ def spawn(action: str, request: Optional[str] = None) -> None:
     now = int(time.time())
     _op(action=action, at=now, asked=now, done=False)
     extra = ["--request", request] if request is not None else []
-    subprocess.Popen(launch.argv() + ["radio", "youtube", action] + extra, stdin=subprocess.DEVNULL,
+    command = ["mirror", action.split("-", 1)[1]] if action in ("mirror-on", "mirror-off") else [action]
+    subprocess.Popen(launch.argv() + ["radio", "youtube"] + command + extra, stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
@@ -831,7 +867,7 @@ def view(cfg: Config, client_ready: bool, base_ready: bool, now: Optional[float]
     since = st.get("since") if isinstance(st.get("since"), (int, float)) else None
     live = bool(st.get("on") and st.get("broadcast_id") and st.get("owner_start"))
     left = max(0.0, since + s["max_hours"] * 3600 - now) / 3600 if live and since else None
-    return {"enabled": s["enabled"], "setup": {"client": client_ready, "base": base_ready},
+    return {"edition": s["edition"], "mirror_owner_start": mirror_started(), "enabled": s["enabled"], "setup": {"client": client_ready, "base": base_ready},
             "connected": bool(conn.get("connected")), "channel": str(conn.get("channel_title") or "")[:100],
             "live_enabled": conn.get("live_enabled") if isinstance(conn.get("live_enabled"), bool) else None,
             "live": live, "since": int(since) if live and since else None,
@@ -868,6 +904,111 @@ def disconnect(cfg: Config, service: Optional[Service] = None) -> str:
 
 
 # --- launchd -------------------------------------------------------------------------------------------
+
+MIRROR_START = "mirror-start.json"
+MIRROR_APPROVAL = "mirror-v1"  # bump to require a fresh owner "mirror on"
+MIRROR_FPS = 25
+MIRROR_BITRATE = ("1800k", "1800k", "3600k")
+
+
+def mirror_started() -> bool:
+    """A standing OWNER start, never inferred from edition, enabled, home state or an old broadcast."""
+    rec, conn = _read(folder() / MIRROR_START), connection()
+    return bool(rec.get("on") is True and rec.get("owner_start") and
+                rec.get("approval") == MIRROR_APPROVAL and conn.get("connected") and
+                rec.get("generation") == conn["generation"] and
+                rec.get("channel_digest") == _channel_digest(conn.get("channel_id", ""))
+                and conn.get("channel_id"))
+
+
+def mirror_playlist() -> Path:
+    return radio.folder() / "hls" / "live.m3u8"
+
+
+def mirror_ready(cfg: Config) -> bool:
+    """A live, local home feed, not a leftover playlist. Missing/off is a quiet wait, never publication."""
+    if not radio.wanted() or not radio.settings(cfg)["radio_player"]:
+        return False
+    try:
+        path = mirror_playlist()
+        if path.is_symlink() or path.parent.is_symlink() or not 0 <= time.time() - path.stat().st_mtime < 15:
+            return False
+        lines = path.read_text(encoding="utf-8").splitlines()
+        segments = [line for line in lines if line and not line.startswith("#")]
+        return bool(lines and lines[0] == "#EXTM3U" and "#EXT-X-ENDLIST" not in lines and segments and
+                    not any("URI=" in line for line in lines) and
+                    all(re.fullmatch(r"segment-[0-9]{1,20}\.ts", name) for name in segments) and
+                    (path.parent / segments[-1]).is_file() and not (path.parent / segments[-1]).is_symlink())
+    except (OSError, UnicodeError):
+        return False
+
+
+def set_mirror(cfg: Config, on: bool, expect: Optional[dict] = None) -> str:
+    """Explicit CLI/Cockpit action only. Approval: full home audio + board, unlisted.
+    Automatic paths only READ this standing start; off revokes it before attempting any cleanup."""
+    from . import policy
+    with _locked():
+        if on:
+            if not policy.on():
+                raise YouTubeError("mirror_off")
+            if _job_on() and settings(cfg)["edition"] != "mirror":
+                raise YouTubeError("youtube_stop_first")
+            with connection_lock():
+                conn = connection()
+                if not conn.get("connected") or not conn.get("channel_id"):
+                    raise YouTubeError("youtube_not_connected")
+                if expect is not None and (expect["generation"] != conn["generation"] or
+                                           expect["channel_digest"] != _channel_digest(conn["channel_id"])):
+                    raise YouTubeError("youtube_channel_changed")
+                prefs = cockpit_prefs()
+                prefs.update(edition="mirror", enabled=True)
+                _write(folder() / PREFS, prefs)
+                _write(folder() / MIRROR_START, {"on": True, "owner_start": secrets.token_hex(16),
+                       "approval": MIRROR_APPROVAL, "generation": conn["generation"],
+                       "channel_digest": _channel_digest(conn["channel_id"]), "at": int(time.time())})
+            if radio.wanted() and not _job_on():
+                _load_job(settings(cfg))  # a waiting job; no API call and no broadcast here
+            return "youtube_mirror_on"
+        _write(folder() / MIRROR_START, {"on": False})
+        if settings(cfg)["edition"] == "mirror":
+            try:
+                _stop(cfg, None)
+            finally:
+                # Leave a usable, safely disabled staff edition; no hand-editing preferences to get it back.
+                set_cockpit_prefs(edition="staff", enabled=False)
+        return "youtube_mirror_off"
+
+
+HOME_INTENT = "home-intent.json"
+
+
+def home_changed(cfg: Config, on: bool) -> None:
+    """Publish home intent and return; never take the YouTube lock or call its API here."""
+    if settings(cfg)["edition"] != "mirror":
+        return
+    _write(folder() / HOME_INTENT, {"on": bool(on), "at": time.time()})
+    _spawn_home_sync(launch.argv() + ["radio", "youtube", "home-sync"])
+
+
+def _spawn_home_sync(argv: list) -> None:
+    """Detached, never waited on: the home radio's start/stop must not wait for YouTube."""
+    subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def sync_home(cfg: Config) -> None:
+    """Detached observer; concurrent observers harmlessly re-read the newest intent under the lock."""
+    with _locked():
+        intent, s = _read(folder() / HOME_INTENT), settings(cfg)
+        if s["edition"] != "mirror":
+            return
+        if not intent.get("on"):
+            _stop(cfg, None)
+        else:
+            from . import policy
+            if policy.on() and s["enabled"] and mirror_started() and not _job_on():
+                _load_job(s)
+
 
 def plist_path() -> Path:
     return HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -948,7 +1089,7 @@ def start(cfg: Config, service: Optional[Service] = None, load_job: Callable[[di
 
 
 def _start(cfg: Config, service: Optional[Service], load_job: Callable[[dict], None],
-           expect: Optional[dict] = None) -> str:
+           expect: Optional[dict] = None, mirror_job: bool = False) -> str:
     s = settings(cfg)
     if sys.platform != "darwin" and load_job is _load_job:
         raise YouTubeError("youtube_macos_only")
@@ -957,7 +1098,18 @@ def _start(cfg: Config, service: Optional[Service], load_job: Callable[[dict], N
     from . import policy
     if not policy.on():  # the bridge is off: nothing is created on YouTube
         raise YouTubeError("mirror_off")
-    if _job_on():
+    if s["edition"] == "mirror":
+        if not mirror_started():
+            raise YouTubeError("youtube_mirror_not_armed")
+        if not mirror_job:
+            if radio.wanted() and not _job_on():
+                load_job(s)
+            return "youtube_mirror_on"
+        if not mirror_ready(cfg):
+            return "youtube_mirror_waiting"
+    elif mirror_job:
+        raise YouTubeError("youtube_mirror_not_armed")
+    if not mirror_job and _job_on():
         return "youtube_already_on"
     svc = service or Service(s)
     if not svc.store.has(REFRESH):
@@ -985,10 +1137,20 @@ def _start(cfg: Config, service: Optional[Service], load_job: Callable[[dict], N
         if api.my_channel()["id"] != want:
             log("start: the credential belongs to another channel than the confirmed one; nothing was created")
             raise YouTubeError("youtube_channel_changed")
-        return _create(s, svc, load_job, api, conn["generation"])
+        # Permission, home feed and bridge are checked again after slow credential/API work.
+        if mirror_job:
+            if not policy.on():
+                raise YouTubeError("mirror_off")
+            if not mirror_started() or settings(cfg)["edition"] != "mirror":
+                raise YouTubeError("youtube_mirror_not_armed")
+            if not mirror_ready(cfg):
+                return "youtube_mirror_waiting"
+        ready = (lambda: policy.on() and mirror_started() and mirror_ready(cfg)) if mirror_job else None
+        return _create(s, svc, load_job, api, conn["generation"], ready=ready)
 
 
-def _create(s: dict, svc: "Service", load_job: Callable[[dict], None], api: "YouTube", gen: int) -> str:
+def _create(s: dict, svc: "Service", load_job: Callable[[dict], None], api: "YouTube", gen: int,
+            ready: Optional[Callable[[], bool]] = None) -> str:
     if not api.live_enabled():
         _set_connection(live_enabled=False)
         raise YouTubeError("youtube_not_enabled")
@@ -996,6 +1158,8 @@ def _create(s: dict, svc: "Service", load_job: Callable[[dict], None], api: "You
     url, key = ingest(stream)
     svc.store.set(INGEST_URL, url)
     svc.store.set(STREAM_KEY, key)
+    if ready is not None and not ready():
+        return "youtube_mirror_waiting"
     broadcast = api.insert_broadcast(s["title"])
     bid = broadcast.get("id") or ""
     if not bid:
@@ -1005,7 +1169,7 @@ def _create(s: dict, svc: "Service", load_job: Callable[[dict], None], api: "You
         api.bind(bid, stream.get("id") or "")
         _set_connection(live_enabled=True)
         _set_state(on=True, broadcast_id=bid, stream_id=stream.get("id") or "", since=int(time.time()),
-                   owner_start=nonce, start_generation=gen)  # the job ends the broadcast if the connection changes
+                   owner_start=nonce, start_generation=gen, edition=s["edition"])  # the job ends the broadcast if the connection changes
         for name in ("last.json", "failures.json", "card.png"):  # a fresh start: nothing from a former broadcast
             try:
                 (folder() / name).unlink()
@@ -1095,7 +1259,7 @@ def status(cfg: Config, live: bool = False, service: Optional[Service] = None) -
     s = settings(cfg)
     st, run = _state(), _read(folder() / "status.json")
     store = (service.store if service else KeychainStore(s["keychain_service"]))
-    out = {"enabled": s["enabled"], "projects": len(s["projects"]), "sections": s["sections"],
+    out = {"edition": s["edition"], "mirror_owner_start": mirror_started(), "enabled": s["enabled"], "projects": len(s["projects"]), "sections": s["sections"],
            "connected": bool(connection().get("connected")) and store.has(REFRESH),
            "channel": connection().get("channel_title") or "", "live_enabled": connection().get("live_enabled"),
            "on": _job_on(), "broadcast": bool(st.get("broadcast_id")), "pipeline": run.get("pipeline", ""),
@@ -1400,15 +1564,170 @@ class StaffStation:
         return 0
 
 
+class MirrorStation(StaffStation):
+    """The home HLS audio and full flight board. Shares supervision helpers, never staff content/voice."""
+
+    def __init__(self, cfg: Config, service: Optional[Service] = None,
+                 reload: Optional[Callable[[], dict]] = None):
+        self.cfg, self.s = cfg, settings(cfg)
+        self.reload = reload or _load_settings
+        self.dir, self.service = folder(), service
+        self.quit = threading.Event()
+        self.pipe = self.show = None
+        self.show_quit = threading.Event()
+        self.show_threads = []
+        self.broadcast_id = self.start_nonce = ""
+        self.status = {"pid": os.getpid(), "started": int(time.time()), "pipeline": "waiting", "failures": 0}
+
+    def allowed(self) -> bool:
+        try:
+            self.s = self.reload()
+        except Exception:
+            return False  # unreadable permission/settings never permit publication
+        from . import policy
+        return bool(self.s["edition"] == "mirror" and self.s["enabled"] and mirror_started() and
+                    policy.on() and radio.wanted())
+
+    def feed_board(self) -> None:
+        from . import radio_board
+        base, now = radio.settings(self.cfg), time.time()
+        sources = radio_board.gather(self.cfg, base, now)
+        self.show.update(radio_board.collect(sources, base["project_names"], now, lang=base["lang"]))
+
+    def start_board(self) -> None:
+        from . import radio_paint, radio_show
+        if self.show is not None:
+            if self.show.failed:
+                raise YouTubeError("youtube_job_failed")
+            return
+        home = radio.folder()
+        if not radio_paint.available(home / "bin"):
+            raise YouTubeError("youtube_job_failed")
+        where = radio_show.safe_folder(state_dir(), ["radio-youtube", "board"])
+        if where is None:
+            raise YouTubeError("youtube_job_failed")
+        self.show = radio_show.BoardShow(where, home / "bin", radio.settings(self.cfg)["lang"], home / "motion")
+        try:
+            self.feed_board()
+            self.show.step()
+            if self.show.failed or not self.show.frame():
+                raise YouTubeError("youtube_job_failed")
+        except Exception:
+            self.show = None  # retry initialization; never reuse a half-built show with no frames/thread
+            raise
+
+        def update():
+            while not self.show_quit.wait(POLL):
+                try:
+                    self.feed_board()
+                except Exception:
+                    log("mirror board: state update failed")
+        for target, args in ((self.show.run, (self.show_quit,)), (update, ())):
+            th = threading.Thread(target=target, args=args, daemon=True, name="youtube-mirror-board")
+            self.show_threads.append(th)
+            th.start()
+
+    def ensure_broadcast(self, svc: Service) -> bool:
+        """The automatic publication path: still needs the explicit, channel-bound standing owner start."""
+        with _locked():
+            if not self.allowed() or not mirror_ready(self.cfg):
+                return False
+            st = _state()
+            if st.get("edition") == "mirror" and st.get("on") and st.get("owner_start") and st.get("broadcast_id") \
+                    and st.get("start_generation") == generation() and time.time() < self.end_time():
+                ok = True
+            else:
+                ok = _start(self.cfg, svc, lambda s: None, mirror_job=True) == "youtube_started"
+            if ok:
+                current = _state()
+                self.broadcast_id = str(current.get("broadcast_id") or "")
+                self.start_nonce = str(current.get("owner_start") or "")
+            return ok
+
+    def end_current(self, svc: Service) -> None:
+        bid, nonce = self.broadcast_id, self.start_nonce
+        if not bid:
+            return
+        with _locked():
+            current = _state()
+            if current.get("broadcast_id") == bid and current.get("owner_start") == nonce:
+                _queue_cleanup(bid)
+                _set_state(broadcast_id="", on=False, owner_start="")
+                finish_pending(svc)
+            else:
+                _finish(svc.api(), bid)
+        self.broadcast_id = self.start_nonce = ""
+
+    def _run(self) -> int:
+        svc = self.service or Service(self.s)
+        try:
+            while not self.quit.is_set():
+                if not self.allowed() or not mirror_ready(self.cfg):
+                    self.end_current(svc)
+                    self._status(pipeline="waiting", ffmpeg_pid=None)
+                    # A stopped home radio or revoked permission ends the job. Bridge off or missing HLS waits.
+                    if not radio.wanted() or not mirror_started() or self.s["edition"] != "mirror" or not self.s["enabled"]:
+                        return self.give_up(why="ended")  # unload, so the next authorized start can load a fresh job
+                    self.quit.wait(1)
+                    continue
+                try:
+                    self.start_board()  # no broadcast if the moving picture cannot be prepared
+                    if not self.ensure_broadcast(svc):
+                        continue
+                    url, key = svc.store.get(INGEST_URL), svc.store.get(STREAM_KEY)
+                    if not url or not key:
+                        raise YouTubeError("youtube_reconnect")
+                    encoder = radio.pick_encoder(self.s["video_encoder"])
+                    self.pipe = radio.Pipeline(url, key, self.dir / "unused.png", encoder, None,
+                                  lambda pid: self._status(ffmpeg_pid=pid), quit=self.quit,
+                                  err_path=self.dir / "ffmpeg.err", marker=MARKER, source=self.show,
+                                  keep=lambda: self.allowed() and mirror_ready(self.cfg) and
+                                               not self.show.failed and time.time() < self.end_time(),
+                                  hls_input=mirror_playlist(), output_fps=MIRROR_FPS, bitrate=MIRROR_BITRATE)
+                    self._status(pipeline="live")
+                    why = self.pipe.run()
+                    if self.quit.is_set():
+                        break
+                    if why in (radio.MIRROR_OFF, radio.MODE_CHANGED) or not mirror_ready(self.cfg):
+                        if self.show.failed:
+                            raise YouTubeError("youtube_job_failed")
+                        continue  # off, missing/restarted playlist, or time to rotate: no failure budget used
+                except Exception:
+                    # No exception body or external response can reach the log (credentials stay in memory).
+                    log("mirror: pipeline unavailable; retrying")
+                count = self.note_failure()
+                self._status(pipeline="restarting", failures=count)
+                if count >= MAX_FAILURES:
+                    return self.give_up()
+                self.quit.wait(min(60, 2 ** count))
+            self._status(pipeline="stopped", ffmpeg_pid=None)
+            return 0
+        finally:
+            if self.pipe is not None:
+                self.pipe.close()
+            self.show_quit.set()
+            for th in self.show_threads:
+                th.join(timeout=2)
+            self.end_current(svc)  # only this YouTube broadcast; never the home radio or its HLS
+
+
 # --- the CLI -----------------------------------------------------------------------------------------------
 
-def cli(cfg: Config, action: str, live: bool = False, request: Optional[str] = None) -> int:
+def cli(cfg: Config, action: str, live: bool = False, request: Optional[str] = None,
+        mirror: Optional[str] = None) -> int:
     from .i18n import t
     lang = radio.settings(cfg)["lang"]
     try:
+        if action == "home-sync":
+            sync_home(cfg)
+            return 0
         if action == "run":
-            return StaffStation(cfg).run()
-        if action == "status":
+            return (MirrorStation(cfg) if settings(cfg)["edition"] == "mirror" else StaffStation(cfg)).run()
+        if action == "mirror":
+            if mirror not in ("on", "off"):
+                return 2
+            print(t(switch(cfg, "mirror-" + mirror, request), lang=lang))
+        elif action == "status":
             print(json.dumps(status(cfg, live=live), ensure_ascii=False, indent=1))
         elif action == "connect":
             print(t("youtube_connect_open", lang=lang), file=sys.stderr)

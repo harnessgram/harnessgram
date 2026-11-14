@@ -35,7 +35,7 @@ from typing import Optional
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from . import accounts, bank, board, blocks, brief, cards, cockpit_apps, decisions, models, panel_page, panel_settings, panel_text, panel_view, status, usage, session_usage
-from . import auto_progress, mac_resources, panel_youtube
+from . import auto_progress, live_activity, mac_resources, panel_youtube, owner_requests, reminder_lifecycle
 from .config import Config, home_chat, state_dir
 from .inbox import PanelQueueFull
 from .sessions_menu import collect
@@ -69,12 +69,14 @@ ROUTES = {"/api/state": MAX_BODY, "/api/decide": MAX_DECIDE_BODY, "/api/radio": 
           "/api/setting": MAX_BODY, "/api/dismiss": 1280, "/api/radio-say": 2600, "/api/card": MAX_DECIDE_BODY, "/api/say": 2600, "/api/bank": MAX_BODY,
           "/api/unsay": MAX_BODY, "/api/close": 1280, "/api/remind": 2600, "/api/screen": MAX_BODY,
           "/api/compact": MAX_BODY, "/api/room": 2600,
-          "/api/brief-seen": MAX_BODY, "/api/block-mute": MAX_BODY}
+          "/api/brief-seen": MAX_BODY, "/api/block-mute": MAX_BODY, "/api/fork": 256,
+          "/api/hooks-restore": MAX_BODY, "/api/sessions-reload": MAX_BODY}
 ACTIONS = {"/api/model": "_model", "/api/setting": "_setting", "/api/dismiss": "_dismiss", "/api/radio-say": "_radio_say",
            "/api/card": "_card", "/api/say": "_say", "/api/bank": "_bank", "/api/unsay": "_unsay",
            "/api/close": "_close", "/api/remind": "_remind", "/api/screen": "_screen",
            "/api/compact": "_compact", "/api/room": "_room",
-           "/api/brief-seen": "_brief_seen", "/api/block-mute": "_block_mute"}
+           "/api/brief-seen": "_brief_seen", "/api/block-mute": "_block_mute", "/api/fork": "_fork",
+           "/api/hooks-restore": "_hooks_restore", "/api/sessions-reload": "_sessions_reload"}
 ROOM_KEYS = {"start": ({"topic", "minutes"}, {"project"}), "pause": (set(), set()), "resume": (set(), {"text"}),
              "summarize": (set(), set()), "end": (set(), set()), "close": (set(), set()),
              "send": ({"room", "task", "session"}, set())}
@@ -94,10 +96,63 @@ HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(?::\d{1,5})?")
 YOUTUBE_BODY = 512  # {"action": ..., "armed"|"on"|"keys": ...}
 ROUTES["/api/youtube"] = YOUTUBE_BODY  # routed before the off check (_youtube_post: stop and disconnect pass)
 YOUTUBE_KEYS = {"connect": set(), "arm": set(), "start": {"armed"}, "stop": set(), "disconnect": set(),
-                "enable": {"on"}, "projects": {"keys"}}
-YOUTUBE_WHILE_OFF = ("stop", "disconnect")  # they only reduce exposure: allowed while mirroring is off
+                "enable": {"on"}, "projects": {"keys"}, "mirror-arm": set(),
+                "mirror-on": {"armed"}, "mirror-off": set()}
+YOUTUBE_WHILE_OFF = ("stop", "disconnect", "mirror-off")  # they only reduce exposure: allowed while mirroring is off
 OAUTH_DEADLINE = 20  # seconds the sign-in callback may take (one token exchange with Google)
 MAX_OAUTH_PATH = 4096
+RADIO_TOKEN_TTL = 600
+RADIO_FILE = re.compile(r"live\.m3u8|segment-[0-9]{1,20}\.ts")
+RADIO_FRESH = 15  # stale/crashed encoders must not leave playable audio behind
+
+
+def radio_token(secret: str, owner: int, now: Optional[float] = None) -> str:
+    expiry = int(time.time() if now is None else now) + RADIO_TOKEN_TTL
+    payload = f"radio-player:{owner}:{expiry}"
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{owner}.{expiry}.{signature}"
+
+
+def valid_radio_token(token: str, secret: str, owner: int, now: Optional[float] = None) -> bool:
+    if not secret or not owner or not isinstance(token, str) or len(token) > 128:
+        return False
+    if not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,12}\.[0-9a-f]{64}", token):
+        return False
+    who, expiry, signature = token.split(".")
+    now = time.time() if now is None else now
+    if int(who) != owner or not now < int(expiry) <= now + RADIO_TOKEN_TTL:
+        return False
+    want = hmac.new(secret.encode(), f"radio-player:{who}:{expiry}".encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(want, signature)
+
+
+def radio_player_on(cfg: Config) -> bool:
+    from . import radio
+    return bool(cfg.radio) and radio.settings(cfg)["radio_player"]
+
+
+def radio_audio(name: str) -> bytes:
+    """Only regular files beneath the private HLS directory, with a fresh live playlist."""
+    from . import radio
+    if not RADIO_FILE.fullmatch(name):
+        raise OSError("not a radio file")
+    root = radio.folder() / "hls"
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        playlist = os.stat("live.m3u8", dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISREG(playlist.st_mode) or time.time() - playlist.st_mtime > RADIO_FRESH:
+            raise OSError("radio off")
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
+    finally:
+        os.close(root_fd)
+    with os.fdopen(fd, "rb") as stream:
+        st = os.fstat(stream.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 256_000:
+            raise OSError("not a radio file")
+        return stream.read(256_001)
+
+
+ROUTES["/api/radio-player"] = MAX_BODY
 
 
 def app_csp(host: str = "") -> str:
@@ -203,7 +258,7 @@ def waiting_for_owner(topics: TopicMap, now: float, here: Optional[tuple] = None
     reminders = [{"text": i["s"], "due": i.get("d", ""), "topic": by_place.get((chat, thread), ""),
                   "age": _age(now, i["at"]), "url": panel_view.topic_url(chat, thread), "here": (chat, thread) == here,
                   "ref": f"{board.key_hash(board.key_of(chat, thread))}:{i['i']}" if type(i.get("i")) is int else "",
-                  "old": panel_view.is_old(now, i["at"])}
+                  "old": reminder_lifecycle.is_old(i, now)}
                  for chat, thread, i in sorted(found, key=lambda f: -f[2]["at"])[:MAX_REMINDERS]]
     return asked, reminders
 
@@ -247,7 +302,10 @@ def _board_view(chat: int, thread: int) -> dict:
     out = {"remind": [], "check": [], "link": []}
     for i in board.items_of(chat, thread):
         if i["k"] == "remind":
-            out["remind"].append({"text": i["s"], "due": i.get("d", "")})
+            out["remind"].append({"text": i["s"], "due": i.get("d", ""),
+                                  "ref": f"{board.key_hash(board.key_of(chat, thread))}:{i['i']}",
+                                  "age": _age(time.time(), i["at"]),
+                                  "old": reminder_lifecycle.is_old(i, time.time())})
         elif i["k"] == "check":
             out["check"].append({"text": i["s"], "done": i["x"]})
         else:
@@ -349,6 +407,7 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
         live = not light and e.state != "ended"
         folder, branch = auto_progress.cached(path, "place", status.workplace, ("", ""))
         sessions.append({"id": e.session[:8], "name": e.name, "state": e.state,
+                         "forkable": bool(re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", e.session)),
                          "age": None if e.age is None else int(e.age), "context": ctx, "model": model,
                          "account": _session_account(e.session), "bg": _background(path, e.state, now),
                          "now": panel_view.current_step(e.session) if live and e.state == "working" else "",
@@ -373,11 +432,14 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
     out = {"ok": True, "now": int(now), "decisions": asked, "reminders": reminders, "sessions": sessions,
            "usage_totals": usage_snapshot["totals"], "quota": quota, "compact_at": _compact_at(), "default_model": _default_model(),
            "settings": panel_settings.read()}
+    from . import hook_health
+    out["hook_health"] = hook_health.view()
     if not light:
         out["mac"] = mac_resources.snapshot()
     out["bank"] = bank.view()
     out["apps"] = cockpit_apps.listing()
     out["tasks"] = open_tasks(topics, now, (scope["chat"], scope["thread"]) if scope else None)
+    out["requests"] = owner_requests.read(now, owner_requests.ledger_dir(cfg))
     ended = {e.session for e in entries if e.state == "ended"}
     states = {e.session: e.state for e in entries}
     if not light:
@@ -386,11 +448,11 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
     links = {e.session: panel_view.topic_url(home_chat(cfg) if e.chat is None else e.chat, e.thread) for e in entries}
     backgrounds = {e.session: s["bg"] for e, s in zip(shown[:MAX_SESSIONS], sessions)}  # full ids: short ones can collide
     out["cards"] = [dict(cards.view(r, now), topic=names.get(r["session"], ""), topic_url=links.get(r["session"], ""),
-                         **_card_activity(r, paths, backgrounds, states),
+                         **_card_activity(r, paths, backgrounds, states, now),
                          ended=r["session"] in ended and (r["kind"] != "progress" or bool(r.get("auto_closed"))),
                          auto_closed=bool(r.get("auto_closed")),
                          stale=r["kind"] == "progress" and r["state"] == "open" and not r.get("automatic") and
-                               states.get(r["session"]) == "working" and cards.is_stale(r, now),
+                               _card_stale(r, states, now),
                          old=panel_view.is_old(now, r.get("updated")),
                          here=bool(scope) and r["session"] == scope["session"])
                     for r in cards.reconcile_progress(ended, now)]
@@ -406,9 +468,10 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
             out["brief"] = None
     # The response boundary: agent-written text leaves this machine for the browser (and the radio), so it is
     # credential-filtered here too - also what was saved before the creation-time filter existed.
-    for key in ("decisions", "reminders", "tasks", "sessions", "cards", "topic", "deliveries", "brief", "usage_totals"):
+    for key in ("decisions", "reminders", "requests", "tasks", "sessions", "cards", "topic", "deliveries", "brief", "usage_totals"):
         _secret_free(out.get(key))
     waiting: list = []
+    owner_requests.translate(out["requests"], tr, waiting)
     if scope:
         _hebrew(tr, [out["topic"]], ("name",), waiting)
         for kind in ("remind", "check", "link"):
@@ -419,14 +482,14 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
     _hebrew(tr, sessions, ("name", "summary"), waiting)
     if out["usage_totals"]:
         _hebrew(tr, out["usage_totals"]["top"], ("name",), waiting)
-    _hebrew(tr, out["cards"], ("title", "detail", "topic", "live", "task"), waiting)
+    _hebrew(tr, out["cards"], ("title", "detail", "topic", "live", "task", "activity"), waiting)
     _hebrew(tr, out["deliveries"], ("title",), waiting)
     if out.get("brief"):
         _hebrew(tr, out["brief"]["lines"], ("text",), waiting)
         _hebrew(tr, out["brief"]["waiting"], ("text", "note", "detail"), waiting)
         _hebrew(tr, out["brief"]["noticed"], ("text",), waiting)
     # The last pass, after the translations were added: a translation (or a cached one) is returned clean too.
-    for key in ("decisions", "reminders", "tasks", "sessions", "cards", "topic", "deliveries", "brief", "usage_totals"):
+    for key in ("decisions", "reminders", "requests", "tasks", "sessions", "cards", "topic", "deliveries", "brief", "usage_totals"):
         _secret_free(out.get(key))
     out["pending"] = len(waiting)
     if getattr(cfg, "radio", None):
@@ -441,15 +504,36 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
     return out
 
 
-def _card_activity(rec: dict, paths: dict, backgrounds: dict, states: dict) -> dict:
-    """Mid-turn activity for an agent card, using the same incremental task cache and job counts as sessions.
-    No tool output, descriptions, or new transcript scanners are used."""
-    if (rec["kind"] != "progress" or rec["state"] != "open" or rec.get("automatic")
+def _fresh_activity(rec: dict, states: dict, now: float) -> dict:
+    if states.get(rec["session"]) != "working":
+        return {}
+    row = live_activity.read(rec["session"])
+    return row if row and 0 <= now - row["at"] < 900 else {}
+
+
+def _card_stale(rec: dict, states: dict, now: float) -> bool:
+    if _fresh_activity(rec, states, now):
+        return False
+    if states.get(rec["session"]) == "working":
+        return cards.is_stale(rec, now)
+    return not cards.finished(rec) and now - max(rec["updated"], rec.get("live_at", 0)) >= 900
+
+
+def _card_activity(rec: dict, paths: dict, backgrounds: dict, states: dict, now: Optional[float] = None) -> dict:
+    """Attach sanitized tool activity and the current task without changing the saved plan."""
+    now = time.time() if now is None else now
+    if (rec["kind"] != "progress" or rec["state"] != "open"
             or cards.finished(rec) or states.get(rec["session"]) == "ended"):
         return {}
-    tasks = auto_progress.task_list(paths.get(rec["session"]))
+    tasks = [] if rec.get("automatic") else auto_progress.task_list(paths.get(rec["session"]))
     subject = next((t["content"] for t in tasks if t.get("status") == "in_progress"), "")
-    return {"task": cards.subject_line(subject), "bg": backgrounds.get(rec["session"], 0)}
+    out = {} if rec.get("automatic") else {"task": cards.subject_line(subject), "bg": backgrounds.get(rec["session"], 0)}
+    activity = _fresh_activity(rec, states, now)
+    if activity:
+        out["age"] = max(0, int(now - max(rec["updated"], activity["at"])))
+        if not rec.get("live") or now - rec.get("live_at", 0) >= 300:
+            out.update(activity=activity["text"], activity_age=max(0, int(now - activity["at"])))
+    return out
 
 
 def _auto_cards(cfg: Config, entries: list, paths: dict, bg: dict, now: float) -> None:
@@ -574,6 +658,9 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/app/"):
             self._app_get()
             return
+        if self.path.startswith("/radio/"):
+            self._radio_get()
+            return
         if urlsplit(self.path).path != "/":  # t.me/<bot>/<app> links add a tgWebAppStartParam query
             self._json(404, {"error": "not found"})
             return
@@ -593,7 +680,7 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         if self.path not in ROUTES:
             self._json(404, {"error": "not found"})
             return
-        decide = self.path != "/api/state"  # every other route acts: it needs the fresher login
+        decide = self.path not in ("/api/state", "/api/radio-player")
         if not self._body_ok(ROUTES[self.path]):
             return
         init = self.headers.get(INIT_HEADER, "")
@@ -603,6 +690,16 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             return
         if self.path == "/api/radio":
             self._radio()
+            return
+        if self.path == "/api/radio-player":
+            enabled = radio_player_on(self.server.cfg)
+            try:
+                live = enabled and bool(radio_audio("live.m3u8"))
+            except OSError:
+                live = False
+            self._json(200, {"ok": True, "enabled": enabled, "on": live,
+                             "token": radio_token(self.server.bot_token, self.server.owner_id) if enabled else "",
+                             "expires": int(time.time()) + RADIO_TOKEN_TTL})
             return
         if self.path in ACTIONS:
             getattr(self, ACTIONS[self.path])()
@@ -617,6 +714,41 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             return
         data["youtube"] = self.server.youtube_view()
         self._json(200, data)
+
+    def _radio_get(self) -> None:
+        parts = urlsplit(self.path)
+        try:
+            pairs = parse_qsl(parts.query, keep_blank_values=True, strict_parsing=True)
+        except ValueError:
+            pairs = []
+        token = pairs[0][1] if len(pairs) == 1 and pairs[0][0] == "token" else ""
+        if len(self.path) > 512 or not valid_radio_token(token, self.server.bot_token, self.server.owner_id):
+            self._json(403, {"error": "forbidden"})
+            return
+        name = parts.path.removeprefix("/radio/")
+        if not RADIO_FILE.fullmatch(name) or not radio_player_on(self.server.cfg):
+            self._json(404, {"error": "not found"})
+            return
+        try:
+            body = radio_audio(name)
+            if name == "live.m3u8":
+                lines = body.decode("utf-8").splitlines()
+                # Relative media URLs do NOT inherit the playlist's query. Sign each segment;
+                # reject any unexpected URI instead of allowing the player to fetch it.
+                if not lines or lines[0] != "#EXTM3U":
+                    raise ValueError("bad playlist")
+                for i, line in enumerate(lines):
+                    if line and not line.startswith("#"):
+                        if not re.fullmatch(r"segment-[0-9]{1,20}\.ts", line):
+                            raise ValueError("bad segment")
+                        lines[i] = line + "?token=" + token
+                    elif line.startswith("#") and "URI=" in line:
+                        raise ValueError("unexpected URI")
+                body = ("\n".join(lines) + "\n").encode()
+        except (OSError, ValueError):
+            self._json(404, {"error": "not found"})
+            return
+        self._send(200, body, "application/vnd.apple.mpegurl" if name == "live.m3u8" else "video/mp2t")
 
     # --- the YouTube staff radio (panel_youtube.py) ----------------------------------------------------------
 
@@ -660,27 +792,27 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
                     self._json(400, {"error": "bad request"})
                     return
                 Y.set_cockpit_prefs(projects=list(dict.fromkeys(keys)))
-            elif action == "arm":
+            elif action in ("arm", "mirror-arm"):
                 # one locked read: the title shown, the channel id and the generation the token is bound to
                 conn, v = Y.snapshot(), Y.view(srv.cfg, True, True)
-                if not v["enabled"] or not conn.get("connected") or not conn.get("channel_id") \
+                if (action == "arm" and not v["enabled"]) or not conn.get("connected") or not conn.get("channel_id") \
                         or conn.get("live_enabled") is False or v["live"] or v["pending"]:
                     self._json(409, {"error": "not ready"})
                     return
                 token = srv.youtube_flow.arm(conn["generation"], conn["channel_id"])
                 self._json(200, {"ok": True, "armed": token, "channel": str(conn.get("channel_title") or "")[:100]})
                 return
-            elif action == "start":
+            elif action in ("start", "mirror-on"):
                 confirmed = srv.youtube_flow.fire(req["armed"])
                 conn = Y.connection()
                 if confirmed is None or confirmed != (conn["generation"], conn.get("channel_id")):
                     self._json(409, {"error": "confirm again"})  # unknown, used, expired, or another channel now
                     return
-                if not Y.settings(srv.cfg)["enabled"]:
+                if action == "start" and not Y.settings(srv.cfg)["enabled"]:
                     self._json(409, {"error": "disabled"})
                     return
                 rid = Y.put_start_request(*confirmed)  # one file per request; the start checks it with Google
-                srv.youtube_spawn("start", rid)
+                srv.youtube_spawn(action, rid)
                 self._json(202, {"ok": True, "pending": True})
                 return
             elif action == "disconnect":
@@ -770,6 +902,24 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         srv.youtube_flow.clear()  # a new connection: earlier sign-ins and Start confirmations are void
         threading.Thread(target=srv.youtube_describe, args=(svc, new_gen), daemon=True).start()
         self._oauth_page(200, True, clear)
+
+    def _hooks_restore(self) -> None:
+        from . import hook_health
+        if self._request() != {}:
+            self._json(400, {"error": "bad request"})
+            return
+        try:
+            self._json(200, hook_health.restore())
+        except (OSError, ValueError):
+            self._json(409, {"error": "restore_failed"})
+
+    def _sessions_reload(self) -> None:
+        from . import session_reload
+        if self._request() != {}:
+            self._json(400, {"error": "bad request"})
+            return
+        session_reload.start(self.server.cfg)
+        self._json(202, {"ok": True})
 
     def _decide(self) -> None:
         """The owner's tap on one decision: {"id", "choice": "yes"|"no", "note"}. Answered once."""
@@ -932,6 +1082,38 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "key": rec["key"],
                          "delivery": self.server.inbox().delivery_state(rec["session"], rec["key"])})
 
+    def _fork(self) -> None:
+        """Both arm and start use the standard fresh owner initData guard in do_POST."""
+        from . import session_fork
+        from .i18n import t
+        req = self._request()
+        action = req.get("action") if req else None
+        keys = {"action", "session"} if action == "arm" else {"action", "session", "armed"}
+        if (not req or set(req) != keys or action not in ("arm", "start")
+                or not isinstance(req["session"], str) or not SHORT_ID.fullmatch(req["session"])
+                or (action == "start" and (not isinstance(req["armed"], str)
+                                          or not re.fullmatch(r"[0-9a-f]{16}", req["armed"])))):
+            self._json(400, {"error": "bad request"})
+            return
+        cfg = self.server.cfg
+        topics = TopicMap(state_dir() / "topics.json", self.server.bot(), home_chat(cfg), cfg=cfg)
+        matches = [sid for sid in topics.all_places() if sid[:8] == req["session"]]
+        if len(matches) != 1:
+            self._json(404, {"error": "not found"})
+            return
+        sid = matches[0]
+        try:
+            if action == "arm":
+                armed = session_fork.arm(cfg, topics, sid, "panel")
+                self._json(200, {"ok": True, "armed": armed})
+            else:
+                session_fork.start(cfg, self.server.bot(), topics, sid, "panel", req["armed"])
+                self._json(202, {"ok": True})
+        except session_fork.ForkError as exc:
+            self._json(409, {"error": exc.key, "message": t(exc.key, lang=cfg.ui_language)})
+        except (OSError, ValueError, KeyError, TypeError):
+            self._json(503, {"error": "unavailable"})
+
     def _screen(self) -> None:
         """What one live session's terminal shows right now: {"session": <first 8 characters>}. The text is
         the bridge's own redacted copy of the screen (the one its cards use); nothing is typed into it."""
@@ -1035,13 +1217,15 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
     def _remind(self) -> None:
         """Clear reminders: {"refs": ["<topic hash>:<item id>", ...]}."""
         req = self._request()
-        refs = req.get("refs") if req is not None and set(req) == {"refs"} else None
+        refs = req.get("refs") if req is not None and set(req) in ({"refs"}, {"refs", "action"}) else None
+        action = req.get("action", "clear") if req is not None else "clear"
         if not isinstance(refs, list) or not refs or len(refs) > MAX_REMINDERS \
+                or action not in ("clear", "restore") \
                 or not all(isinstance(r, str) and REMINDER_REF.fullmatch(r) for r in refs):
             self._json(400, {"error": "bad request"})
             return
         try:
-            out = clear_reminders(self.server.cfg, self.server.bot(), refs)
+            out = clear_reminders(self.server.cfg, self.server.bot(), refs, action=action)
         except Exception:
             self._json(500, {"error": "unavailable"})
             return
@@ -1512,7 +1696,7 @@ def close_left(cfg: Config, bot, shorts: list, now: Optional[float] = None) -> d
     return {"closed": closed, "skipped": skipped}
 
 
-def clear_reminders(cfg: Config, bot, refs: list) -> dict:
+def clear_reminders(cfg: Config, bot, refs: list, action: str = "clear") -> dict:
     """Clear the reminders the page names (each "topic hash:item id"), as a tap on the board's own button does,
     and redraw each board. The sessions are not woken: clearing ten old reminders must not start ten agents."""
     wanted = {m.groups() for m in map(REMINDER_REF.fullmatch, refs) if m}
@@ -1526,13 +1710,16 @@ def clear_reminders(cfg: Config, bot, refs: list) -> dict:
             found = [i for i in topic["items"] if i["i"] == ident and i["k"] == "remind"]
             if not found:
                 raise board.BoardError("stale")
+            if action == "restore":
+                found[0]["r"] = time.time()
+                return found[0]
             return board.finish(topic, found[0], time.time())
         try:
-            board.apply(cfg, bot, chat, thread, change)
+            board.apply(cfg, bot, chat, thread, change, sync=False)
             cleared += 1
         except board.BoardError:
             pass
-    return {"cleared": cleared}
+    return {"restored" if action == "restore" else "cleared": cleared}
 
 
 def _panel_words(item: dict) -> bool:

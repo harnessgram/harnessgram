@@ -388,6 +388,8 @@ class Config:
     # A pinned control-panel button in every session topic (docs/panel.md). It only helps once the panel Mini App
     # is set up, so None (default) = on only when the panel service is installed; true or false forces it.
     panel_button: Optional[bool] = None
+    panel_funnel_port: Optional[int] = None  # opt in to public Funnel repair
+    panel_port: int = 8765  # local Cockpit listener port
     # The bridge names each session topic itself, "project: task" in the target language, and keeps it current
     # (topic_names.py). A name set by hand (in Telegram or with `ctb topic-rename`) always wins.
     auto_topic_names: bool = False
@@ -636,6 +638,9 @@ def from_dict(raw: dict) -> Config:
         elif key == "original":
             if value not in ("edit", "edit-off", "before", "after", "folded-after", "off"):
                 raise ConfigError('original must be "edit", "edit-off", "folded-after", "before", "after" or "off"')
+        elif key in ("panel_funnel_port", "panel_port"):
+            if not (key == "panel_funnel_port" and value is None) and (type(value) is not int or not 1 <= value <= 65535):
+                raise ConfigError(f"{key} must be a port number from 1 to 65535" + (" or null" if key == "panel_funnel_port" else ""))
         elif key == "panel_button":
             if value is not None and not isinstance(value, bool):
                 raise ConfigError("panel_button must be true, false or null")

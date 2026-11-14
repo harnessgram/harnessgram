@@ -456,22 +456,12 @@ def test_the_job_never_streams_without_an_owner_start(monkeypatch):
     assert station._run() == 0 and gave == [False]
 
 
-def test_the_owner_radio_never_reaches_youtube():
-    """The Telegram radio's start path does not know the YouTube module at all: going live there is only the
-    owner's explicit `radio youtube start`."""
-    import ast
-    tree = ast.parse(open(radio.__file__, encoding="utf-8").read())
-    names = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            names |= {node.module or ""} | {a.name for a in node.names}
-        elif isinstance(node, ast.Import):
-            names |= {a.name for a in node.names}
-        elif isinstance(node, ast.Name):
-            names.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            names.add(node.attr)
-    assert not [n for n in names if "youtube" in n.lower()]
+def test_the_owner_radio_never_starts_the_staff_edition(monkeypatch):
+    """Home lifecycle may only reach the explicitly armed mirror; the default staff edition stays separate."""
+    monkeypatch.setattr(Y, "_load_job", lambda s: pytest.fail("home must not start the staff edition"))
+    monkeypatch.setattr(Y, "_stop", lambda *a: pytest.fail("home must not stop the staff edition"))
+    Y.home_changed(cfg(), True)
+    Y.home_changed(cfg(), False)
 
 
 def test_staff_station_draws_only_the_staff_card(monkeypatch):
@@ -714,7 +704,7 @@ def test_an_update_begun_before_a_reconnect_never_draws(monkeypatch):
 def test_only_connect_opens_a_connection():
     import ast
     import inspect
-    tree = ast.parse(inspect.getsource(Y))
+    tree = ast.parse(inspect.getsource(Y.StaffStation))
     callers = set()
     for fn in ast.walk(tree):
         if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):

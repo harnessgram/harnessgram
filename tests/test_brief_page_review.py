@@ -35,6 +35,10 @@ function tune(){return function(){};}
 function haptic(){}
 function muteBtn(){return new Element('button');}
 function syncClose(){}
+function bindBackLayer(key,node,on,apply){return function(v){apply(v);};}
+function adoptBackLayers(){}
+function compactBlock(key,title,figures,body,cls){var b=new Element('div'),inner=new Element('div');b.className='compact'+(cls?' '+cls:'');inner.hidden=true;if(body)inner.appendChild(body);b.appendChild(inner);b.body=inner;return b;}  // collapsed, like the page's default
+function fold(key,title,n,cls){return compactBlock(key,title,n,null,cls);}
 function all(n){return [n].concat(n.children.flatMap(all));}
 function pick(n,cls){return all(n).filter(x=>(x.className||'').split(' ').includes(cls));}
 function visible(n){return n.hidden?[]:[n].concat(n.children.flatMap(visible));}
@@ -49,7 +53,8 @@ def render(script, lang="he"):
             helpers.append(helper)
     program = DOM.replace("STRINGS", json.dumps(panel_page.STRINGS[lang]))
     program += "\nvar target=\"\";\n" + "\n".join(func(name) for name in helpers) + "\n" + script
-    result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=5, check=True)
+    result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=5, check=False)
+    assert result.returncode == 0, result.stderr[-1500:]
     return json.loads(result.stdout)
 
 

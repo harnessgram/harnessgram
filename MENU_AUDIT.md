@@ -2,6 +2,9 @@
 
 Each line denotes a keyboard construction site; empty keyboards that remove buttons are excluded. Cockpit controls are listed separately.
 
+- src/ctb/session_fork.py — button — close; scoped fork confirmation, no launch before confirm
+- src/ctb/panel_page.py — forkRow — inline confirmation with Cancel; no modal or native prompt
+
 - src/ctb/agents_card.py:206 — render — close
 - src/ctb/alerts.py:364 — propose — not-now
 - src/ctb/alerts.py:434 — _button — EXEMPT: channel post link, not a menu.
@@ -11,6 +14,7 @@ Each line denotes a keyboard construction site; empty keyboards that remove butt
 - src/ctb/alerts.py:630 — button — close
 - src/ctb/board.py:325 — _sync — EXEMPT: permanent pinned board; closing would remove its controls.
 - src/ctb/board.py:335 — _sync — EXEMPT: permanent pinned board; closing would remove its controls.
+- src/ctb/board.py — refresh_dirty — EXEMPT: permanent pinned board; closing would remove its controls.
 - src/ctb/dashboard.py:167 — stuck_check — not-now
 - src/ctb/delivery.py:85 — markup — cancel
 - src/ctb/delivery.py:95 — cancel_markup — cancel

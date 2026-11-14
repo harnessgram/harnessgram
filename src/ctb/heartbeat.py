@@ -225,14 +225,57 @@ def escaped_in_claude(cfg: Config, bot, session: str,
         return False
 
 
+_FUNNEL_LAST = None
+_FUNNEL_STATE = None
+
+
+def _check_funnel(cfg, now):
+    global _FUNNEL_LAST, _FUNNEL_STATE
+    port = cfg.panel_funnel_port
+    if port is None:
+        return
+    if _FUNNEL_LAST is not None and now - _FUNNEL_LAST < 300:
+        return
+    _FUNNEL_LAST = now
+    from . import panel_funnel
+    public, reason = panel_funnel.status(port)
+    if reason == "tailscale unavailable":
+        return
+    if public is True:
+        _FUNNEL_STATE = "on"
+        return
+    if public is False:
+        public, reason = panel_funnel.restore(port, cfg.panel_port)
+    state = "restored" if public else "failed"
+    if public or state != _FUNNEL_STATE:
+        from .mirror import log
+        log("cockpit funnel was off; restored" if public else f"cockpit funnel restore failed ({reason})")
+    _FUNNEL_STATE = state
+
+
 def run_once(cfg: Config, bot=None, now: Optional[float] = None,
              find: Callable[[str], Optional[str]] = status.transcript_of) -> int:
     """One round: refresh the placeholder of one busy, recently active session, in turn. Returns 0 or 1."""
     from . import reply_outbox, policy
+    now = time.time() if now is None else now
+    try:
+        _check_funnel(cfg, now)
+    except Exception:
+        pass  # an optional repair never interrupts a heartbeat
     if not cfg.ready or not cfg.mirror or not policy.on():
         return 0
-    now = time.time() if now is None else now
     bot = bot or Bot.from_config(cfg)
+    try:
+        from . import board
+        board.daily_sweep(cfg, bot, now)
+        board.refresh_dirty(cfg, bot)
+    except Exception:
+        pass  # optional housekeeping must never interrupt replies
+    try:
+        from . import hook_health
+        hook_health.check(cfg, bot, now)
+    except Exception:
+        pass  # settings/Telegram failure must never hold up replies or the heartbeat
     try:
         reply_outbox.drain(cfg, bot, now)
     except Exception as exc:  # a damaged outbox never stops the heartbeat

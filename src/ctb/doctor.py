@@ -219,16 +219,50 @@ def wait_listener(timeout: float, check=None, sleep=time.sleep, clock=time.monot
         sleep(0.5)
 
 
+def hook_drift(settings: dict) -> list:
+    """Events whose bridge registrations differ from install, including matcher/options drift.
+
+    Return event names only: settings and hook commands can contain private data.
+    """
+    from .install import desired_hooks, is_ours
+    if settings.get("disableAllHooks") is True:
+        return list(desired_hooks())
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return list(desired_hooks())
+    bad = []
+    for event, wanted in desired_hooks().items():
+        entries = hooks.get(event, [])
+        if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+            bad.append(event)
+            continue
+        try:
+            ours = [e for e in entries if is_ours(e)]
+        except (TypeError, AttributeError):
+            bad.append(event)
+            continue
+        if ours != wanted:
+            bad.append(event)
+    return bad
+
+
 def check_hooks() -> List[Result]:
     path = settings_path()
     try:
-        hooks = json.loads(path.read_text(encoding="utf-8")).get("hooks") or {}
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(settings, dict):
+            raise ValueError("settings object required")
+        hooks = settings.get("hooks") or {}
+        drift = hook_drift(settings)
     except (OSError, ValueError):
         return [("FAIL", f"cannot read {path}; run: harnessgram install")]
 
     def has(event: str, sub: str) -> bool:
-        return any(is_hook_command(h.get("command") or "", sub)
-                   for e in hooks.get(event, []) for h in e.get("hooks", []))
+        try:
+            return any(is_hook_command(h.get("command") or "", sub)
+                       for e in hooks.get(event, []) for h in e.get("hooks", []))
+        except (AttributeError, TypeError):
+            return False
 
     out: List[Result] = []
     for event, sub, level in (("UserPromptSubmit", "hook-prompt", "FAIL"), ("Stop", "hook-stop", "FAIL"),
@@ -238,6 +272,7 @@ def check_hooks() -> List[Result]:
                               ("Notification", "hook-notify", "warn")):
         out.append(("ok", f"{event} -> {sub}") if has(event, sub) else (level, f"{event} -> {sub} is not installed "
                                                                               "(run: harnessgram install)"))
+    out += [("FAIL", f"{event}: bridge hooks missing or changed (run: harnessgram install)") for event in drift]
     present = [svc for svc in SERVICES if service_files(svc) and all(f.exists() for f in service_files(svc))]
     states = service_states(present)  # loaded (launchd) / active (systemd); None where it cannot be told
     word = "loaded" if sys.platform == "darwin" else "active"
@@ -421,6 +456,11 @@ def collect(offline: bool = False, bot=None, listener=None) -> list:
     results += check_tmux() + check_claude()
     results += (check_listener() if listener is None else list(listener)) + check_hooks() + check_running_code()
     if cfg is not None:
+        if cfg.panel_funnel_port is not None:
+            from . import panel_funnel
+            public, reason = panel_funnel.status(cfg.panel_funnel_port)
+            results.append(("ok", "Cockpit Funnel is public") if public else
+                           ("warn", "Cockpit Funnel " + ("is off" if public is False else "status unavailable: " + reason)))
         results += check_local_api(cfg) + check_extras(cfg) + check_service_path(cfg) + check_macos_privacy(cfg)
     return results
 

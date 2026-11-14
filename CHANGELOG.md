@@ -6,6 +6,47 @@ change a setting or a command, and the change is listed here under "Changed" or 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-14
+
+### Added
+
+- Cockpit radio player: a private, audio-only Listen/Pause control on the home tab (native HLS from the radio
+  encoder, short-lived signed links that grant no other Cockpit access). On by default for the home radio
+  (`radio.radio_player`).
+- YouTube mirror edition, off by default: the unlisted YouTube copy can carry the full home radio, but only after
+  an explicit `harnessgram radio youtube mirror on`; `mirror off` revokes it.
+- Fork a session in one tap from the topic (More > Fork session) or its Cockpit card: a new session with the
+  conversation so far, in its own topic, while the original keeps running.
+- Hook health: if a bridge hook disappears from Claude Code's settings, the owner gets one alert with a one-tap
+  Restore (hooks-only merge with a backup).
+- `harnessgram sessions reload [--all | --session ID] [--dry-run]` and a Cockpit action restart idle sessions
+  that still run an older hook snapshot, in their own panes; busy sessions are skipped, never interrupted.
+- Cockpit Requests checklist: a read-only list of items from a configured JSON ledger folder
+  (`brief.ledger_dir`), waiting-on-you first, per project.
+- Progress cards show the session's latest tool activity (tool and file name only; inputs are never stored).
+- Optional Tailscale Funnel repair for the Cockpit (`panel_funnel_port`, default off), reported by `doctor`.
+
+### Changed
+
+- The Cockpit is compact by default: one-line summaries (cost, tokens, cache) that expand on tap, per-model
+  blocks nested, empty rows hidden, and the open state remembered per viewer.
+- One back stack for the Telegram BackButton, the iOS edge swipe and Android back.
+- Reminders always have a clear button; old ones fold into an "Older" group with a one-tap restore, and a
+  conservative daily sweep removes only reminders with one explicit past date.
+
+### Fixed
+
+- Nothing in the Cockpit runs past the screen edge at phone widths (button rows wrap, long values wrap).
+- A refresh requested while the Cockpit is loading is no longer dropped.
+- Cookie headers are redacted wherever channel output is redacted.
+- The radio player's segmenter queue is bounded by bytes, so a short hiccup cannot fill it.
+
+### Known limits
+
+- Radio player and back-gesture behaviour are verified in browsers; actual iPhone and Android Telegram playback
+  and gesture delivery still need checking on a device.
+- The team radio remains macOS only, with Hebrew-only spoken replies.
+
 ## [0.2.0] - 2026-11-12
 
 ### Added

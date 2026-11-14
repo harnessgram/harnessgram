@@ -210,8 +210,8 @@ def test_closed_question_card_blocks_other_answers_until_tapped():
     js = r'''
 const assert = require("assert");
 function node() { return {children:[], appendChild(x){this.children.push(x);}, addEventListener(e,fn){this.tap=fn;}}; }
-const app=node(), tabs=node(), apps=node(), foot=node();
-global.document={activeElement:null,getElementById(id){return {tabs,apps,foot}[id];}};
+const app=node(), tabs=node(), apps=node(), foot=node(), player=node();
+global.document={activeElement:null,getElementById(id){return {tabs,apps,foot,"radio-player":player}[id];}};
 global.window={scrollY:0,scrollTo(){}};
 let targetClosed=true, target="sample", view="me", last=null, stagger=0, targetPending=false;
 const S={questionClosed:"closed",showOpenQuestions:"show"};
@@ -220,8 +220,10 @@ function empty(ic,title){let n=node();n.title=title;return n;}
 function tabsFn(){ app.children.push({answer:true}); }
 const tabsRender=tabsFn;
 ''' + page[start:end].replace('tabs(d);', 'tabsRender(d);') + r'''
+function radioPlayerDraw(){} function hookHealthCard(){}
 function renderAll(){} function renderHere(){} function renderAgents(){} function renderSettings(){}
-function appOf(){return true;} function showApp(){} function applyChrome(){} function syncBack(){} function syncClose(){}
+function appOf(){return true;} function showApp(){} function applyChrome(){} function syncBack(){} function syncClose(){} function adoptBackLayers(){}
+function retireMissingBackLayers(){}
 render({},true);
 assert.equal(app.children.length,1);
 assert.equal(app.children[0].title,"closed");
@@ -348,3 +350,34 @@ def test_stuck_removals_do_not_starve_the_others(monkeypatch, tmp_path, bot):
     for _ in range(40):
         cockpit_notice.sweep(cfg, bot)
     assert len(tried) == 10
+
+
+def test_refresh_requested_during_slow_state_load_is_not_lost():
+    page = panel_page.PAGE
+    start = page.index('function load(){')
+    end = page.index('// --- Telegram look', start)
+    js = r'''
+const assert = require("assert");
+let loading=false, reloadPending=false, targetPending=false, targetClosed=false, priorWaiting=null;
+let last=null, followTimer=null, followups=0, view="me", target="";
+const wa={initData:"test"}, ASKS={}, rf={className:""}, requests=[], rendered=[];
+const document={getElementById(){return rf;}};
+const window={parent:null, postMessage(){}}; window.parent=window;
+function status(){} function makeDigest(){} function radioPlayerRefresh(){}
+function render(d){last=d;rendered.push(d.value);} function waitingCount(){return 0;}
+function fetch(){return new Promise(resolve=>requests.push(resolve));}
+''' + page[start:end] + r'''
+async function tick(){for(let i=0;i<10;i++) await Promise.resolve();}
+(async()=>{
+  load(); load(); load();
+  assert.equal(requests.length,1);
+  requests[0]({ok:true,json:()=>Promise.resolve({value:"old",decisions:[],cards:[]})});
+  await tick();
+  assert.equal(requests.length,2);
+  requests[1]({ok:true,json:()=>Promise.resolve({value:"new",decisions:[],cards:[]})});
+  await tick();
+  assert.deepEqual(rendered,["old","new"]);
+  assert.equal(requests.length,2);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+'''
+    subprocess.run(["node", "-e", js], check=True, capture_output=True, text=True)

@@ -112,17 +112,49 @@ ended, or that the same session asked again later (the same words once ids and n
 cancelled, without telling the session). New decisions carry a "new" badge until "mark all as seen" (kept in the
 page's local storage).
 
-**Older items, one collapsed group.** Everything that has waited for the owner longer than three days (decisions,
-choice and question cards, reminders) moves into one collapsed group titled "Older" (Hebrew "ישנים") with its count,
+**Older items, one collapsed group.** Decisions and choice/question cards older than three days, and reminders
+whose due date passed over three days ago (or undated reminders older than fourteen days), move into one
+collapsed group titled "Older" (Hebrew "ישנים") with its count,
 after the waiting items and before the working sessions. The group is closed until tapped, remembers its state on
 that phone (local storage, a convenience only) and is not drawn when nothing is old. Inside, the items work as
 before: an old decision or card can still be answered, and an old item never carries the "new" badge. The tab
 badge, the summary ring and the "waiting" count include only the fresh items. The server decides what is old, from
-the item's own timestamp and its own clock: `panel_view.OLD_AFTER` (three days) is the one threshold, an item is old
+the item's own timestamp and its own clock: `panel_view.OLD_AFTER` applies to decisions/cards;
+`reminder_lifecycle` applies to reminders. An item is old
 only when it is strictly older than that, and an item without a usable time counts as fresh. `/api/state` marks each
 decision, card and reminder with a boolean `old`. A decision that is only old (its session still alive, not asked
 again) also counts as stale for `/api/dismiss`, so the group offers one two-tap "clear the old ones" button for old
 decisions and old reminders.
+
+Every reminder row, including the topic view and old rows without a due date, has a clear button.
+An old reminder also has a one-tap restore button; restoration keeps the original creation/deadline and
+grants fourteen days in the active list. `POST /api/remind` accepts `{"refs": [...]}` to clear, or
+`{"refs": [...], "action": "restore"}`. Both require the owner's fresh Telegram authentication and
+are restricted to configured owner chats. The local atomic update completes without Telegram calls;
+the heartbeat retries dirty board message edits, without holding the state lock across network I/O.
+This keeps a slow message edit from exceeding the HTTP connection deadline or blocking further clears.
+
+`ctb board sweep` and the heartbeat's daily sweep share conservative deadline rules. Only a single,
+explicit past ISO calendar deadline in the reminder's text (for example `Submit by 2026-11-01`) permits
+automatic removal. Dates alone, relative or ambiguous dates, recurrences, extensions, negations,
+multiple dates, a future/unrecognized explicit due field, and recently restored reminders are preserved.
+Date-only deadlines expire after the entire local day. Logs and command output contain counts only.
+
+**Requests from the owner ledger.** The "For me" view, including Morning Brief mode, reads every
+JSON ledger in the existing `brief.ledger_dir` (or `radio.ledger_dir`) on each normal state poll.
+No source directory means an empty checklist. This is read-only: agents remain the
+owners of ledger writes and completion. Each project lists requests waiting on the owner first (a "You"
+chip), then team requests. Rows show age, a single-line latest note and expandable note steps. Completed
+items remain collapsed under "Done" for seven days. Project buttons filter the list on the phone.
+
+The reader skips malformed files/items and symlinks, bounds each read to 1 MiB (also during file growth),
+and limits each file to 1,000 items, each item to its latest 50 notes, and each text to 1,500 characters.
+It accepts both string notes and `{at, text}` notes. Secrets are filtered before translation and again
+at the response boundary. Hebrew titles use the existing nonblocking reply translation path and its
+privacy settings; a bounded translation cache is keyed by project, item ID and update time. Pending or
+failed translations fall back to the original and are never frozen in the item cache. New source rows
+appear on the next normal poll; the ledger itself is not cached. All data uses the existing owner-only
+`/api/state` authentication boundary.
 
 **The whole team at a glance.** Each session row shows, for a working session, the latest step of its live
 activity card (`progress/<session>.jsonl`) and, for an idle one, the "Summary:" line of its last reply (or its
@@ -137,10 +169,55 @@ reply, a new status card per reply, a notice per background agent, the separate 
 routing General, and the auto-compact limit (one of its fixed steps). **Radio words**: with the radio on, the
 owner can type a line for it to say now (`POST /api/radio-say {"text"}`, `ctb radio say`).
 
-Stopping or restarting a session and starting a compaction are not in the panel: in the bot they run inside
-the listener's button handlers, which drive the session's terminal directly, and there is no queue the panel
-could hand them to without running tmux itself. Only a session's own automatic-compaction threshold can be set
-here.
+The panel offers a guarded **Reload sessions** action for applying changed hook settings, as described below.
+General stop/restart controls remain in the bot. A session's own automatic-compaction threshold can also be set here.
+
+## Hook health and session reload
+
+Every five minutes the heartbeat compares all bridge hook registrations with the installer's desired hooks,
+using the same drift check as `harnessgram doctor`. Missing commands and changed options or matchers show a
+Cockpit health notice and one private owner message with a Cockpit link. The incident fingerprint survives
+heartbeat restarts; the message is not repeated until the state changes. Hook commands and settings values
+are never sent to Telegram or included in panel state.
+
+**Restore** (`/api/hooks-restore`, body `{}`) performs the installer's hooks-only merge and backup. It preserves
+other settings and third-party hooks and does not install services, schedules or a status line. Invalid settings
+or globally disabled hooks require a settings correction; Restore does not overwrite them or enable other preferences.
+The same card then offers **Reload sessions** (`/api/sessions-reload`, body `{}`). Both actions require the
+paired owner's signed Telegram login, fresh within 15 minutes, just like other panel actions.
+
+Claude Code snapshots hooks at process startup. Reload therefore selects only live, topic-mapped bridge
+sessions whose actual process start predates the current settings file's modification time. It handles them
+one at a time, using the existing account-move lock, terminal claim, verified `/exit`, account command with
+`--remote-control --resume <id>`, and folder-trust/resume handling in the same pane. Success requires a new
+process for that same session. Busy turns, dialogs, drafts, background work and uncertain/reused panes are
+skipped without keys or signals; retry after they become idle. There is no deferred restart or force kill.
+The panel starts a background batch and shows the reloaded IDs and skipped IDs with reasons when it finishes.
+
+The local equivalent is `harnessgram sessions reload [--all | --session ID] [--dry-run]` (default: all live
+bridge sessions). `--dry-run` lists the eligible and skipped sessions without typing or restarting anything.
+
+## Fork a session
+
+The owner's topic **More → Fork session** action and the session's Cockpit card both
+show the same confirmation: a new session starts with the conversation so far, while
+the original keeps running. Confirm with one tap; no session IDs or commands are needed.
+Cancel closes the offer without starting anything. These controls are owner-only and
+do not answer any agent question or permission prompt.
+
+The bridge launches Claude Code with `--resume <source> --fork-session`, an explicit
+fresh `--session-id`, and `--remote-control` in a new `tg-<new-id-prefix>` tmux session.
+It uses the source session's working folder, account and existing login-shell,
+folder-trust and resume-dialog handling. It never sends keys to or stops the original
+pane. The fork gets its own topic in the same group, named `<original name> · fork`
+(localized in Hebrew); the original topic receives a short link after startup succeeds.
+The name suffix is preserved even when a long title must be shortened.
+
+Confirmation is single-use, expires after two minutes, and is bound to the session
+and originating surface (including the exact Telegram confirmation message). Both
+surfaces share a cross-process 30-second limit per source session. Unknown working
+folders, missing tmux or Claude Code, and startup failures produce a brief explanation.
+No permission mode, authentication rule or tap-to-answer rule is changed.
 
 ## Routes
 
@@ -162,11 +239,15 @@ the body limit is in bytes. The list is the route table in `panel.py`, and
 | `/api/close` | 1280 | Closes the Telegram topics (up to 20) of sessions the server counts as left behind (open, untouched for a day). The terminal is not touched; writing in the topic reopens it. |
 | `/api/screen` | 64 | Returns the bridge's own redacted copy of one live session's terminal screen; nothing is typed into it. |
 | `/api/compact` | 64 | Sets one session's automatic-compaction threshold (the global one, never, or a fixed step). |
+| `/api/fork` | 256 | Owner-only, fresh authenticated actions: `arm` {`session`} returns a scoped confirmation; `start` {`session`, `armed`} consumes it and schedules a separate Claude fork. Ambiguous session prefixes are refused. |
 | `/api/brief-seen` | 64 | Moves the owner's "since you last looked" marker of the Morning Brief forward (never back, never into the future). |
 | `/api/block-mute` | 64 | Mutes or unmutes one session's agent blocks in the Morning Brief. |
 | `/api/model` | 64 | Sets the model new sessions start with. |
 | `/api/setting` | 64 | Changes one bridge setting. |
+| `/api/hooks-restore` | 64 | Owner-only hooks merge/backup; empty object; offers session reload after success. |
+| `/api/sessions-reload` | 64 | Owner-only background reload of stale idle sessions; empty object; results in state. |
 | `/api/radio` | 64 | Turns the team radio on or off. |
+| `/api/radio-player` | 64 | Read-only owner availability and ten-minute signed capability for the private radio player (1-hour Telegram login). |
 | `/api/radio-say` | 2600 | Gives the radio a line to say now. |
 | `/api/room` | 2600 | The radio's brainstorming room (off by default; see docs/radio.md): `start` {`topic`, `minutes`, `project`?}, `pause`, `resume` {`text`?}, `summarize`, `end`, `close`, and `send` {`room`, `task`, `session`}, which claims one task of that room once (a second tap, a stale page or a retry queues nothing) and queues it to one live session as a held proposal that approves nothing. |
 | `/api/bank` | 64 | Sets the saved-reset count of a provider. |
@@ -360,6 +441,19 @@ Long jobs are the app's own business: its command starts them detached and answe
 
 A complete example that ships with the repository is the Studio (`docs/studio.md`).
 
+**Back navigation.** The Telegram BackButton and browser `popstate` (including device back gestures
+when forwarded by the client) unwind the same History API stack: close the current sheet, disclosure,
+or sub-view, then return to the home tab. Tab navigation has one history step: switching between
+other tabs updates its destination, and tapping home removes it while preserving home's open
+layers. Other tabs retain their open state and re-adopt visible layers when revisited. Polling
+redraws rebind the current controls; layers removed by a refresh of their own view and manually
+dismissed layers are skipped. The BackButton is visible only with an internal
+back step. The launch entry is replaced, never duplicated as an exit sentinel: back at root can
+leave the document. Unsaved text keeps Telegram's existing closing confirmation enabled, and the
+vertical-swipe lock is unchanged. Browser tests cover history and BackButton equivalence; actual
+iOS/Android Telegram gesture delivery still needs device verification.
+See Telegram's Mini App reference (BackButton).
+
 **Page chrome and phone layout.** An app can also ask the page around it for a few things, with `postMessage`
 messages of a fixed shape: exactly its fields (a message with any other field, or of an unknown kind, is rejected
 whole), from one of the app's own frames. Nothing an app sends is ever drawn as markup, opened as a URL or used as
@@ -369,13 +463,13 @@ showing, its frame kept alive) cannot change the page around it.
 | Message from the app | Effect |
 |---|---|
 | `{"cockpit": "focus", "on": true}` | Folds the page's header, tabs and refresh strip so the frame fills the screen edge to edge (the top safe-area inset stays); `on: false` brings them back. |
-| `{"cockpit": "back", "on": true}` | The native Telegram back button then sends `{"cockpit": "back"}` to the app instead of leaving it (`on: false`, the default: back goes to the home tab). The app must answer each forwarded back with `{"cockpit": "back_done"}` within about a second. |
+| `{"cockpit": "back", "on": true}` | Back then sends `{"cockpit": "back"}` to the app before leaving it (`on: false`, the default: back returns to the home tab after closing the current layers). The app must answer each forwarded back with `{"cockpit": "back_done"}` within about a second. |
 | `{"cockpit": "back_done"}` | Confirms a forwarded back (the app handled it, for example by going one screen back). |
 | `{"cockpit": "badge", "n": 0..999}` | Shows a count on the app's tab (0 hides it). This is the one message taken from a hidden app too: a count on its tab while you are elsewhere is its purpose. |
 | `{"cockpit": "open_chat"}` | Opens this topic's chat in Telegram, when the panel was opened from a topic (nothing otherwise). |
 
 **The page always keeps an exit.** If the app does not confirm a forwarded back in time, or on a second back press
-before it did, the page leaves the app itself (to the home tab) and drops the app's folding and back takeover. A
+before it did, the page leaves the app itself for the home tab and drops the app's folding and back takeover. A
 page that is loaded or reloaded (it sends `hello`, or the frame's load event fires) starts unfolded: no focus, no
 back takeover, no count; an app sends `hello` first and its other messages after the answer. An expired login
 (`403` from the state or from an app's API call) leaves the app, hides its frame and unfolds the page before the
@@ -399,6 +493,12 @@ running (a stopped or absent job is never started). On any platform the panel re
 Who can reach it is the choice you made under "Exposure options"; the repository sets up neither a private network
 nor a public route. The button the bridge pins in each topic is a link to the bot's Main App
 (`https://t.me/<bot>?startapp=...`), which you configure in BotFather.
+
+The home tab's compact radio control uses native HLS audio. `GET /radio/live.m3u8` and
+`GET /radio/segment-<digits>.ts` accept only the short-lived `?token=` issued by `/api/radio-player`;
+this token grants no other Cockpit access. Both responses are no-store. Strip the `token` query parameter
+from proxy access logs as well as `auth`. See [Private Cockpit player](radio.md#private-cockpit-player) for
+configuration, renewal, output isolation and stop/cleanup behavior.
 
 ## Security model
 
@@ -440,6 +540,15 @@ nor a public route. The button the bridge pins in each topic is a link to the bo
   the login in it until it expires: one hour after Telegram signed it (`MAX_AGE` in `panel.py`; the 15-minute
   window applies only to header-borne actions). Drop or strip the `auth` query parameter from the access logs of
   any proxy or tunnel in front of the panel, and keep the URLs out of logs you share.
+
+### Optional Tailscale Funnel repair
+
+Set `"panel_funnel_port": 10000` in `config.json` only if you intend the Cockpit to be publicly reachable.
+The heartbeat checks this port at most every five minutes and restores its Funnel if it is off; `harnessgram doctor`
+reports its state. It never resets Tailscale or changes other ports. The default `null` does nothing. Set
+`"panel_port"` to the Cockpit's local port if it is not 8765, and use the same port for `panel serve` (a
+`--port` override must match this setting). This feature does not check whether the Cockpit itself is reachable.
+Public exposure and the security considerations above still apply.
 
 ## YouTube staff radio (panel_youtube.py)
 

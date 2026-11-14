@@ -69,7 +69,7 @@ def test_the_state_marks_decisions_reminders_and_cards_old_from_the_servers_cloc
     old = decisions.create("s1-session", CHAT, 10, "Another old question?", now=now - 3 * DAY - 60)
     from ctb import board
     write_private(state_dir() / board.STATE_FILE, json.dumps({f"{CHAT}:10": {"id": 0, "items": [
-        {"k": "remind", "i": 1, "s": "Old reminder", "at": now - 4 * DAY},
+        {"k": "remind", "i": 1, "s": "Old reminder", "at": now - 15 * DAY},
         {"k": "remind", "i": 2, "s": "New reminder", "at": now - 60}]}}))
     cards.publish("s1-session", CHAT, 10, "choice", "Which one?", "", options=["a", "b"])
     body = json.loads(call(server, init=signed())[2])
@@ -98,15 +98,17 @@ def test_both_languages_have_the_group_strings():
     assert not re.search(r"[A-Za-z]", he["oldList"] + he["oldHint"])  # English and Hebrew never share a line
 
 
-def test_the_group_is_one_collapsed_details_whose_state_is_a_try_catch_convenience():
-    code, group = js(), func("oldGroup")
-    assert 'OLDKEY="ctb-panel-old-open"' in code
-    assert 'try{opened.old=localStorage.getItem(OLDKEY)==="1";}catch(e){}' in code  # closed unless this viewer opened it
-    assert 'el("details","fold oldg")' in group and "det.open=!!opened.old" in group
-    assert 'try{localStorage.setItem(OLDKEY,det.open?"1":"0");}catch(e){}' in group
-    assert "if(!n)return 0" in group  # nothing old: nothing rendered
-    assert 'el("span","n",nf.format(n))' in group  # the count sits on the group
-    assert "S.oldList" in group and "S.oldHint" in group
+def test_the_group_uses_the_shared_remembered_disclosure_and_keeps_targeted_questions_open():
+    group = func("oldGroup")
+    assert 'compactBlock("old",S.oldList,nf.format(n)' in group
+    assert 'decs.concat(cards).some(function(x){return x.id===target;})' in group
+    assert "if(!n)return 0" in group
+    assert "S.oldHint" in group and "det.body.appendChild(body)" in group
+    # The shared helper supplies collapsed defaults and per-viewer storage.
+    assert 'open=false' in func("compactBlock")
+    assert 'localStorage.getItem(storageKey)' in func("compactBlock")
+    assert 'localStorage.setItem(storageKey' in func("compactBlock")
+    assert 'user.id' in func("compactStorageKey")
 
 
 def test_the_page_trusts_the_servers_flag_not_the_phones_clock():

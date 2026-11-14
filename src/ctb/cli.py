@@ -22,6 +22,13 @@ def _parser() -> argparse.ArgumentParser:
                                 epilog="First run: harnessgram setup   (then: harnessgram doctor)")
     p.add_argument("--version", action="version", version=f"Harnessgram {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
+    sessions = sub.add_parser("sessions", help="manage live bridge sessions")
+    session_sub = sessions.add_subparsers(dest="sessions_cmd", required=True)
+    reload = session_sub.add_parser("reload", help="reload hooks in stale, idle sessions; busy sessions are skipped")
+    selection = reload.add_mutually_exclusive_group()
+    selection.add_argument("--all", action="store_true", help="all live bridge sessions (default)")
+    selection.add_argument("--session", help="one full session ID")
+    reload.add_argument("--dry-run", action="store_true", help="list eligible sessions without typing or restarting")
     widget = sub.add_parser("widget", help="private chat widget spike")
     widget_sub = widget.add_subparsers(dest="widget_cmd", required=True)
     widget_test = widget_sub.add_parser("test", help="send a private sample widget")
@@ -63,7 +70,7 @@ def _parser() -> argparse.ArgumentParser:
     panel = sub.add_parser("panel", help="the control panel (Telegram Mini App)")
     panel_sub = panel.add_subparsers(dest="panel_cmd", required=True, metavar="action")
     ps = panel_sub.add_parser("serve", help="serve the panel on 127.0.0.1")
-    ps.add_argument("--port", type=int, default=8765)
+    ps.add_argument("--port", type=int, default=None)
     st = sub.add_parser("studio", help="the Studio: a Cockpit app for directing videos from the phone")
     st_sub = st.add_subparsers(dest="studio_cmd", required=True, metavar="action")
     st_sub.add_parser("install", help="register the Studio as a Cockpit app (writes its folder; run again after an update)")
@@ -90,7 +97,11 @@ def _parser() -> argparse.ArgumentParser:
     yss.add_argument("--request", help=argparse.SUPPRESS)  # the Cockpit's confirmed start request id
     ryts.add_parser("stop", help="stop the staff radio and end its broadcast")
     ryts.add_parser("disconnect", help="forget the channel and remove the stored keys")
+    ym = ryts.add_parser("mirror", help="follow the home radio with its audio and moving board (standing owner start)")
+    ym.add_argument("mirror", choices=("on", "off"))
+    ym.add_argument("--request", help=argparse.SUPPRESS)
     ryts.add_parser("run", help=argparse.SUPPRESS)  # the launchd job
+    ryts.add_parser("home-sync", help=argparse.SUPPRESS)  # detached home-intent observer
     dashboard = sub.add_parser("dashboard", help="update the session dashboard")
     dashboard.add_argument("--daily", action="store_true", help="send the morning summary")
     dashboard.add_argument("--print", dest="print_only", action="store_true", help="print without sending")
@@ -295,6 +306,7 @@ def _parser() -> argparse.ArgumentParser:
     for name, text in (("done", "tick a check item or clear a reminder"), ("remove", "take an item off the board")):
         bds.add_parser(name, parents=[where], help=text).add_argument("n", type=int, help="the item number")
     bds.add_parser("list", parents=[where], help="print the board's items with their numbers")
+    bds.add_parser("sweep", parents=[where], help="clear only explicit expired reminder deadlines across owner topics")
     dc = sub.add_parser("decide", help="leave a yes/no decision for the owner in the control panel "
                                        "(run by the agent inside its session)")
     dcs = dc.add_subparsers(dest="decide_cmd", required=True, metavar="action")
@@ -676,7 +688,7 @@ GUARDED = {"account", "auto-compact", "autopilot", "block", "board", "bot-api", 
            "direct-note", "finish-stop", "hook-ask", "hook-lifecycle", "hook-notify", "hook-post", "hook-prompt",
            "hook-start", "hook-stop", "hook-stop-failure", "hook-wake", "lifecycle", "mirror", "notify",
            "progress", "prompt-mirror", "refresh-status", "session-log", "session-state", "take", "topic-icons",
-           "topic-names", "topic-rename", "translate-warm", "typing", "widget"}
+           "topic-names", "topic-rename", "translate-warm", "typing", "widget", "sessions"}
 
 
 def _off(args) -> Optional[int]:
@@ -706,6 +718,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if off is not None:
         return off
     cmd = args.cmd
+    if cmd == "sessions":
+        from .session_reload import reload_sessions
+        try:
+            result = reload_sessions(C.load(), session=args.session, dry_run=args.dry_run)
+        except (C.ConfigError, ValueError, OSError):
+            print("Session reload unavailable; check settings and live session state.", file=sys.stderr)
+            return 1
+        print(json.dumps(result))
+        return 1 if any(s["reason"] in ("failed", "dialog", "unknown") for s in result["skipped"]) else 0
     if cmd == "outbox":
         from .reply_outbox import retry_failed
         count = retry_failed()
@@ -859,7 +880,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not cfg.ready:
             print("Harnessgram: bot_token / owner_chat_id missing in the config (run `harnessgram pair`)", file=sys.stderr)
             return 1
-        return panel_serve(cfg, args.port)
+        return panel_serve(cfg, args.port if args.port is not None else cfg.panel_port)
     if cmd == "radio":
         if args.radio_cmd == "diag-report":
             from .radio_diag import report
@@ -881,7 +902,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.radio_cmd == "youtube":
             from .radio_youtube import cli as youtube_cli
             return youtube_cli(cfg, args.youtube_cmd, live=getattr(args, "live", False),
-                               request=getattr(args, "request", None))
+                               request=getattr(args, "request", None), mirror=getattr(args, "mirror", None))
         return radio_cli(cfg, args.radio_cmd, text=getattr(args, "text", ""), live=getattr(args, "live", False))
     if cmd == "share-serve":
         from .share import serve
@@ -922,12 +943,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         import threading
         import time as _time
         from .inbox import auto_compact
+        before = set(threading.enumerate())  # only threads this command starts are waited for
+
         def settle():
             # The /compact keys and the progress message run in daemon threads: this process exists only
             # for them, so it stays until they finish (at most 20 minutes) (review of 42ff513).
             deadline = _time.time() + 1200
             while _time.time() < deadline:
-                rest = [t for t in threading.enumerate() if t is not threading.current_thread() and t.is_alive()]
+                rest = [t for t in threading.enumerate()
+                        if t not in before and t is not threading.current_thread() and t.is_alive()]
                 if not rest:
                     break
                 rest[0].join(timeout=max(0.1, min(5.0, deadline - _time.time())))

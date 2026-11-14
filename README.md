@@ -318,6 +318,8 @@ Or write `~/.config/claude-telegram-bridge/config.json` yourself and `chmod 600`
 | `topic_names_daily_calls` | `150` | hard daily cap on Gemini requests for topic names; `0` = never ask Gemini |
 | `topic_project_names` | `{}` | folder or repository name prefix -> project label, e.g. `{"my-app": "Shop"}` |
 | `topic_project_about` | `{}` | project label -> one line on what it is, so a session started in the projects root is placed well |
+| `panel_funnel_port` | `null` | opt in to restoring public Tailscale Funnel on this HTTPS port (see [security and setup](docs/panel.md)) |
+| `panel_port` | `8765` | local Cockpit listener port used by the panel and Funnel repair |
 | `panel_button` | `null` (auto) | a pinned control-panel button in every session topic; `null` = only when the panel service is installed |
 | `radio` | `{}` (off) | team radio settings, see [docs/radio.md](docs/radio.md) |
 | `share_base_url` | `""` (off) | HTTPS base URL for sharing files over the upload limit as a link |
@@ -889,7 +891,7 @@ Use a tagged release rather than the moving `main` branch, and keep the version 
 harnessgram --version                       # note the version you have now
 harnessgram wait-idle                       # waits up to 30 s until no session is mid-reply
 uv tool upgrade harnessgram                 # or: pipx upgrade harnessgram
-                                            # from the repository, pin a tag: uv tool install --force git+https://github.com/harnessgram/harnessgram@v0.2.0
+                                            # from the repository, pin a tag: uv tool install --force git+https://github.com/harnessgram/harnessgram@v0.3.0
 harnessgram install                         # re-applies the hooks and restarts the services it owns
 harnessgram doctor                          # one line per check; it names any service still running old code
 ```

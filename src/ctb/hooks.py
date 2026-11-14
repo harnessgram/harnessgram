@@ -1391,6 +1391,11 @@ def hook_post(stdin_text: str) -> int:
         session = data.get("session_id") or ""
         if not session:
             return 0
+        try:
+            from . import live_activity
+            live_activity.record(session, data)
+        except Exception:
+            pass  # activity must never delay or break the hook
         _clear_ask(session)  # any finished tool call, AskUserQuestion included, ends the pending question
         _direct(data)
         if not data.get("agent_id"):

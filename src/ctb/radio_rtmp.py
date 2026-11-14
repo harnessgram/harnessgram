@@ -14,8 +14,10 @@ import queue
 import socket
 import ssl
 import struct
+import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import BinaryIO, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -24,6 +26,107 @@ HANDSHAKE = 1536
 TIMEOUT = 15
 LEAD_SECONDS = 1.5      # media held ahead of the ingest, so an encoder stall never reaches Telegram as a burst
 MAX_QUEUED_TAGS = 4000  # about 30 s of radio media; the reader blocks (ffmpeg's pipe fills) beyond it
+PLAYER_QUEUE = 20000  # FLV is read tag by tag (~180 small reads/s): items, not seconds
+PLAYER_BYTES = 8 << 20  # the real bound: ~3 minutes of radio waiting for a stuck segmenter
+PLAYER_RESTART_SECONDS = 60
+
+
+class PlayerSegmenter:
+    """Lossy, process-isolated encoder-output copy for the optional web player."""
+
+    def __init__(self, path: Path, report=None, queue_size: int = PLAYER_QUEUE):
+        self.path, self.report = Path(path), report or (lambda _line: None)
+        self.queue: "queue.Queue[bytes]" = queue.Queue(maxsize=queue_size)
+        self.process = None
+        self.dropped = 0
+        self.queued = 0  # bytes waiting for the writer (approximate across threads; only a bound)
+        self._last_start = float("-inf")
+        self._lock = threading.Lock()
+        self._warned = False
+
+    @staticmethod
+    def args() -> List[str]:
+        return ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-f", "flv", "-i", "pipe:0",
+                "-map", "0:a", "-c:a", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "6",
+                "-hls_delete_threshold", "1", "-hls_start_number_source", "epoch_us", "-hls_flags",
+                "delete_segments+temp_file+discont_start", "-hls_segment_filename", "segment-%d.ts",
+                "live.m3u8"]
+
+    def _start(self) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if self.process is not None and self.process.poll() is None:
+                return True
+            if now - self._last_start < PLAYER_RESTART_SECONDS:
+                return False
+            self._last_start = now
+            try:
+                self.path.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if self.path.is_symlink():
+                    raise OSError("linked HLS directory")
+                self.process = subprocess.Popen(self.args(), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL, cwd=self.path)
+            except OSError:
+                self.process = None
+                self._warn()
+                return False
+            self._warned = False
+            threading.Thread(target=self._write, daemon=True, name="radio-player-writer").start()
+            return True
+
+    def _warn(self) -> None:
+        if not self._warned:
+            self._warned = True
+            self.report("radio player: output stalled or failed; continuing the broadcast")
+
+    def offer(self, data: bytes) -> None:
+        if not data or not self._start():
+            return
+        try:
+            if self.queued + len(data) > PLAYER_BYTES:
+                raise queue.Full
+            self.queue.put_nowait(data)
+            self.queued += len(data)
+        except queue.Full:
+            self.dropped += 1
+            self._disable()  # kill is non-blocking; the Telegram reader proceeds immediately
+
+    def _disable(self, warn: bool = True) -> None:
+        with self._lock:
+            process, self.process = self.process, None
+        if warn:
+            self._warn()
+        if process is not None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        while True:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                break
+        self.queued = 0
+
+    def _write(self) -> None:
+        process = self.process
+        try:
+            while process is self.process and process.poll() is None:
+                try:
+                    data = self.queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                self.queued -= len(data)
+                process.stdin.write(data)
+                process.stdin.flush()
+        except (OSError, ValueError):
+            if process is self.process:
+                self._disable()
+        if process is self.process:
+            self._disable()
+
+    def close(self) -> None:
+        self._disable(warn=False)
 
 
 def lead_seconds() -> float:
@@ -152,6 +255,10 @@ class Publisher:
         self.lead = 0.0          # seconds of jitter buffer; the radio sets lead_seconds()
         self.clock = time.monotonic
         self.late_resyncs = 0    # times the encoder fell further behind than the lead
+        self.player: Optional[PlayerSegmenter] = None
+
+    def player_output(self, path: Path, report=None) -> None:
+        self.player = PlayerSegmenter(path, report)
 
     # --- low level
     def _open(self) -> None:
@@ -333,6 +440,14 @@ class Publisher:
 
     def send_flv(self, stream: BinaryIO, stop: Optional[threading.Event] = None) -> None:
         """Forward FLV tags from `stream` until it ends, the server goes away, or `stop` is set."""
+        if self.player is not None:
+            stream_read = stream.read
+
+            def copied_read(n):
+                data = stream_read(n)
+                self.player.offer(data)
+                return data
+            stream.read = copied_read
         header = _read_exact(stream, 9)
         if header[:3] != b"FLV":
             raise RtmpError("the encoder did not produce FLV")
@@ -489,6 +604,8 @@ class Publisher:
             done.set()
 
     def close(self) -> None:
+        if self.player is not None:
+            self.player.close()
         with self._cv:
             was = self._closed
             self._closed = True

@@ -22,11 +22,14 @@ DOC = (Path(__file__).resolve().parent.parent / "docs" / "panel.md").read_text(e
 needs_node = pytest.mark.skipif(not NODE, reason="node is not installed")
 
 FUNCS = ("appOf", "activeApp", "uiOf", "frameName", "appCmd", "resetApp", "leaveApp", "freshFrame", "frameLoaded",
-         "authFailed", "onAppMessage", "backTap")
+         "authFailed", "onAppMessage", "backTap", "appBackLayer", "pushBack", "backDepth", "retireBack",
+         "bindBackLayer", "travelBack", "restoreBack", "trimBack", "currentBackLayer")
 
 PRELUDE = r"""
 var out = [], timers = [], clock = 100000, view = "app:sample", last = {sessions: []}, wa = {initData: "INIT"}, LANG = "he", RTL = true;
 var appFrames = {}, appUi = {}, backWait = {}, helloAt = {}, layoutSent = {};
+var backEntries = [{active:true,undo:function(){switchTo(home());},redo:function(){switchTo("app:sample");}}];
+var backIndex=1,backPending=false,backReplay=false,backHistory=false,backLayers={},backTrim=null,backSwitch=null;
 var APP_BODY = 16384, APP_BADGE_MAX = 999, BACK_WAIT = 1200, HELLO_SAME_PAGE = 2000;
 function mkWin(name) { return {postMessage: function (m) { out.push(["post", name, m.cockpit, m.focus]); }}; }
 var winSample = mkWin("sample"), winOther = mkWin("other"), winForeign = mkWin("foreign");
@@ -41,6 +44,9 @@ function clearTimeout(id) { if (id && timers[id - 1]) timers[id - 1].on = false;
 function tick(ms) { clock += ms; timers.forEach(function (t) { if (t.on && t.at <= clock) { t.on = false; t.f(); } }); }
 function applyChrome() { var n = activeApp(); out.push(["chrome", n && uiOf(n).focus]); }
 function syncBack() {}
+function adoptBackLayers() {}
+function syncClose() {}
+function radioPlayerStop() { out.push(["player-stop"]); }
 function tabs() { out.push(["tabs"]); }
 function openChat() { out.push(["chat"]); }
 function appLayout(n) { return {focus: !!uiOf(n).focus, inset: {bottom: 0}}; }

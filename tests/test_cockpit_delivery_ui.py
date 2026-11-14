@@ -29,7 +29,7 @@ function el(t,c,s){return new Element(t,c,s);}
 function icon(){return el("i");}
 function shown(o,k){return o[k]||"";}
 function enter(c){return c;}
-function fold(){return el("details");}
+function fold(){var block=el("div");block.body=el("div");block.appendChild(block.body);return block;}
 function sidTag(s){return el("span",null,s);}
 function haptic(){}
 function later(){}

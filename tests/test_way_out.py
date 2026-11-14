@@ -20,6 +20,7 @@ EXEMPT = {
     ("alerts.py", "_button", 2): "channel post link, not a menu.",
     ("board.py", "_sync", 0): "permanent pinned board; closing would remove its controls.",
     ("board.py", "_sync", 1): "permanent pinned board; closing would remove its controls.",
+    ("board.py", "refresh_dirty", 0): "permanent pinned board; closing would remove its controls.",
     ("panel_pin.py", "_markup", 0): "permanent pinned topic link, not a menu.",
     ("cockpit_notice.py", "update", 0): "one link to the open Cockpit question; the notice closes itself once answered.",
     ("dialogs.py", "_background_card", 0): "one Move to background button; the card clears itself when the command ends or after the tap.",
@@ -373,17 +374,22 @@ def test_cockpit_dialogs_sheets_and_pickers_have_a_way_out():
     from test_panel_page import func, js
 
     code = js()
-    # All native expandable sections are closed by their own summary control.
+    # Native session rows retain their summary; all other expandable sections use
+    # the shared button, which always offers the reverse (collapse) action.
     details = re.findall(r'el\("details"', code)
-    assert len(details) == 3
-    for name, summary in (("fold", 'el("summary"'), ("sessionRow", 'el("summary"'),
-                          ("oldGroup", 'el("summary"')):
-        body = func(name)
-        assert 'el("details"' in body and summary in body and 'det.appendChild(' in body
+    assert len(details) == 1
+    row = func("sessionRow")
+    assert 'el("details"' in row and 'el("summary"' in row and 'det.appendChild(' in row
+    block = func("compactBlock")
+    assert 'el("button","compact-toggle")' in block
+    assert 'setOpen(!open)' in block and 'open=on;draw()' in block and '"aria-expanded",String(open)' in block
+    assert 'S.compactCollapse:S.compactExpand' in block
+    assert 'compactBlock(key,title' in func("fold")
+    assert 'compactBlock("old",S.oldList' in func("oldGroup")
     # The bottom bar's More sheet: its own button toggles it, any outside tap closes it, and choosing a tab closes it.
     tabs = func("tabs")
-    assert 'el("div","more-sheet")' in tabs and "sheet.hidden=!sheet.hidden" in tabs and "sheet.hidden=true" in tabs
-    assert '!sh.contains(e.target)' in code and 'sh.hidden=true' in code
+    assert 'el("div","more-sheet")' in tabs and "setMore(sheet.hidden)" in tabs and "setMore(false)" in tabs
+    assert '!sh.contains(e.target)' in code and 'setMore(false)' in code and 'sheet.hidden=!value' in func("setMore")
     code = code.replace('el("div","more-sheet")', "")
     # Refuse newly introduced dialog/sheet/popover APIs until this inventory is extended.
     assert not re.search(r'<dialog\b|el\(["\']dialog["\']|createElement\(["\']dialog["\']|\.showModal\s*\(|\.showPopover\s*\(|role["\']?\s*,\s*["\']dialog|el\(["\'][^"\']+["\']\s*,\s*["\'][^"\']*(?:modal|sheet|popover)', code, re.I)
@@ -392,6 +398,7 @@ def test_cockpit_dialogs_sheets_and_pickers_have_a_way_out():
     assert 'd.type="date"' in func("bankCard")
     assert 'S.ytCancel' in func("ytConfirm")
     assert 'ytArmed=null;load()' in func("ytConfirm")
+    assert 'S.cancelIt' in func("forkRow") and 'delete forkArmed[s.id];draw()' in func("forkRow")
     assert 'el("div","ytp")' in func("ytProjects")
     assert 'el("div","seg")' in func("modelCard")
     assert not re.search(r'\b(?:prompt|confirm)\s*\(', code)

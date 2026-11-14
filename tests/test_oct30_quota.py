@@ -342,3 +342,20 @@ def test_auto_compact_command_waits_for_its_threads(monkeypatch):
     monkeypatch.setattr(inbox, "auto_compact", fake)
     assert cli.main(["auto-compact", "sess-1", "260000", "cold"]) == 0
     assert done == ["sess-1"]
+
+
+def test_auto_compact_ignores_threads_it_did_not_start(monkeypatch):
+    """A long-lived thread that existed before the command (another component) never holds it open."""
+    import threading
+    import time
+    from ctb import cli, inbox
+    stop = threading.Event()
+    other = threading.Thread(target=stop.wait, daemon=True)
+    other.start()
+    try:
+        monkeypatch.setattr(inbox, "auto_compact", lambda session, ctx, cold=False: True)
+        began = time.time()
+        assert cli.main(["auto-compact", "sess-1", "260000", "cold"]) == 0
+        assert time.time() - began < 5
+    finally:
+        stop.set()

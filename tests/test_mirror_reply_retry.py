@@ -13,6 +13,7 @@ from ctb.telegram import TelegramError
 from test_hooks import ev, stop_data
 
 
+
 class FlakyBot(FakeBot):
     def __init__(self, errors=()):
         super().__init__()

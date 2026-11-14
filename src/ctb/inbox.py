@@ -1452,13 +1452,8 @@ def claude_pids(session: str) -> List[int]:
 
 
 def session_pid(session: str) -> Optional[int]:
-    """The live Claude Code process running this session, from ~/.claude/sessions/<pid>.json."""
-    sessions = status.projects_dir().parent / "sessions"
-    try:
-        paths = list(sessions.glob("*.json"))
-    except OSError:
-        return None
-    for path in paths:
+    """The live Claude process for this session, including managed account profiles."""
+    for path in accounts._session_record_files():
         try:
             info = json.loads(path.read_text(encoding="utf-8"))
             if info.get("sessionId") == session and info.get("pid"):
@@ -1480,12 +1475,7 @@ def _pane_from_process(session: str) -> Optional[str]:
     pid = session_pid(session)
     if not pid:
         return None
-    sessions_dir = status.projects_dir().parent / "sessions"
-    try:
-        paths = list(sessions_dir.glob("*.json"))
-    except OSError:
-        paths = []
-    for path in paths:
+    for path in accounts._session_record_files():
         try:
             info = json.loads(path.read_text(encoding="utf-8"))
             if info.get("sessionId") != session or int(info.get("pid") or 0) != pid:
@@ -2767,6 +2757,13 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         _answer_button(bot, q, t("toast_opening", lang=ui_lang))
         idx_arg = "new" if match.group(2) == "new" else int(match.group(2))
         return project_chosen(cfg, bot, m, topics, match.group(1), idx_arg)
+
+    if data.startswith("fork:"):
+        if not mine or not session:
+            _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
+            return "ignored"
+        from . import session_fork
+        return session_fork.button(q, cfg, bot, topics, session)
 
     if data.startswith("mv:"):  # move this session to another group: the owner, in the session's own topic
         if not mine or not session:
@@ -5841,6 +5838,7 @@ def more_markup(lang: Optional[str] = None, move: bool = False, session: Optiona
         [{"text": t("more_btn_global", lang=lang), "callback_data": "more:global"},
          sessions_menu.manage_button(lang)],
         *([[{"text": t("more_btn_move", lang=lang), "callback_data": "more:move"}]] if move else []),
+        *([[{"text": t("fork_action", lang=lang), "callback_data": "fork:ask"}]] if session else []),
         *scheduled.menu_rows(session, lang),
         [{"text": t("more_btn_restart", lang=lang), "callback_data": "close:restart"},
          {"text": t("more_btn_close", lang=lang), "callback_data": "close:ask"}],

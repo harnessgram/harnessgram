@@ -132,6 +132,8 @@ def _item(raw) -> Optional[dict]:
         item["u"] = raw["u"]
     if kind == "remind" and isinstance(raw.get("d"), str) and raw["d"]:
         item["d"] = raw["d"]
+    if kind == "remind" and _num(raw.get("r")) and raw["r"] > 0:
+        item["r"] = float(raw["r"])
     return item
 
 
@@ -154,6 +156,8 @@ def _load(path) -> Dict[str, dict]:
         out[str(key)] = dict(_blank(), id=topic["id"] if _id(topic.get("id")) else 0, items=items,
                              pinned=topic.get("pinned") is True, pin_retry_at=float(retry) if _num(retry) else 0.0,
                              next=max(top, topic["next"] if _id(topic.get("next")) else 1))
+        if topic.get("dirty") is True:
+            out[str(key)]["dirty"] = True
     return out
 
 
@@ -345,7 +349,7 @@ def _sync(cfg: Config, bot, chat: int, thread: int, topic: dict, now: float, ess
 
 
 def apply(cfg: Config, bot, chat: int, thread: int, change: Callable[[dict], object],
-          essential: bool = False, now: Optional[float] = None) -> Tuple[object, bool]:
+          essential: bool = False, now: Optional[float] = None, sync: bool = True) -> Tuple[object, bool]:
     """Run `change` on the topic's state and show the result: (what `change` returned, whether the board
     message is up to date). A BoardError from `change` leaves everything as it was."""
     now = time.time() if now is None else now
@@ -354,8 +358,16 @@ def apply(cfg: Config, bot, chat: int, thread: int, change: Callable[[dict], obj
         data = _load(path)
         topic = data.setdefault(key, _blank())
         result = change(topic)
+        topic["dirty"] = True
+        # Owner actions are durable immediately, even while Telegram is slow. State
+        # polls read the atomic file without waiting for this optional message edit.
+        write_private(path, json.dumps(data))
+        if not sync:
+            return result, False  # heartbeat edits the Telegram message, off the HTTP deadline
         try:
             synced = _sync(cfg, bot, chat, thread, topic, now, essential)
+            if synced:
+                topic.pop("dirty", None)
         finally:
             write_private(path, json.dumps(data))
     return result, synced
@@ -408,6 +420,91 @@ def open_checks() -> List[Tuple[int, int, dict]]:
 
 # --- the commands --------------------------------------------------------------
 
+def refresh_dirty(cfg: Config, bot, limit: int = 2) -> int:
+    """Retry message edits off the HTTP path, without holding the state lock during I/O.
+
+    Only existing messages are edited here; normal agent changes own board creation and
+    pinning. A concurrent change keeps its dirty bit for the next heartbeat, so an old
+    snapshot can never overwrite newer local state or falsely acknowledge a newer edit.
+    """
+    data = _load(state_dir() / STATE_FILE)
+    refreshed = 0
+    for key, topic in data.items():
+        chat, _, thread = key.partition(":")
+        if (not topic.get("dirty") or not topic["id"] or not re.fullmatch(r"-?\d+", chat)
+                or not thread.isdigit() or int(chat) not in owner_chats(cfg)):
+            continue
+        if limit <= 0:
+            break
+        limit -= 1
+        try:
+            _call(bot, "editMessageText", {"chat_id": int(chat), "message_id": topic["id"],
+                  "text": render(cfg, topic), "parse_mode": "HTML", "link_preview_options": {"is_disabled": True},
+                  "reply_markup": {"inline_keyboard": keyboard(cfg, int(chat), int(thread), topic)}}, False)
+        except TelegramError as exc:
+            if "not modified" not in exc.description.lower():
+                continue
+        except Exception:
+            continue
+        with _locked() as path:
+            current = _load(path)
+            row = current.get(key)
+            if row and row["id"] == topic["id"] and row["items"] == topic["items"]:
+                row.pop("dirty", None)
+                write_private(path, json.dumps(current))
+                refreshed += 1
+            elif row and row["id"] == topic["id"]:
+                row["dirty"] = True  # our older edit may have arrived after a concurrent newer edit
+                write_private(path, json.dumps(current))
+    return refreshed
+
+def sweep(cfg: Config, bot=None, now: Optional[float] = None) -> dict:
+    """Clear only explicit expired text deadlines in owner chats. Counts, never prose, in logs.
+
+    Recheck under the board lock so concurrent clears/restores cannot be overwritten.
+    The heartbeat and the command share this same implementation.
+    """
+    from .reminder_lifecycle import expired_text
+    now = time.time() if now is None else now
+    changed = []
+    cleared = 0
+    with _locked() as path:
+        data = _load(path)
+        for key, topic in data.items():
+            chat, _, thread = key.partition(":")
+            if not re.fullmatch(r"-?\d+", chat) or not thread.isdigit() or int(chat) not in owner_chats(cfg):
+                continue
+            gone = [i for i in topic["items"] if i["k"] == "remind" and expired_text(i, now)]
+            if gone:
+                topic["items"] = [i for i in topic["items"] if i not in gone]
+                topic["dirty"] = True
+                cleared += len(gone)
+                changed.append((int(chat), int(thread), topic))
+        if changed:
+            write_private(path, json.dumps(data))
+    return {"cleared": cleared, "topics": len(changed)}
+
+
+def daily_sweep(cfg: Config, bot, now: float) -> None:
+    """One sweep per day across heartbeat restarts; record counts only."""
+    from .mirror import log
+    with _locked() as path:
+        stamp = path.parent / "board-sweep.json"
+        try:
+            last = json.loads(stamp.read_text()).get("at", 0)
+        except (OSError, ValueError, AttributeError):
+            last = 0
+        if _num(last) and 0 <= now - last < 86400:
+            return
+        write_private(stamp, json.dumps({"at": now}))
+    try:
+        counts = sweep(cfg, bot, now)
+    except Exception:
+        with _locked() as path:
+            write_private(path.parent / "board-sweep.json", json.dumps({"at": 0}))
+        raise
+    log(f"board sweep: cleared={counts['cleared']} topics={counts['topics']}")
+
 def _where(cfg: Config, session: str) -> Tuple[int, int]:
     from .topics import place
     sid = session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
@@ -431,6 +528,13 @@ def run(cfg: Config, action: str, session: str = "", text: str = "", url: str = 
     """`ctb board <action>`: 0 when it worked (the item is saved even if Telegram is rate limiting and the
     message refreshes with the next change), 1 with a one-line reason when it was refused."""
     try:
+        if action == "sweep":
+            if bot is None:
+                from .telegram import Bot
+                bot = Bot.from_config(cfg)
+            counts = sweep(cfg, bot)
+            print(f"cleared={counts['cleared']} topics={counts['topics']}")
+            return 0
         chat, thread = _where(cfg, session)
         if action == "list":
             topic = snapshot(chat, thread)
