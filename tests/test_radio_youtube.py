@@ -101,7 +101,7 @@ def test_empty_allowlist_says_only_the_station_id():
 
 def test_no_private_marker_reaches_script_or_card():
     script, card = outputs(snap(), prof({"alpha": "אלפא"}))
-    assert "בפרויקט אלפא" in script
+    assert "בפרויקט א׳" in script
     for word in SECRET_WORDS + ["הוספנו", "תיקון"]:  # not even the listed project's own item titles
         assert word not in script and word not in card, word
 
@@ -163,7 +163,7 @@ def test_old_or_told_items_are_not_spoken_again():
     last = radio_staff.remember(view, NOW)
     again = radio_staff.staff_view(sn, p, last)
     assert not radio_staff.has_news(again) and "הושלמ" not in radio_staff.build_script(again)
-    assert "אלפא: שתי משימות" in json.dumps(radio_staff.card_sections(again), ensure_ascii=False)  # still counted
+    assert "פרויקט א׳: שתי משימות" in json.dumps(radio_staff.card_sections(again), ensure_ascii=False)  # still counted
     sn["done"][0]["updated"] = NOW - 7 * 3600  # beyond the fresh window: never read as news
     assert sum(d["fresh"] for p_ in radio_staff.staff_view(sn, p)["projects"] for d in p_["done"]) == 1
 
@@ -183,10 +183,12 @@ def test_sections_are_a_fixed_allowlist():
     assert "הושלמ" not in script and "שלוש משימות בעבודה" in script
 
 
-def test_a_project_name_with_latin_or_digits_is_left_out():
+def test_a_project_name_with_latin_or_digits_gets_the_neutral_label():
+    """A staff label the voice could not say cleanly is never said: the project is "Project A" instead."""
     for name in ("Team app", "אלפא 2", "אלפא/בטא", "אלפא@", "🚀 אלפא"):
         script, card = outputs(snap(), prof({"alpha": name}))
-        assert "בפרויקט" not in script, name
+        assert "בפרויקט א׳" in script and name not in script and name not in card, name
+        assert "פרויקט פרויקט" not in script
 
 
 def test_hebrew_output_never_mixes_directions():
@@ -484,7 +486,7 @@ def test_english_station_keeps_the_same_rules():
     sn = snap()
     sn["done"][0]["text"] = "Added a new screen"
     script = radio_staff.build_script(radio_staff.staff_view(sn, p))
-    assert script.startswith("Team radio. Hello") and "In Alpha, two tasks finished." in script
+    assert script.startswith("Team radio. Hello") and "In Project A, two tasks finished." in script
     assert "screen" not in script
     assert not any(c.isdigit() for c in script) and "PRIVATE" not in script
 
@@ -538,7 +540,7 @@ def test_turning_it_off_in_the_settings_ends_the_broadcast(monkeypatch):
     _live_state()
     station, drawn, said, gave = _station(monkeypatch, box)
     station.update()
-    assert said and "אלפא" in drawn[-1]
+    assert said and "פרויקט א׳" in drawn[-1]
     box[0] = Y.settings(cfg(enabled=False))
     n = len(drawn)
     station.update()
@@ -551,10 +553,10 @@ def test_a_project_taken_off_the_allowlist_is_gone_from_the_next_update(monkeypa
     _live_state()
     station, drawn, said, gave = _station(monkeypatch, box)
     station.update()
-    assert "אלפא" in drawn[-1]
+    assert "פרויקט א׳" in drawn[-1]
     box[0] = Y.settings(cfg(projects={}))
     station.update()
-    assert "אלפא" not in drawn[-1]
+    assert "פרויקט א׳" not in drawn[-1]
 
 
 def test_unreadable_settings_leave_only_the_station_id(monkeypatch):
@@ -672,7 +674,7 @@ def test_a_reconnect_after_a_project_is_removed_shows_no_project(monkeypatch):
             Pipe.runs += 1
             if Pipe.runs == 1:
                 station.update()  # the allowlisted project is on the card
-                assert "אלפא" in station.card.read_text(encoding="utf-8")
+                assert "פרויקט א׳" in station.card.read_text(encoding="utf-8")
                 box[0] = Y.settings(cfg(projects={}))  # the owner removes it ...
                 return "connection lost"  # ... while the connection drops
             station.quit.set()

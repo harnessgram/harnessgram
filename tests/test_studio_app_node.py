@@ -87,6 +87,40 @@ def test_without_a_panel_answer_the_page_says_so():
     assert got == [1, 1]
 
 
+@needs_node
+def test_a_late_panel_answer_still_starts_the_page():
+    # A slow shell answers after the error shows: the page keeps asking and starts as soon as the answer comes.
+    got = run('for (var i = 0; i < 4; i++) { timers.forEach(function (t) { t.f(); }); await flush(); } '
+              'var asked = out.filter(function (m) { return m.cockpit === "hello"; }).length; '
+              'timers.filter(function (t) { return !t.cleared; }).pop().f(); await flush(); '
+              'var again = out.filter(function (m) { return m.cockpit === "hello"; }).length; '
+              'var before = byKeep("error-card").length; '
+              + boot(data=desk_js()) + 'emit([before, again > asked, byKeep("error-card").length, byKeep("waiting-stack").length]);')
+    assert got == [1, True, 0, 1]
+
+
+@needs_node
+def test_retry_before_the_page_started_asks_the_panel_again():
+    got = run('for (var i = 0; i < 4; i++) { timers.forEach(function (t) { t.f(); }); await flush(); } '
+              'var asked = out.filter(function (m) { return m.cockpit === "hello"; }).length; '
+              'byKeep("error-actions")[0].childNodes[0].click(); await flush(); '
+              'emit([out.filter(function (m) { return m.cockpit === "hello"; }).length > asked, '
+              'out.filter(function (m) { return m.cockpit === "api"; }).length]);')
+    assert got == [True, 0]
+
+
+
+@needs_node
+def test_repeated_retry_keeps_one_hello_chain():
+    # Each Retry restarts the one hello chain; it never adds a second chain that keeps asking alongside.
+    fire = 'timers.filter(function (t) { return !t.cleared; }).forEach(function (t) { t.cleared = true; t.f(); }); await flush(); '
+    got = run('for (var i = 0; i < 4; i++) { timers.forEach(function (t) { t.f(); }); await flush(); } '
+              'var hellos = function () { return out.filter(function (m) { return m.cockpit === "hello"; }).length; }; '
+              'for (var k = 0; k < 3; k++) { for (var j = 0; j < 6; j++) { ' + fire + '} '
+              'byKeep("error-actions")[0].childNodes[0].click(); await flush(); } '
+              'var a = hellos(); ' + fire + 'var b = hellos(); emit(b - a);')
+    assert got == 1
+
 # --- the back bar and the back confirmation -------------------------------------------------------------------------------
 
 OPENERS = {  # the entry points whose page a later step builds ("open" and the preview open the desk: see below)
@@ -524,11 +558,31 @@ def test_real_stills_and_sound_come_through_the_media_route_and_bad_paths_never_
     byKeep('hear')[0].click();
     byKeep('desk-modes')[0].childNodes[1].click();
     emit({desk: desk, scenes: imgs(), audios: audios, toast: byClass('toast').length});"""))
-    good = {"media/weekly-12/scene_1.jpg?auth=init"}  # the player shows sentence two, whose path is not a media path
+    good = {"media/weekly-12/scene_1.jpg?auth=scoped-test-token"}  # the player shows sentence two, whose path is not a media path
     assert set(got["desk"]) <= good and got["scenes"] and set(got["scenes"]) == good
-    assert got["audios"] == ["media/weekly-12/s2.m4a?auth=init"] and got["toast"] == 0
+    assert got["audios"] == ["media/weekly-12/s2.m4a?auth=scoped-test-token"] and got["toast"] == 0
     quiet = run(desk_boot(then="byKeep('hear')[0].click(); emit([audios.length, byClass('toast').map(textOf)]);"))
     assert quiet[0] == 0 and "אין קול" in quiet[1][0]
+
+
+@needs_node
+def test_owner_login_messages_are_ignored_and_scoped_refresh_preserves_the_desk():
+    ignored = run('send({cockpit:"hello", initData:"owner-login"}); await flush(); emit(out.filter(function(m){return m.cockpit === "api";}));')
+    assert ignored == []
+    p = provider.project("weekly-12")
+    p["sentences"][1]["frame"] = "weekly-12/s2.jpg"
+    p["sentences"][1]["audio"] = "weekly-12/s2.m4a"
+    got = run(desk_boot(data=json.dumps({"ok": True, "project": p, "marks": {}}), then='''
+        var player=byKeep("player")[0], count=out.length;
+        send({cockpit:"auth", token:"renewed-app-token"});
+        var unchanged=player===byKeep("player")[0] && count===out.length;
+        var imgs=allEls().filter(function(e){return e.tagName === "img";}).map(function(e){return e.attrs.src;});
+        byKeep("hear")[0].click();
+        emit({unchanged:unchanged, imgs:imgs, audios:audios});
+    '''))
+    assert got["unchanged"] and got["imgs"]
+    assert all(u.endswith("?auth=renewed-app-token") for u in got["imgs"])
+    assert got["audios"] == ["media/weekly-12/s2.m4a?auth=renewed-app-token"]
 
 
 @needs_node

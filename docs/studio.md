@@ -12,6 +12,10 @@ Reopen the panel and the Studio tab (film icon) appears. The install writes thre
 `index.html`, `api.py`), starts nothing and changes nothing else. The owner's draft marks live in `state/` inside the
 same folder; a new install replaces the three files and keeps them.
 
+After the app-scoped authentication update, reinstall the Studio page before reopening it: old installed pages
+expect `hello.initData` and intentionally receive no owner login. The updated page accepts `hello.token` and
+refreshes media credentials on `auth` messages without resetting the current desk or draft marks.
+
 ## What step 2 has
 
 - **The shell.** An ordinary Cockpit app (`docs/panel.md`, "Cockpit apps"): the page asks the panel for `hello`, calls its

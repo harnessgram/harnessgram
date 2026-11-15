@@ -296,12 +296,46 @@ def test_finish_stop_quiets_only_background_turns(tmp_path, monkeypatch, prompt,
     lines = [ev("user", "previous"), ev("assistant", "old", "old"), ev("user", prompt)]
     if attachment:
         lines.append(json.dumps({"type": "attachment", "attachment": {"type": "queued_command", "prompt": attachment}}))
-    lines.append(ev("assistant", "answer", "new"))
+    lines.append(ev("assistant", "Monitor re-armed.", "new"))
     data = stop_data(tmp_path, lines)
     assert H.finish_stop(data) == 0
     assert bool(sent) is expected
     assert "new:0" in H._seen("sess-1")
     assert H.finish_stop(data) == 0 and len(sent) == int(expected)
+
+
+@pytest.mark.parametrize("answer,expected", [
+    ("Monitor re-armed.", False),
+    ("The build finished and the fix is installed.\n\nSummary: The fix is live.", True),
+    ("x" * 400, True),
+])
+def test_background_turn_still_mirrors_a_finish_report(tmp_path, monkeypatch, answer, expected):
+    # A finished background job's report (summary line, or real length) reaches the topic; only chatter stays quiet.
+    from ctb import mirror, progress, topics
+    cfg = Config(bot_token="t", owner_chat_id=1, quiet_background_turns=True)
+    monkeypatch.setattr(H, "load_config", lambda: cfg)
+    monkeypatch.setattr(progress, "run_send_progress", lambda *a, **k: 0)
+    monkeypatch.setattr(topics, "set_state", lambda *a, **k: 0)
+    monkeypatch.setattr(H, "drop_progress", lambda *a, **k: None)
+    monkeypatch.setattr(mirror, "alert", lambda *a, **k: pytest.fail("unexpected alert"))
+    sent = []
+    monkeypatch.setattr(mirror, "run_reply", lambda *a, **k: sent.append(a[3]) or 0)
+    lines = [ev("user", "previous"), ev("assistant", "old", "old"),
+             ev("user", "<task-notification>background command completed</task-notification>"),
+             ev("assistant", answer, "new")]
+    assert H.finish_stop(stop_data(tmp_path, lines)) == 0
+    assert bool(sent) is expected
+
+
+def test_chatter_reply():
+    assert H.chatter_reply("No response requested.")
+    assert H.chatter_reply("Monitor re-armed.")
+    assert H.chatter_reply("Watch re-armed.\nSummary: Nothing new for you.")
+    assert H.chatter_reply("Summary: Nothing new for you.")
+    assert not H.chatter_reply("Done.\nSummary: Shipped.")
+    assert not H.chatter_reply("The build failed; action required.")  # short, but a report
+    assert not H.chatter_reply("Tests failed on main.\nSummary: Nothing new for you.")
+    assert not H.chatter_reply("y" * 400)
 
 
 def test_quiet_background_default_for_existing_and_new_config():
@@ -502,6 +536,7 @@ def test_no_retry_and_single_send_when_error_follows_a_send(tmp_path, monkeypatc
 
     def send_then_fail(*a, **k):
         sends.append(1)
+        k["on_accept"]()  # Telegram accepted the first part
         raise AttributeError("'str' object has no attribute 'get'")
     monkeypatch.setattr(mirror, "run_reply", send_then_fail)
     data = stop_data(tmp_path, [ev("user", "q"), ev("assistant", "answer", "a")])

@@ -4,7 +4,7 @@ import random
 import threading
 import time
 
-from . import alerts, cards, decisions, panel_pin
+from . import alerts, cards, decisions, panel_pin, sensitive_buttons
 from .i18n import t
 from .telegram import Bot, TelegramError
 
@@ -63,7 +63,10 @@ def update(cfg, rec, opened, bot=None):
                     store._save(path, data)
             return True
         link = url(cfg, bot, ident)
-        markup = {"inline_keyboard": [[{"text": t("cockpit_answer_button", lang=lang), "url": link}]]} if link else {"inline_keyboard": []}
+        label = t("cockpit_answer_button", lang=lang)
+        if store is decisions and sensitive_buttons.decision_sensitive(current):
+            label = sensitive_buttons.mark_title(label)  # the app asks for Face ID before it opens a sensitive answer
+        markup = {"inline_keyboard": [[{"text": label, "url": link}]]} if link else {"inline_keyboard": []}
         # Re-read after link lookup, which can itself contact Telegram.
         with store._locked() as path:
             data = store._load(path)

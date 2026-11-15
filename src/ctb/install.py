@@ -33,7 +33,7 @@ from .config import HOME, config_dir, private_dir, state_dir
 LABEL = "com.claude-telegram-bridge.listener"
 UNIT = "claude-telegram-bridge.service"  # the listener unit; the jobs are in SERVICES below
 # Matches both launch forms: ".../ctb hook-stop" and "python -I -m ctb hook-stop".
-HOOK_RE = re.compile(r"\bctb['\"]?\s+hook-(?:stop|prompt|wake|post|notify|start|lifecycle|stop-failure|ask)\b")
+HOOK_RE = re.compile(r"\bctb['\"]?\s+hook-(?:stop|prompt|wake|post|notify|start|lifecycle|stop-failure|ask|permission)\b")
 
 
 def settings_path() -> Path:
@@ -43,6 +43,9 @@ def settings_path() -> Path:
 
 def command(sub: str) -> str:
     return " ".join(shlex.quote(a) for a in launch.argv()) + " " + sub
+
+
+PERMISSION_TIMEOUT = 300  # permission_request.HOOK_TIMEOUT (a test keeps them equal)
 
 
 def desired_hooks(wake: bool = True) -> dict:
@@ -59,6 +62,10 @@ def desired_hooks(wake: bool = True) -> dict:
             # Existing installs acquire this registration by running install again (merge is idempotent).
             "PreToolUse": [{"matcher": "AskUserQuestion",
                             "hooks": [{"type": "command", "command": command("hook-ask"), "timeout": 5}]}],
+            # Claude Code's permission prompt, answered from the phone (permission_request.py): the hook waits for the
+            # owner's answer below its timeout and otherwise prints nothing, so the terminal prompt stays.
+            "PermissionRequest": [{"hooks": [{"type": "command", "command": command("hook-permission"),
+                                              "timeout": PERMISSION_TIMEOUT}]}],
             "PostToolUse": [{"hooks": [{"type": "command", "command": command("hook-post"), "timeout": 30}]}],
             "UserPromptSubmit": [{"hooks": [{"type": "command", "command": command("hook-prompt")}]}],
             "Stop": stop,
@@ -74,6 +81,24 @@ def is_hook_command(cmd: str, sub: str) -> bool:
     return bool(m) and m.group(0).split()[-1] == sub
 
 
+def _ours_hook(h) -> bool:
+    return isinstance(h, dict) and bool(HOOK_RE.search(h.get("command") or ""))
+
+
+def _without_ours(entries: list) -> list:
+    """The event's hook groups with only the bridge's own hooks taken out: another hook the owner put in the same
+    group stays, with its group's matcher; a group left empty goes."""
+    out = []
+    for e in entries:
+        if not isinstance(e, dict) or not is_ours(e):
+            out.append(e)
+            continue
+        rest = [h for h in (e.get("hooks") or []) if not _ours_hook(h)]
+        if rest:
+            out.append(dict(e, hooks=rest))
+    return out
+
+
 def merge_settings(settings: dict, wake: bool = True) -> Tuple[dict, List[str]]:
     """(new settings, human-readable list of changes). Other hooks are left exactly as they are."""
     new = copy.deepcopy(settings)
@@ -85,7 +110,7 @@ def merge_settings(settings: dict, wake: bool = True) -> Tuple[dict, List[str]]:
         if ours == wanted:
             changes.append(f"{event}: already installed, unchanged")
             continue
-        hooks[event] = [e for e in entries if not is_ours(e)] + wanted
+        hooks[event] = _without_ours(entries) + wanted
         verb = "updated" if ours else "added"
         for w in wanted:
             changes.append(f"{event}: {verb} `{w['hooks'][0]['command']}`")
@@ -96,9 +121,9 @@ def remove_settings(settings: dict) -> Tuple[dict, List[str]]:
     new = copy.deepcopy(settings)
     changes = []
     for event, entries in list((new.get("hooks") or {}).items()):
-        keep = [e for e in entries if not is_ours(e)]
-        if len(keep) != len(entries):
-            changes.append(f"{event}: removed {len(entries) - len(keep)} hook group(s)")
+        keep = _without_ours(entries)
+        if keep != entries:
+            changes.append(f"{event}: removed the bridge's hooks from {sum(1 for e in entries if isinstance(e, dict) and is_ours(e))} group(s)")
             if keep:
                 new["hooks"][event] = keep
             else:

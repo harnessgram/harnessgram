@@ -14,24 +14,27 @@ An app is a folder `<state_dir>/cockpit-apps/<name>/` (name: `[a-z0-9-]{1,24}`) 
 
 No other key is accepted. A folder whose manifest breaks a rule is ignored with one line in the log; the server
 never fails because of an app. The routes (panel.py) are `GET /app/<name>/` (the page), `GET /app/<name>/media/<path>`
-(a file under `media_root`, with HTTP Range) and `POST /app/<name>/api` (the command); every one needs the owner's
-signed initData, like the panel's own routes.
+(a file under `media_root`, with HTTP Range) and `POST /app/<name>/api` (the command); each needs a short-lived
+token scoped to that exact app. Only the parent holds the owner's signed Telegram initData and can mint tokens
+through `POST /api/app-token {"app": "<name>"}`. App tokens never authenticate owner APIs or other apps.
 
 The frame talks to the panel page with `postMessage` (the frame has an opaque origin, so it cannot call the server
 with a header itself, and the server never answers cross-origin requests):
-- `{"cockpit": "hello"}` -> `{"cockpit": "hello", "initData", "lang", "dir", "theme"}` (initData builds media URLs:
-  `media/<path>?auth=<initData, URL-encoded>`);
+- `{"cockpit": "hello"}` -> `{"cockpit": "hello", "token", "expires", "lang", "dir", "theme"}` (the token builds
+  media URLs: `media/<path>?auth=<token, URL-encoded>`);
+- the parent refreshes before expiry and sends `{"cockpit": "auth", "token", "expires"}`; update media URLs in
+  place without resetting the app. Tokens last at most ten minutes and never outlive the owner's action login;
 - `{"cockpit": "api", "id": <string|number>, "body": {...}}` -> `{"cockpit": "api", "id", "status", "data"}`: the
-  page posts the body to the app's API with the owner's initData and hands the answer back.
+  page posts the body to the app's API with `X-Cockpit-App-Token` and hands the answer back.
 Further messages ask the page for chrome and layout (`focus`, `back`, `badge`, `open_chat`; the page answers `hello`
 with the layout and sends `layout` when it changes): see docs/panel.md.
 Long work (renders and the like) is the app's own business: its command starts it detached (its own session, stdout
 and stderr redirected, or the call waits for them until the timeout kills the whole process group) and answers at
 once; one heavy job at a time is the app's rule to keep, not this module's.
 
-What the frame is trusted with: its URL and the hello answer carry the owner's initData (media elements need it in
-the URL), and replies to an opaque origin can only be posted to "*". So an app's page is trusted code from the
-owner's own folder; the sandbox keeps it away from the panel's DOM, storage and cookies, not from that login.
+The frame's URL and messages carry only its own app token, never the owner's full login. Replies to an opaque
+origin can only be posted to "*"; the parent identifies the sending window rather than trusting a supplied app id.
+This isolates browser credentials; an app's local command still runs as the operator and must be trusted code.
 """
 from __future__ import annotations
 

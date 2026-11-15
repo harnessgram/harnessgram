@@ -6,14 +6,14 @@
 "use strict";
 var TABLE = __STRINGS__;
 var SCENES = __SCENES__;
-var HELLO_RETRY = 1500, HELLO_TRIES = 3, API_TIMEOUT = 20000, POLL = 15000, LIMIT = 40;
+var HELLO_RETRY = 1500, HELLO_TRIES = 4, HELLO_SLOW = 4000, API_TIMEOUT = 20000, POLL = 15000, LIMIT = 40;
 var st = {lang: "he", dir: "rtl", ready: false, status: "loading", desk: null, view: "home", ctx: null, filter: "all",
   card: 0, sig: "", auth: "", stack: [],
   // the desk of one video: its id, the home item it was opened from, loaded videos (with the owner's draft marks) and
   // the desk's own state: load status, mode, the sentence in the player, the suggestion shown, the sentence being edited
   pid: null, item: null, proj: {}, pst: "loading", mode: "suggest", cur: 1, cue: null, edit: null, editText: "",
   playing: false, timer: null, toast: null, scrollScene: null};
-var root = document.getElementById("app"), parentWin = window.parent, pending = {}, seq = 0, busy = false, helloTries = 0;
+var root = document.getElementById("app"), parentWin = window.parent, pending = {}, seq = 0, busy = false, helloTries = 0, helloTimer = 0;
 var nf = new Intl.NumberFormat("he"), pf = new Intl.NumberFormat("he", {style: "percent"}), plural = new Intl.PluralRules("he");
 
 // --- words ------------------------------------------------------------------------------------------------------
@@ -182,7 +182,8 @@ function setLayout(m) {
 window.addEventListener("message", function (e) {
   var m = e.data;
   if (e.source !== parentWin || !m || typeof m !== "object") return;
-  if (m.cockpit === "hello" && typeof m.initData === "string") { onHello(m); return; }
+  if (m.cockpit === "hello" && typeof m.token === "string" && m.token) { onHello(m); return; }
+  if (m.cockpit === "auth" && typeof m.token === "string" && m.token) { updateAuth(m.token); return; }
   if (m.cockpit === "layout") { setLayout(m); return; }
   if (m.cockpit === "back") { onBack(); return; }
   if (m.cockpit === "api" && typeof m.id === "string" && pending[m.id]) {
@@ -190,10 +191,18 @@ window.addEventListener("message", function (e) {
     done({status: typeof m.status === "number" ? m.status : 0, data: m.data});
   }
 });
+function updateAuth(token) {
+  st.auth = token;
+  // Renew lazy/visible stills in place: keep playback, unsaved marks, focus and scroll intact.
+  Array.prototype.forEach.call(root.getElementsByTagName("img"), function (img) {
+    var path = img.getAttribute("data-media");
+    if (path) img.setAttribute("src", mediaUrl(path));
+  });
+}
 function onHello(m) {
+  updateAuth(m.token);
   if (st.ready) return;
   st.ready = true;
-  st.auth = m.initData;
   st.lang = m.lang === "he" ? "he" : "en";
   st.dir = m.dir === "rtl" ? "rtl" : "ltr";
   var de = document.documentElement;
@@ -257,7 +266,7 @@ function apply(r) {
     if (sig === st.sig && prev === "ok") { busy = false; return; }  // nothing new: leave the page (and its scroll) alone
     st.sig = sig; st.desk = desk; st.card = Math.min(st.card, Math.max(0, desk.waiting.length - 1));
   } else if (r.status === 200 && d && d.ok === false && d.error === "no_permission") st.status = "noperm";
-  else st.status = "error";
+  else { st.status = "error"; st.why = "#" + (r.status || 0) + (r.status === 200 ? "1" : ""); }  // digits only: the page stays one language
   busy = false;
   badge();
   render();
@@ -269,7 +278,10 @@ function load() {
   if (!st.desk) { st.status = "loading"; render(); }
   call({op: "desk.get"}).then(apply);
 }
-function retry() { if (st.view === "desk" || st.view === "words") loadProject(); else load(); }
+function retry() {
+  if (!st.ready) { helloTries = 0; st.status = "loading"; render(); hello(); return; }  // not started yet: ask the shell again
+  if (st.view === "desk" || st.view === "words") loadProject(); else load();
+}
 
 // --- screens -------------------------------------------------------------------------------------------------------
 function render() {
@@ -361,13 +373,15 @@ function jobCard(j) {
     var cls = i < at ? "done" : i === at ? "cur" : "";
     track.appendChild(h("li", cls, [h("span", "sd", cls === "done" ? ic("check") : null), h("span", "sl", t("home.stage." + s))]));
   });
-  var eta = minutesText(j.eta_s), line = eta ? t("home.workerLine", {t: eta}) : t("home.workerNoEta");
+  // Only claim a working agent when the adapter reports real progress; an unfinished folder alone is idle.
+  var active = pct > 0 || Number(j.eta_s) > 0;
+  var eta = minutesText(j.eta_s), line = !active ? t("home.workerIdle") : eta ? t("home.workerLine", {t: eta}) : t("home.workerNoEta");
   var bar = h("div", "pbar", h("i")); bar.firstChild.style.inlineSize = Math.round(pct * 100) + "%";
   return keep(h("article", "card job", [
     h("div", "job-h", [scene(j.scene), h("div", "jb", [txt("div", "k", [seriesPart(j.series)]), txt("div", "t", [part(j.title)])]),
       h("span", "pct", pf.format(pct))]),
     h("div", "pg", bar), track,
-    h("div", "row", [bot("sm working"), h("div", "body", h("div", "mt", line))])]), "working-job");
+    h("div", "row", [bot(active ? "sm working" : "sm"), h("div", "body", h("div", "mt", line))])]), "working-job");
 }
 function statusPill(s) {
   if (["ready", "writing", "producing", "published"].indexOf(s) < 0) s = "producing";
@@ -513,6 +527,7 @@ function renderError() {
   card.appendChild(h("div", "err-h", [h("span", "lead red", ic("alert")), h("div", null, [h("b", null, t("states.errorTitle")),
     h("small", null, t("states.errorWhen"))])]));
   card.appendChild(keep(h("div", "why-box", [h("b", null, t("states.whatHappened") + " "), t("states.errorWhy")]), "plain-reason"));
+  if (st.why) { var code = h("small", "err-code", st.why); code.dir = "ltr"; card.appendChild(code); }  // a short code the team can trace
   card.appendChild(keep(h("div", "btns", [retryBtn("pri", "common.retry"), button("btn", "chat", t("common.askTeam"), openChat)]), "error-actions"));
   root.appendChild(h("div", "cols wide-side", [h("section", null, card), h("section")]));
 }
@@ -766,7 +781,7 @@ function togglePlay() {
 function still(sceneId, frame, kids, cls) {
   var img = null;
   if (frame && st.auth) {  // the engine's real still over the placeholder; the placeholder stays if it does not load
-    img = h("img", "still", null, {src: mediaUrl(frame), alt: "", loading: "lazy", decoding: "async"});
+    img = h("img", "still", null, {src: mediaUrl(frame), "data-media": frame, alt: "", loading: "lazy", decoding: "async"});
     img.addEventListener("error", function () { if (img.parentNode) img.parentNode.removeChild(img); });
   }
   return scene(sceneId, kids, cls, img);
@@ -1078,9 +1093,12 @@ function renderProject() {
 // --- start --------------------------------------------------------------------------------------------------------
 function hello() {
   if (st.ready) return;
-  if (++helloTries > HELLO_TRIES) { st.ready = true; st.status = "error"; render(); return; }
+  // A slow shell (cold phone, slow link) can answer late: show the error after HELLO_TRIES but keep asking, slower,
+  // so a late hello still starts the page; never give up for good while the frame is open.
+  if (++helloTries === HELLO_TRIES + 1) { st.status = "error"; st.why = "#1"; render(); }
   post({cockpit: "hello"});
-  setTimeout(hello, HELLO_RETRY);
+  clearTimeout(helloTimer);  // one chain only: a Retry tap restarts it instead of adding another
+  helloTimer = setTimeout(hello, helloTries > HELLO_TRIES ? HELLO_SLOW : HELLO_RETRY);
 }
 hello();
 })();

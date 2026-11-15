@@ -315,7 +315,7 @@ def test_keypad_confirmation(cfg, bot, monkeypatch, key, expected):
 def test_prompt_names_session_once_and_app_title_wins(cfg, monkeypatch, tmp_path):
     monkeypatch.setattr(hooks, "load_config", lambda: cfg)
     monkeypatch.setattr(hooks, "spawn", lambda args: None)
-    monkeypatch.setattr(hooks, "prompt_output", lambda data, config: None)
+    monkeypatch.setattr(hooks, "prompt_output", lambda data, config, *rest: None)
     for prompt in ("first task words", "different task"):
         assert hooks.hook_prompt(json.dumps({"session_id": "s", "cwd": "/work/proj", "prompt": prompt})) == 0
     assert topics.session_name("s") == "proj: first task words"

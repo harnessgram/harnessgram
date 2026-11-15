@@ -28,7 +28,8 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from . import flood, fmt
+from . import flood
+from .lazy import lazy_module
 from . import lang as L
 from .config import Config, home_chat, private_dir, state_dir, write_private
 from .i18n import t
@@ -36,6 +37,8 @@ from .identity import isolate
 from .projects import owner_chats
 from .pins import PIN_BACKOFF, SUPERGROUP_PREFIX, link as message_link
 from .telegram import TelegramError
+
+fmt = lazy_module(".fmt")
 
 STATE_FILE = "board.json"
 _CALL_TIMEOUT = 5   # the board is a nicety: never hold the caller for the default 15 seconds

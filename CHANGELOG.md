@@ -6,6 +6,90 @@ change a setting or a command, and the change is listed here under "Changed" or 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-16
+
+### Added
+- Claude Code permission prompts can be answered from the phone. A new PermissionRequest hook (`ctb hook-permission`)
+  posts the exact request (the whole tool input, every field) to the session's topic and the Cockpit and waits for
+  the owner's answer; whoever answers first, the phone or the computer, wins. No is a button; Yes is a typed yes
+  sent as a reply to that card, or the Cockpit. A request the phone cannot show exactly can only be declined. No
+  answer leaves the terminal prompt as it was; nothing is allowed by default and no permission rule is added. Run
+  `harnessgram install` (or tap Restore in the hook-health notice) to add the hook. See docs/panel.md.
+- Sensitive-button markers for the Harnessgram iPhone app: every inline button that performs a sensitive action by
+  itself (adding, removing or switching accounts, moving a session to another account, team members, deleting a topic forever, the alerts channel's publication settings, and agent or
+  dialog options whose label names a sensitive area) leaves with `hg!` in front of its callback data, which the bridge
+  strips before any handler reads it; a URL button that leads to a sensitive answer gets a "🔐 " title. The app asks
+  for Face ID before acting on a marked button; every handler keeps its own checks. Each decision in `/api/state` now
+  carries `"sensitive": true|false`. See docs/panel.md, "Widget devices".
+- Widget device API: `POST /api/device-pair` (fresh owner login) returns a random 30-day device token, stored only as
+  a hash and limited to 5 pairings an hour; `POST /api/devices` lists and revokes paired devices, also from a new
+  Settings row; `POST /api/widget-state` (read-only) and `POST /api/widget-decide` take only
+  `Authorization: Bearer <device token>`. A widget answers only a decision its asker marked routine with the new
+  `ctb decide ask --routine` (default off; old records are never routine) whose words name nothing sensitive; anything
+  else is `403 {"error": "needs-app"}`. Answering the same way twice is a success. See docs/panel.md, "Widget devices".
+- Radio live title: `GET /listen/<token>/now.json` answers `{"title", "updated"}` (the same token check as the listen
+  link), naming what the radio is saying now in at most 80 child-suitability-checked characters, for the iPhone lock
+  screen. See docs/radio.md, "Live title".
+- The radio starts when you press Play in the Safari listen page, so you no longer switch it on first. The first
+  playlist request of the private listen link, with no radio audio yet, starts the radio in private audio-only mode
+  (never a group stream, never the YouTube mirror) and answers with a live playlist of short silent segments (built in
+  memory, nothing paid) that slides until the first real segment exists, then switches over with an
+  EXT-X-DISCONTINUITY, so AVPlayer and Safari both keep playing. A station started this way stops by itself after 10 minutes
+  (`radio.play_idle_minutes`) with no listener fetch; a radio you started yourself is never stopped by this. Guarded by
+  the token, the add-on, one attempt per minute and the daily paid-speech cap; `radio.play_start: false` turns it off.
+  See docs/radio.md.
+- Choice cards with pictures reach agents better: the hint every agent gets now says to attach one `--image` per
+  option whenever the options are visual, and a choice card published without images prints a one-line tip. In the
+  Cockpit the option tiles sit in two columns (one under 360 px), with lazy-loaded images that open large on tap
+  without answering. See docs/panel.md.
+
+- The radio's group live stream is optional: the new add-on switch `radio_group_live` ("Live stream in the group",
+  default on, so nothing changes until you switch it). Off, the radio opens no live stream in the group and publishes no
+  RTMP, and runs audio-only (no card, no project show, no video encoding) feeding only the private listen stream that the
+  Cockpit player and the Safari link play. `radio status` and the Cockpit radio card show the mode ("group + private" or
+  "private only"). The switch is read when the radio starts and a change applies at the next start. See
+  docs/radio.md.
+- Per-project **work map** (Cockpit v2 project page, a pinned message in each project's lead topic, and the owner's
+  `/what`) and a **morning briefing** (a "Good morning" card on Now, a text in the home chat and, when the radio is on,
+  the private home stream; `/briefing` sends it now). Agents add `impact: ...` notes to ledger items so each line says what
+  it changes for the owner. Both are add-ons (`work_map`, `morning_briefing`) in the add-ons screen; `briefing.time` sets the wake time; `/briefing` works in the home chat only. See docs/panel.md.
+- Voice echo: with "Confirm voice notes" on, an owner recording that goes in without a transcript preview (car mode, or a
+  preview that could not be sent) gets one quiet reply with what was heard. Forwards are never echoed. Switch:
+  the `voice_echo` add-on (default on).
+- "Listen in Safari": a one-tap button on the Cockpit radio tile opens a minimal listening page in Safari, which keeps
+  the team radio playing in the background and on the lock screen. The page and its audio are authorized by a private,
+  unguessable listening token (kept only as a hash, revoked in one tap from Settings) that reaches the page, the
+  playlist and the segments, never an API; it expires after 30 days and follows the radio player switch. New add-on switch `listen_link` (default on). See docs/addons.md.
+- Cockpit v2: a "Request an app" tile (Tools, More) and the owner's `/app <link>` command send one App Store link to the
+  command set in the new `app_request_command` setting (default empty = hidden) and show the answer. See docs/panel.md.
+- "What the system knows" (behind the new Cockpit switch): one private index of the agents' rules, memories,
+  skills, tools and docs, with on/off switches, locked safety rules, one-tap undo and change requests for the team.
+  Switched-off items reach the agents through a generated overlay file; no source file is rewritten
+  (`harnessgram knowledge`, docs/knowledge.md).
+- Cockpit v2: a "Mac maintenance" tile (Tools, More): a cleanup check, a cleanup that needs a fresh check and a second tap,
+  and the weekly routine, run as background jobs from the argv lists in the new `mac_tools` setting (default empty =
+  hidden). See docs/panel.md.
+
+- Cockpit v2: a "My schedule" card on Now (Today and Tomorrow, one-tap done and undo) for the owner's own items, added
+  from a one-field sheet or with the owner's `/todo <text>` command (Hebrew and English day and time words; anything
+  unclear stays undated). New settings `timezone` (default Asia/Jerusalem) and `schedule_sources` (default empty: an
+  optional read-only private .ics link or file merged into the card). See docs/panel.md.
+- "My schedule": a one-tap "Connect Google" button shows the owner's Google Calendar events on the card, read only
+  (OAuth web sign-in with PKCE through `panel_base_url`, refresh token in the Keychain, one-tap Disconnect that also
+  revokes it). New setting `google_calendar` (default empty = hidden) and `harnessgram schedule google-setup-info`,
+  which prints the redirect URI to register. See docs/panel.md.
+
+### Fixed
+- `harnessgram install` and `uninstall` no longer drop the owner's own hook when it shares a hook group with a
+  bridge hook: only the bridge's entries are replaced or removed.
+- The project page header in the Cockpit v2 is legible on any picture: a solid scrim on the text box itself (so it covers the text at any width; mirrored in
+  RTL), a soft text shadow and per-theme inks that keep 4.5:1 contrast, guarded by a test.
+- A turn's final answer no longer goes missing when the bridge is reinstalled while the turn ends. Each turn's
+  delivery is claimed under the session's Stop lock before its first send. A worker whose module failed to import
+  before anything went out retries with its own claim. The heartbeat (once a minute at most) redelivers a recent
+  turn that no sender ever claimed (its worker never ran). A claimed turn that never completed is never resent; it
+  gets one short "the last answer may be incomplete" notice.
+
 ## [0.3.0] - 2026-11-14
 
 ### Added

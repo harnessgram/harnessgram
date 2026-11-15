@@ -298,6 +298,10 @@ def test_auto_compact_runs_in_the_session_group(rig, monkeypatch):
     monkeypatch.setattr(I, "_tmux", tmux)
     monkeypatch.setattr(I.time, "sleep", lambda s: None)
     monkeypatch.setattr(I, "pane_for_session", lambda s: "%1")
+    # The session's group selects the reply destination; live process identity separately permits typing.
+    monkeypatch.setattr(I, "_pane_from_process", lambda s: "%1" if s == "orbit-s" else None)
+    monkeypatch.setattr(I, "session_pid", lambda s: 42 if s == "orbit-s" else None)
+    monkeypatch.setattr(I, "_pane_claude_targets", lambda pane: [(42, "start")] if pane == "%1" else [])
     monkeypatch.setattr(I, "pane_text", lambda pane, n=0: "idle")
     monkeypatch.setattr(I, "session_busy", lambda s: False)
     monkeypatch.setattr(I, "_start_compact_progress", lambda cfg_, bot_, thread, session, pane, chat=None: ran.append((thread, chat)))

@@ -65,7 +65,7 @@ def test_panel_renders_both_labels_in_hebrew():
     assert panel_page.STRINGS["he"]["cardWorking"] == "עובדים עכשיו"
     assert panel_page.STRINGS["he"]["cardNow"] == "עכשיו"
     assert 'if(c.activity)' in panel_page.PAGE and 'else if(c.live)' in panel_page.PAGE
-    assert 'he(c,"activity")' in panel_page.PAGE and 'cardActivityUpdated' in panel_page.PAGE
+    assert 'cardText(c,"activity")' in panel_page.PAGE and 'ago(c.activity_age)' in panel_page.PAGE
 
 
 def test_description_with_a_credential_is_never_kept():

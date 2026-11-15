@@ -333,7 +333,7 @@ def test_auto_compact_command_waits_for_its_threads(monkeypatch):
     from ctb import cli, inbox
     done = []
 
-    def fake(session, ctx, cold=False):
+    def fake(session, ctx, cold=False, **kw):  # cold_attempt: the attempt a late compaction checks
         def work():
             time.sleep(0.3)
             done.append(session)
@@ -353,7 +353,7 @@ def test_auto_compact_ignores_threads_it_did_not_start(monkeypatch):
     other = threading.Thread(target=stop.wait, daemon=True)
     other.start()
     try:
-        monkeypatch.setattr(inbox, "auto_compact", lambda session, ctx, cold=False: True)
+        monkeypatch.setattr(inbox, "auto_compact", lambda session, ctx, cold=False, **kw: True)
         began = time.time()
         assert cli.main(["auto-compact", "sess-1", "260000", "cold"]) == 0
         assert time.time() - began < 5

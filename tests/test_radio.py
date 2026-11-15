@@ -563,7 +563,11 @@ def test_state_shows_the_radio_when_configured(radio_server):
     srv, _ = radio_server
     assert json.loads(call(srv, init=signed())[2])["radio"] == {"on": False, "pending": "", "failed": False,
                                                                 "op_at": 0, "tts_minutes_today": 0.0,
-                                                                "tts_daily_minutes": 25}
+                                                                "tts_daily_minutes": 25, "tts_listening_minutes": 60,
+                                                                "tts_effective_minutes": 0, "listening": False,
+                                                                "listening_source": "none", "listening_detection": True,
+                                                                "group_live": True, "group_wanted": True,
+                                                                "mode": "group+private"}
 
 
 def test_a_switch_stays_pending_until_it_really_finished(radio_server, monkeypatch):
@@ -897,6 +901,7 @@ def test_a_background_agent_end_and_a_quota_band_are_news():
 def test_news_gap_stretches_as_the_paid_minutes_run_low(tmp_path, monkeypatch):
     st = radio.Station.__new__(radio.Station)
     st.s = {"tts_daily_minutes": 25, "news_minutes": 3}
+    st.dir = tmp_path
     st.usage = V.Usage(tmp_path / "u.json")
     assert st.news_gap() == 180
     st.usage.add(25 * 60 * 0.7)
@@ -963,9 +968,9 @@ def test_captions_follow_the_audio():
     assert all(len(line) <= 70 for line in R.card_lines("מילה " * 60, 3)) and len(R.card_lines("מילה " * 60, 3)) == 3
 
 
-def test_a_model_that_refuses_the_audio_ceiling_is_asked_again_without_it(monkeypatch):
-    """2026-11-10: gemini-3.8-flash-tts answers 400 "invalid argument" to maxOutputTokens, so every update
-    went out in `say`. The refused request is free; the same clip is asked again without the ceiling."""
+def test_a_model_that_refuses_the_audio_ceiling_is_asked_without_it_and_remembered(monkeypatch):
+    """A rejected length ceiling is not billed: the request is repeated once without it (the text keeps it inside
+    the reservation), and from then on the model is never sent maxOutputTokens again."""
     import base64
     import io
     V._tokens.clear()
@@ -996,9 +1001,13 @@ def test_a_model_that_refuses_the_audio_ceiling_is_asked_again_without_it(monkey
     monkeypatch.setattr(V, "to_pcm", lambda raw, args: b"\x00\x00" * (len(raw) // 2) * 2)
     why = []
     pcm, billed = V.vertex("שלום", _vertex_cfg(), "gemini-3.8-flash-tts", "Sadaltager", "", max_seconds=8, why=why)
-    assert pcm and billed == pytest.approx(1.0) and why == [] and len(sent) == 2
+    assert pcm and billed == pytest.approx(1.0) and len(sent) == 2
+    assert "maxOutputTokens" not in sent[1]["generationConfig"] and "gemini-3.8-flash-tts" in V.NO_CEILING
     V.vertex("שלום", _vertex_cfg(), "gemini-3.8-flash-tts", "Sadaltager", "", max_seconds=8)
-    assert len(sent) == 3  # remembered: no refused request first any more
+    assert len(sent) == 3 and "maxOutputTokens" not in sent[2]["generationConfig"]
+    # a text whose estimated speech does not fit the reservation is not sent at all without a ceiling
+    assert V.vertex("א" * 200, _vertex_cfg(), "gemini-3.8-flash-tts", "Sadaltager", "", max_seconds=8) == (b"", 0.0)
+    assert len(sent) == 3
     V.NO_CEILING.discard("gemini-3.8-flash-tts")
     V._tokens.clear()
 
@@ -1346,3 +1355,63 @@ def test_encoder_caps_the_interleave_wait_so_audio_is_not_held_back_for_video():
     args = radio.encoder_args("libx264")
     i = args.index("-max_interleave_delta")
     assert args[i + 1] == "100000" and args.index("-f", i) > i  # an output option, before the FLV output
+
+
+def test_quota_thresholds_repeats_and_reset():
+    def quota(pct, at):
+        return R.snapshot({}, [], ([], [], 0), [{"label": "Codex", "window": "week", "pct": pct}], at)
+
+    start = 1_000_000
+    initial = quota(93, start)
+    last = R.remember(initial, start)
+    assert not R.quota_due(quota(94, start + R.QUOTA_REPEAT - 1), last)
+    assert R.quota_due(quota(94, start + R.QUOTA_REPEAT), last)
+    assert R.digest(initial) == R.digest(quota(94, start + 1))
+    # Rising thresholds, including 100%, share the same cooldown.
+    assert not R.quota_due(quota(95, start + 2), last)
+    assert not R.quota_due(quota(100, start + 3600), last)
+    assert R.quota_due(quota(100, start + R.QUOTA_REPEAT), last)
+    full_at = start + R.QUOTA_REPEAT
+    full = quota(100, full_at)
+    full_last = R.remember(full, full_at, last)
+    assert not R.quota_due(quota(100, full_at + 3600), full_last)
+    assert R.quota_due(quota(100, full_at + R.QUOTA_REPEAT), full_last)
+    full_last = R.quota_reset(quota(94, full_at + 1), full_last)
+    assert not R.quota_due(quota(100, full_at + 2), full_last)
+
+    # A lower or absent reading must not erase the last spoken time.
+    last = R.quota_reset(quota(79, start + 1), last)
+    last = R.remember(quota(79, start + 1), start + 1, last, [])
+    assert not R.quota_due(quota(93, start + 2), last)
+    assert R.quota_due(quota(93, start + R.QUOTA_REPEAT), last)
+
+
+def test_quota_cooldown_is_per_label_and_window_and_accepts_old_records():
+    now = 1_000_000
+    rows = [{"label": "Codex", "window": "week", "pct": 100},
+            {"label": "Codex", "window": "week", "pct": 100},
+            {"label": "Codex", "window": "5h", "pct": 90},
+            {"label": "Claude", "window": "week", "pct": 90}]
+    snap = R.snapshot({}, [], ([], [], 0), rows, now)
+    last = {"quota_spoken": {R._quota_key(rows[0]): {"band": 90, "at": now - 3600}}}
+    assert R.quota_due(snap, last) == rows[2:]
+    assert len(R.quota_due(snap, {})) == 3
+
+
+def test_bulletin_only_speaks_due_quota_and_remembers_only_spoken_rows():
+    now = 1_000_000
+    rows = [{"label": "Codex", "window": "week", "pct": 93},
+            {"label": "Claude", "window": "week", "pct": 91}]
+    initial = R.snapshot({}, [], ([], [], 0), rows, now)
+    last = R.remember(initial, now)
+    later = {**initial, "at": now + 60, "working": 1}
+    report = {}
+    text = R.build_script(later, last, {}, "en", report=report)
+    assert "quota" not in text.lower() and report["quota_rows"] == []
+    record = R.remember(later, now + 60, last, report["quota_rows"])
+    assert record["quota_spoken"] == last["quota_spoken"]
+    due = {**initial, "at": now + R.QUOTA_REPEAT}
+    report = {}
+    R.build_news(due, record, {}, "en", report=report)
+    record = R.remember(due, due["at"], record, report["quota_rows"])
+    assert len(R.quota_due(due, record)) == 1

@@ -21,13 +21,13 @@ def media_request(tmp_path, monkeypatch):
 
     app = SimpleNamespace(media_root=root)
     monkeypatch.setattr(cockpit_apps, "find", lambda name: app)
-    monkeypatch.setattr(panel, "validate_init_data", lambda *a, **kw: True)
     from ctb import policy
     monkeypatch.setattr(policy, "on", lambda: True)
     handler = panel.PanelHandler.__new__(panel.PanelHandler)
     handler.path = "/app/sample/media/shots/one.png"
     handler.command = "GET"
-    handler.headers = {}
+    # a real app-scoped token for this app, checked by the real validator (no stubbed auth)
+    handler.headers = {panel.APP_TOKEN_HEADER: panel.app_token("unused", 1, "sample")}
     handler.server = SimpleNamespace(bot_token="unused", owner_id=1)
     handler.wfile = io.BytesIO()
     handler._extend = lambda seconds: None

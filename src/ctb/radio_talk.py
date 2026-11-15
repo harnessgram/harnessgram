@@ -142,7 +142,8 @@ BRIEF = ("You write one item of a spoken Hebrew radio bulletin for the owner of 
          "the result, what comes next, and anything that waits for the owner (say clearly if he must decide or act). "
          "Plain words, no code, no file names, no paths, no links, no English words unless a product name has no "
          "Hebrew form; numbers as words. Do not start with the session's name or a greeting. If the reply has no real "
-         "news (an acknowledgement, or only says work goes on), answer exactly SKIP. Answer only between <<< and >>>.")
+         "news (an acknowledgement, or only says work goes on), answer exactly SKIP. Content must be suitable for "
+         "children, without immodest or graphic violent details. Answer only between <<< and >>>.")
 
 
 def _key_points(reply: str, limit: int = 2500) -> str:
@@ -193,8 +194,11 @@ def brief_line(cfg: Config, title: str, reply: str, names: Optional[dict] = None
     sentences = _sentences(text)[:4]
     text = " ".join(sentences)
     if not text or not R.hebrew_enough(text, 0.7) or len(text) > 2 * MAX_CHARS:
-        return spoken_reply(title, reply, translate or (lambda t: t), names)  # the plain fallback
-    return f"{_name(title, names or {})}: {text}"
+        line = spoken_reply(title, reply, translate or (lambda t: t), names)  # the plain fallback
+    else:
+        line = f"{_name(title, names or {})}: {text}"
+    from .radio_suitability import suitable
+    return line if suitable(line) else ""
 
 
 def on_reply(cfg: Config, session: str, title: str, reply: str, now: Optional[float] = None,
@@ -204,6 +208,9 @@ def on_reply(cfg: Config, session: str, title: str, reply: str, now: Optional[fl
     """After a reply reached Telegram: while the radio is on, spool its spoken item for the station: every
     session's reply (default), or only the answer to the owner's voice note (EVERY_REPLY off). The spooled
     record, or None when nothing is to be said (radio off, a trivial reply, the setting)."""
+    from . import policy
+    if not cfg.mirror or not policy.on():
+        return None
     now = time.time() if now is None else now
     if mark is None:  # the Stop hook freezes it (hooks.hook_stop): a later take would rewrite it for the next turn
         mark = take_mark(session, now)
@@ -217,29 +224,38 @@ def on_reply(cfg: Config, session: str, title: str, reply: str, now: Optional[fl
 
         def translate(text: str) -> str:
             return translate_text(text, cfg, fast=True)
+    from . import radio_privacy, voice_digest
+    important = voice_digest.important(reply)
+    # Learn identifiers from the full source before formatting, shortening or any outside call.
+    sources = (title, reply, session, mark, cfg.gemini_vertex_account)
+    identifiers = radio_privacy.configured_identifiers(cfg)
+    title, reply, session = radio_privacy.scrub([title, reply, session], *sources, identifiers=identifiers)
     started = time.time()
     s = radio.settings(cfg)
+    s["project_names"] = radio_privacy.scrub(s["project_names"], *sources, identifiers=identifiers)
     line = brief_line(cfg, title, reply, s["project_names"], ask=ask, rewrite=s["rewrite_command"] or None,
                       translate=translate)
     if not line:
         return None
     name = _name(title, s["project_names"])
     say = line[len(name) + 2:] if line.startswith(name + ": ") else line
+    def stamp(key):
+        value = mark.get(key)
+        return value if type(value) in (int, float) else None
+
     record = {"text": line, "name": name, "say": say, "session": session[:8], "voice": bool(mark.get("voice")),
-              "sent_at": mark.get("sent_at"), "queued_at": mark.get("queued_at"), "taken_at": mark.get("taken_at"), "replied_at": now,
-              "line_secs": round(time.time() - started, 2)}
-    # The spool is durable: scrub every owner-controlled string even when the
-    # general outgoing redactor is disabled.
-    from . import radio_script as R
-    sensitive = []
-    for value in record.values():
-        if isinstance(value, str):
-            for address in R._EMAIL.findall(value):
-                sensitive.extend((address, address.split("@", 1)[0]))
-    record = {key: R.private_speech(value, sensitive) if isinstance(value, str) else value
-              for key, value in record.items()}
+              "sent_at": stamp("sent_at"), "queued_at": stamp("queued_at"), "taken_at": stamp("taken_at"), "replied_at": now,
+              "line_secs": round(time.time() - started, 2), "important": important, "trivial": False}
+    record = radio_privacy.scrub(record, *sources, identifiers=identifiers)
+    from .radio_suitability import suitable
+    if not suitable(record["text"]):
+        return None
+    # Both consumers get the same sanitized spoken record; the station may delete its copy immediately.
+    import uuid
+    key = f"{time.time_ns()}-{uuid.uuid4().hex}"
+    voice_digest.enqueue(cfg, key, record)
     spool = private_dir(radio.folder() / "replies")
-    write_private(spool / f"{time.time():.6f}-{SAFE.sub('_', session[:8])}.json", json.dumps(record, ensure_ascii=False))
+    write_private(spool / f"{key}.json", json.dumps(record, ensure_ascii=False))
     return record
 
 
@@ -248,7 +264,7 @@ MERGE_MAX = 25.0     # the longest the first reply of a bulletin waits for other
 BULLETIN_INTRO = "עדכונים מהצוות."
 
 
-def bulletin(records: List[dict], private_accounts=()) -> str:
+def bulletin(records: List[dict], private_accounts=(), max_chars=None) -> str:
     """Several replies that came close together as one flowing segment."""
     from . import radio_script as R
     sensitive = list(private_accounts)
@@ -260,7 +276,7 @@ def bulletin(records: List[dict], private_accounts=()) -> str:
     lines = [" ".join(str(r.get("text") or "").split()) for r in records]
     lines = [line if line.endswith((".", "!", "?")) else line + "." for line in lines if line]
     text = lines[0] if len(lines) == 1 else " ".join([BULLETIN_INTRO] + lines)
-    return R.whole(R.private_speech(text, sensitive), R.MAX_SCRIPT)
+    return R.whole(R.private_speech(text, sensitive), R.MAX_SCRIPT if max_chars is None else max_chars)
 
 
 def ready(records: List[dict], arrived: List[float], now: float) -> bool:

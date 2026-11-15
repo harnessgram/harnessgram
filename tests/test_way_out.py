@@ -25,11 +25,15 @@ EXEMPT = {
     ("cockpit_notice.py", "update", 0): "one link to the open Cockpit question; the notice closes itself once answered.",
     ("dialogs.py", "_background_card", 0): "one Move to background button; the card clears itself when the command ends or after the tap.",
     ("telegram.py", "full_width", 0): "reformats an existing keyboard without creating a menu.",
+    ("sensitive_buttons.py", "mark_markup", 0): "marks the sensitive buttons of an existing keyboard without creating a menu.",
+    ("inbox.py", "auto_compact", 0): "one Send-now button on the compaction notice; the compaction progress replaces it.",
+    ("inbox.py", "handle_button", 0): "the Send-now notice after a tap: one disabled status line that the compaction replaces.",
 }
 WAY_OUT_CALLBACKS = {"more:dismiss", "more:unbuttons", "more:back", "close:no", "say:no", "d:x", "k:esc", "sm:l"}
 WAY_OUT_PATTERNS = (r"mb:[id]:\{[^}]+\}(?::\{[^}]+\})?", r"dg:e:\{[^}]+\}",
                     r"g:\{[^}]+\}:[bx]", r"n:\{[^}]+\}:x", r"mv:\{[^}]+\}:x",
-                    r"(?:dl|vd):cancel:\{[^}]+\}", r"agclose:\{[^}]+\}")
+                    r"(?:dl|vd):cancel:\{[^}]+\}", r"agclose:\{[^}]+\}",
+                    r"pq:n:\{[^}]+\}")  # a permission request card's No declines it and closes the card
 WAY_OUT_HELPERS = {"menus.close_row", "menus.not_now_row", "menus.close_button",
                    "menus.unbuttons_row", "dismiss_button", "inbox.dismiss_button"}
 
@@ -391,6 +395,52 @@ def test_cockpit_dialogs_sheets_and_pickers_have_a_way_out():
     assert 'el("div","more-sheet")' in tabs and "setMore(sheet.hidden)" in tabs and "setMore(false)" in tabs
     assert '!sh.contains(e.target)' in code and 'setMore(false)' in code and 'sheet.hidden=!value' in func("setMore")
     code = code.replace('el("div","more-sheet")', "")
+    # The full-screen picture viewer of a choice card: a close button, Escape (cancel) and the back gesture all close it.
+    viewer = func("openCardImage")
+    assert 'el("dialog","card-image-viewer")' in viewer and 'bindBackLayer("card-image"' in viewer
+    assert 'close.addEventListener("click",function(){setOpen(false);})' in viewer
+    assert 'dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);})' in viewer
+    code = code.replace('el("dialog","card-image-viewer")', "").replace("dialog.showModal()", "")
+    topics = func("openTopicDetails")
+    assert 'el("dialog","topic-sheet")' in topics and 'bindBackLayer("topic-details"' in topics
+    assert 'close.addEventListener("click",function(){setOpen(false);})' in topics
+    assert 'dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);})' in topics
+    code = code.replace('el("dialog","topic-sheet")', "")
+    # The app request sheet (Tools → More): close button, Escape and the back gesture all close it.
+    ar = func("arOpen")
+    assert 'el("dialog","topic-sheet ar-sheet")' in ar and 'bindBackLayer("app-request"' in ar
+    assert 'close.addEventListener("click",function(){setOpen(false);})' in ar
+    assert 'dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);})' in ar
+    code = code.replace('el("dialog","topic-sheet ar-sheet")', "")
+    # The schedule add sheet (Now → My schedule): close button, Escape and the back gesture all close it.
+    sc = func("scOpen")
+    assert 'el("dialog","topic-sheet sc-sheet")' in sc and 'bindBackLayer("schedule-add"' in sc
+    assert 'close.addEventListener("click",function(){setOpen(false);})' in sc
+    assert 'dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);})' in sc
+    code = code.replace('el("dialog","topic-sheet sc-sheet")', "")
+    # The family board sheet (Now → My schedule → Family board): close button, Escape and the back gesture all close it.
+    fb = func("fbOpen")
+    assert 'el("dialog","topic-sheet fb-sheet")' in fb and 'bindBackLayer("family-board"' in fb
+    assert 'close.addEventListener("click",function(){fbEdit=null;setOpen(false);})' in fb
+    assert 'dialog.addEventListener("cancel",function(e){e.preventDefault();fbEdit=null;setOpen(false);})' in fb
+    code = code.replace('el("dialog","topic-sheet fb-sheet")', "")
+    # "What the system knows": the item sheet closes by its grab handle, a tap on the shade, Escape and the back
+    # gesture (its own back layer); its head and icon are parts of that one sheet.
+    sheet = func("vkSheet")
+    assert 'el("section","vk-sheet")' in sheet and 'sh.setAttribute("role","dialog")' in sheet
+    assert 'shade.addEventListener("click",function(){set(false);})' in sheet
+    assert 'close.addEventListener("click",function(){haptic("sel");set(false);})' in sheet
+    assert 'if(e.key==="Escape"){e.preventDefault();set(false);}' in sheet
+    assert 'bindBackLayer("vk-sheet",sheet,true' in func("vkPage")
+    for part in ('el("section","vk-sheet")', 'sh.setAttribute("role","dialog")', 'el("div","vk-sheet-head")',
+                 'el("span","vk-sheet-icon")'):
+        code = code.replace(part, "")
+    # The Mac maintenance sheet (Tools → More): close button, Escape and the back gesture all close it.
+    mt = func("mtOpen")
+    assert 'el("dialog","topic-sheet mt-sheet")' in mt and 'bindBackLayer("mac-tools"' in mt
+    assert 'close.addEventListener("click",function(){setOpen(false);})' in mt
+    assert 'dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);})' in mt
+    code = code.replace('el("dialog","topic-sheet mt-sheet")', "")
     # Refuse newly introduced dialog/sheet/popover APIs until this inventory is extended.
     assert not re.search(r'<dialog\b|el\(["\']dialog["\']|createElement\(["\']dialog["\']|\.showModal\s*\(|\.showPopover\s*\(|role["\']?\s*,\s*["\']dialog|el\(["\'][^"\']+["\']\s*,\s*["\'][^"\']*(?:modal|sheet|popover)', code, re.I)
     assert not re.search(r'el\(["\']select["\']|<select\b|["\']listbox["\']|\.type\s*=\s*["\'](?:time|datetime-local|month|week)["\']', code, re.I)
@@ -399,6 +449,31 @@ def test_cockpit_dialogs_sheets_and_pickers_have_a_way_out():
     assert 'S.ytCancel' in func("ytConfirm")
     assert 'ytArmed=null;load()' in func("ytConfirm")
     assert 'S.cancelIt' in func("forkRow") and 'delete forkArmed[s.id];draw()' in func("forkRow")
+    # The v2 shell has an explicit exit; its inline disclosures use the same
+    # back-aware, reversible compactBlock rather than a new modal surface.
+    prepare = func("v2Prepare")
+    assert 'exit.setAttribute("aria-label",V2.shell.wayOut)' in prepare
+    assert 'exit.addEventListener("click",backTap)' in prepare
+    assert 'mb=more.querySelector(".compact-toggle")' in func("v2Decision")
+    assert 'picture.appendChild(mb)' in func("v2Decision")
+    assert 'compactBlock("v2-older"' in func("v2Now")
+    # Old topics (Now): an inline disclosure, no dialog. Close-all arms on the first tap and offers Cancel,
+    # a finished close offers Reopen (undo) and a dismiss button.
+    cleanup = func("v2TopicCleanup")
+    assert 'compactBlock("v2-cleanup"' in cleanup and 'S.cancelIt' in cleanup and 'v2CleanupArmed=false;render(last,true)' in cleanup
+    assert 'V2.cleanup.reopen' in func("v2CleanupResultCard") and 'V2.cleanup.dismiss' in func("v2CleanupResultCard")
+    # Milestone 2: the project page is one back-aware layer with its own arrow; Tools, Team,
+    # System and Settings disclosures reuse compactBlock; the topic sheet is the existing dialog.
+    page = func("v2ProjectPage")
+    assert 'bindBackLayer("v2-project"' in page and 'back.addEventListener("click",function(){haptic("sel");setOpen(false);})' in page
+    assert 'aria-label",V2.projects.back' in page and "topicCard(t)" in page
+    assert 'v2ProjectClose()' in func("v2TabTap")
+    assert "compactBlock(" in func("v2SectionBlock") and "compactBlock(" in func("v2Settings") and "compactBlock(" in func("v2Radio")
     assert 'el("div","ytp")' in func("ytProjects")
     assert 'el("div","seg")' in func("modelCard")
+    # The podcast sheet (feed picker -> episode picker) is a fold with its own way back and no new dialog API.
+    pod = func("podcastCard")
+    assert 'fold("podadd",S.podAdd)' in pod and 'el("details"' not in pod
+    assert 'S.podBack' in pod and 'podUi.eps=null;render(last,false)' in pod  # from the episode list back to the feeds
+    assert re.search(r'el\("input"\)', pod) and 'inp.type="url"' in pod
     assert not re.search(r'\b(?:prompt|confirm)\s*\(', code)

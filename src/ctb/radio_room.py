@@ -31,8 +31,9 @@ Safety:
   plus- and cross-like signs replaced, one reading direction per line), the voice's own cleanup, an optional
   child-suitability rule file (`room_suitability_file`, a JSON file with a "pattern"), and a length limit.
 - Paid voice: the room has its own daily cap (`room_tts_daily_minutes`, default and hard ceiling
-  ROOM_TTS_CEILING_MINUTES, may be lowered to 0), counted in its own usage file apart from the radio's cap and
-  enforced before each synthesis (radio_voice.Usage.reserve); when it is used up the free local voice goes on.
+  ROOM_TTS_CEILING_MINUTES, may be lowered to 0), counted inside the shared radio budget and
+  enforced atomically with that budget before each synthesis (radio_voice.Usage.reserve); when either cap is
+  used up the free local voice goes on.
 - Text calls go through the bridge's Gemini route (translate.ask); every field is passed through
   creds.for_outside before it leaves; no new service.
 
@@ -178,7 +179,7 @@ def _path() -> Path:
 
 
 def usage_path() -> Path:
-    """The room's own paid-voice usage file: counted apart from the radio's (radio/tts-usage.json)."""
+    """Legacy room ledger, imported into the shared budget on upgrade; never used for new speech."""
     return folder() / "tts-usage.json"
 
 
@@ -491,9 +492,9 @@ def proposal_item(task: str, topic: str) -> str:
 def view(cfg: Config, now: Optional[float] = None) -> dict:
     """The room card's data: only cleaned text, never a digest or the raw discussion."""
     from . import radio
-    from .radio_voice import Usage
+    from .radio_voice import paid_usage
     s = radio.settings(cfg)
-    usage = Usage(usage_path())
+    usage = paid_usage(radio.folder()).for_room()
     out = {"enabled": enabled(), "lengths": sorted(LENGTHS), "tts_minutes_today": round(usage.today(now) / 60, 1),
            "tts_daily_minutes": tts_cap(s), "tts_ceiling": ROOM_TTS_CEILING_MINUTES}
     room = load()

@@ -80,6 +80,8 @@ def test_a_manual_account_move_clears_the_limit_hold(tmp_path, monkeypatch, bot)
     from ctb import accounts
     transcript(tmp_path, monkeypatch, [limit_row()])
     monkeypatch.setattr(I.time, "time", lambda: 1_793_268_100.0)
+    # The move's resume runs in a daemon thread that can outlive this test and type into tmux after the suite.
+    monkeypatch.setattr(I, "_resume_in_background", lambda session: None)
     topics, box, thread = setup(tmp_path, bot)
     accounts.add("spare")  # the move refuses a target whose folder is gone (removed meanwhile)
     result = [False]

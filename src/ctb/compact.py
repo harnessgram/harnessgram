@@ -30,7 +30,7 @@ CAP = 95  # the bar never shows more than this before the end
 DEFAULT_EXPECT = 90.0
 KEEP_DURATIONS = 10
 AUTO_COMPACT_STEPS = [0, 200, 250, 300, 400, 600]
-COLD_AFTER = 3600  # owner writes after >1h idle
+COLD_AFTER = 3600  # cache lifetime since the last assistant API activity
 COLD_MIN = 150_000  # context >=150k tokens worth compacting when cache is cold
 
 
@@ -273,6 +273,114 @@ def next_auto_compact_limit(cur: Optional[int] = None) -> int:
     return steps[(steps.index(c) + 1) % len(steps)] if c in steps else 400
 
 
+def last_api_activity(transcript: str) -> Optional[float]:
+    """Newest main-session assistant timestamp, bounded like context_state; unknown stays unknown."""
+    import math
+    from .usage import TAIL, _parse_time
+    try:
+        with open(transcript, "rb") as stream:
+            stream.seek(max(0, os.fstat(stream.fileno()).st_size - TAIL))
+            lines = stream.read(TAIL).decode("utf-8", "replace").splitlines()
+        stamps = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict) or row.get("type") != "assistant" or row.get("isSidechain"):
+                    continue
+                stamp = _parse_time(row.get("timestamp"))
+                if stamp is not None and math.isfinite(stamp) and stamp > 0:
+                    stamps.append(stamp)
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return max(stamps) if stamps else None
+    except OSError:
+        return None
+
+
+def cold_eligible(session: str, transcript: str, now: float) -> bool:
+    from .config import load
+    last = last_api_activity(transcript)
+    return (load().cold_compact == "on" and bool(limit_for(session)) and last is not None
+            and now - last >= COLD_AFTER)
+
+
+@contextlib.contextmanager
+def cold_lock(session: str):
+    """Attempt creation, timeout/cancel and the worker's side effects share this lock."""
+    path = _cold_path(session)
+    private_dir(path.parent)
+    with open(path.with_suffix(".lock"), "a") as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield path
+
+
+def cold_offer(session: str) -> str:
+    import secrets
+    token = secrets.token_hex(8)
+    with cold_lock(session) as path:
+        write_private(path, json.dumps({"token": token, "status": "waiting"}))
+    return token
+
+
+def _cold_path(session: str) -> Path:
+    path = marker(session)
+    return path.with_name(path.name + ".cold.json")
+
+
+def cold_status(session: str, token: str) -> str:
+    try:
+        rec = json.loads(_cold_path(session).read_text())
+        return rec.get("status", "") if rec.get("token") == token else ""
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def cold_transition(session: str, token: str, status: str) -> bool:
+    with cold_lock(session) as path:
+        if cold_status(session, token) != "waiting":
+            return False
+        write_private(path, json.dumps({"token": token, "status": status}))
+        return True
+
+
+@contextlib.contextmanager
+def cold_submission(session: str, token: str):
+    """Serialize the final terminal gate with timeout/cancel, through the Enter attempt."""
+    with cold_lock(session) as path:
+        def start():
+            if cold_status(session, token) != "waiting":
+                raise ValueError("cold compaction cancelled")
+            write_private(path, json.dumps({"token": token, "status": "started"}))
+        submission = {"before_enter": start, "sent": False}
+        try:
+            yield submission if cold_status(session, token) == "waiting" else None
+        finally:
+            if not submission["sent"] and cold_status(session, token) in ("waiting", "started"):
+                write_private(path, json.dumps({"token": token, "status": "cancelled"}))
+
+
+def cold_timeout(session: str, token: str) -> bool:
+    """Cancel this exact late worker before falling back; a worker that already claimed Enter wins."""
+    with cold_lock(session) as path:
+        status = cold_status(session, token)
+        if status == "waiting":
+            write_private(path, json.dumps({"token": token, "status": "cancelled"}))
+        return status == "started"
+
+
+def wait_cold(session: str, token: str, started: float, timeout: float,
+              clock: Callable[[], float], sleep: Callable[[float], None], interval: float) -> bool:
+    """Wait for this worker's submission, never an unrelated session-wide marker."""
+    while clock() - started < timeout:
+        with cold_lock(session):
+            status = cold_status(session, token)
+        if status != "waiting":
+            return status == "started"
+        sleep(interval)
+    return cold_timeout(session, token)
+
+
 def cold_compact(session: str, transcript: str, idle_since: float,
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep,
@@ -280,9 +388,9 @@ def cold_compact(session: str, transcript: str, idle_since: float,
     """The owner writes after >1h idle with context >=150k:
     the whole context is re-read at full price anyway, so compact first.
     Starts the compaction and returns True; the message stays queued and the waiter started
-    after the compaction delivers it. Falls back to delivery if no compaction marker within 30 s."""
+    after the compaction delivers it. Falls back to delivery after cancelling this attempt if it has not submitted within 30 s."""
     try:
-        if clock() - idle_since < COLD_AFTER:
+        if not cold_eligible(session, transcript, clock()):
             return False
         if not limit_for(session):
             return False  # automatic compaction is off, for everything or for this session
@@ -291,25 +399,20 @@ def cold_compact(session: str, transcript: str, idle_since: float,
         if ctx < COLD_MIN:
             return False
         started = clock()
+        attempt = cold_offer(session)
         if auto_compact_fn is not None:
-            auto_compact_fn(session, ctx, cold=True)
+            auto_compact_fn(session, ctx, cold=True, cold_attempt=attempt)
         else:
             try:
                 from .inbox import auto_compact as inbox_auto_compact
                 import threading
-                threading.Thread(target=lambda: inbox_auto_compact(session, ctx, cold=True), daemon=True).start()
+                threading.Thread(target=lambda: inbox_auto_compact(session, ctx, cold=True, cold_attempt=attempt), daemon=True).start()
             except Exception:
                 pass
-        mark = marker(session)
-        while clock() - started < 30:
-            try:
-                if mark.exists() and mark.stat().st_mtime >= started - 1:
-                    return True
-            except OSError:
-                pass
-            sleep(1)
-        return False
+        return wait_cold(session, attempt, started, 30, clock, sleep, 1)
     except Exception:
+        if "attempt" in locals():
+            cold_timeout(session, attempt)
         return False
 
 
@@ -347,12 +450,15 @@ def auto_compact_after_reply(session: str, transcript: str,
         return False
 
 
-def spawn_auto_compact(session: str, ctx: int | float, cold: bool = False, note: str = "", asked: bool = False) -> bool:
+def spawn_auto_compact(session: str, ctx: int | float, cold: bool = False, note: str = "", asked: bool = False,
+                       cold_attempt: str = "") -> bool:
     """Run the auto-compaction in its own detached process: a hook exits right away, and a thread
     of it would die with it, freezing the progress message (review of 3b3c59a)."""
     from .launch import argv
     # one argument per option: a note that starts with a dash must never read as an option
     extra = (["--asked"] if asked else []) + (["--note=" + clean_note(note)] if note else [])
+    if cold_attempt:
+        extra.append("--cold-attempt=" + cold_attempt)
     try:
         subprocess.Popen([*argv(), "auto-compact", session, str(int(ctx)), *(["cold"] if cold else []), *extra],
                          start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -236,7 +236,19 @@ def test_topic_button_opens_that_topics_view(server):
     assert b["link"] == [{"text": "Preview", "url": "https://example.com/p"}]
     assert {d["title"]: d["here"] for d in body["decisions"]} == {"Merge now?": True, "Elsewhere?": False}
     assert [s["id"] for s in body["sessions"] if s["here"]] == ["abcd1234"]
-    assert "11" not in json.dumps(body["topic"])  # ids stay on the server
+    def values(x):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                yield k
+                yield from values(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from values(v)
+        else:
+            yield x
+    seen = list(values(body["topic"]))
+    # ids stay on the server (checked as values, not digits: a timestamp may contain "11")
+    assert 11 not in seen and "11" not in seen and "thread" not in seen and chat not in seen
 
 
 def test_unknown_or_malformed_start_param_gives_the_general_view(server):

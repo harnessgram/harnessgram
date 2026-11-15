@@ -54,7 +54,7 @@ class Pane:
     """A fake Claude Code pane: an input box and an optional tip notice. `tip_has_keys`: the notice takes
     number keys and Enter (Enter then sends nothing); otherwise keys go to the input box."""
 
-    def __init__(self, tip=ONE_ROW, tip_has_keys=True, box=""):
+    def __init__(self, tip=ONE_ROW, tip_has_keys=False, box=""):
         self.tip, self.tip_has_keys, self.box, self.sent, self.calls = tip, tip_has_keys, box, [], []
 
     def render(self) -> str:
@@ -95,25 +95,14 @@ def pane(monkeypatch):
     return p
 
 
-def test_the_notice_is_dismissed_with_its_own_key_before_typing(pane):
-    assert I.dismiss_tip("%1") and pane.tip == "" and pane.box == ""
-    assert ("send-keys", "-t", "%1", "0") in pane.calls
-
-
-def test_a_zero_that_landed_in_the_box_is_taken_out(monkeypatch):
-    p = Pane(tip_has_keys=False)
+@pytest.mark.parametrize("tip_has_keys", [True, False])
+@pytest.mark.parametrize("box", ["", "git commit -m "])
+def test_notice_probe_never_sends_keys(monkeypatch, tip_has_keys, box):
+    p = Pane(tip_has_keys=tip_has_keys, box=box)
     monkeypatch.setattr(I, "_tmux", p)
-    monkeypatch.setattr(I.time, "sleep", lambda _: None)
-    assert not I.dismiss_tip("%1")
-    assert p.box == ""  # the "0" went into the box and came out again
-
-
-def test_a_zero_after_a_draft_that_ends_in_a_space_is_taken_out_too(monkeypatch):
-    p = Pane(tip_has_keys=False, box="git commit -m ")  # review of #156: the box is read with spaces folded
-    monkeypatch.setattr(I, "_tmux", p)
-    monkeypatch.setattr(I.time, "sleep", lambda _: None)
-    assert not I.dismiss_tip("%1")
-    assert p.box == "git commit -m "
+    assert I.dismiss_tip("%1")
+    assert p.tip == ONE_ROW and p.box == box
+    assert not [c for c in p.calls if c[0] == "send-keys"]
 
 
 def test_a_nudge_presses_nothing_into_the_owners_draft(monkeypatch):
@@ -186,6 +175,9 @@ def session_rig(pane, monkeypatch):
     thread = TopicMap(state_dir() / "topics.json", bot, OWNER).ensure(SID, "Bridge")
     write_private(state_dir() / "tmux-panes.json", json.dumps({SID: "%1"}))
     monkeypatch.setattr(I, "pane_for_session", lambda s: "%1")
+    monkeypatch.setattr(I, "_pane_from_process", lambda s: "%1" if s == SID else None)
+    from ctb import idle_lines
+    monkeypatch.setattr(idle_lines, "_foreground_claude", lambda p, s: p == "%1" and s == SID)
     monkeypatch.setattr(I, "_terminal_background", lambda s, action: action() or True)
     monkeypatch.setattr(I, "session_busy", lambda s: False)
     started = []

@@ -693,6 +693,10 @@ def test_wake_writes_done_instead_of_its_own_notice_and_precompact_is_skipped(ho
 def test_compact_from_the_keyboard_starts_the_progress_message(home, bot, monkeypatch):
     topics, box, thread = rig(bot)
     write("tmux-panes.json", {SID: "%5"})
+    # A saved pane id alone is staleable; model the live session and its foreground Claude process too.
+    monkeypatch.setattr(I, "_pane_from_process", lambda session: "%5" if session == SID else None)
+    monkeypatch.setattr(I, "session_pid", lambda session: 42 if session == SID else None)
+    monkeypatch.setattr(I, "_pane_claude_targets", lambda pane: [(42, "start")] if pane == "%5" else [])
     started = []
     monkeypatch.setattr(I, "_tmux", BoxedTmux(lambda *a: SimpleNamespace(returncode=0, stdout="", stderr="")))
     monkeypatch.setattr(I, "pane_text", lambda pane, lines=45: "idle")

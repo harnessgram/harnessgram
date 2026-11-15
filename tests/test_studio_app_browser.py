@@ -287,7 +287,7 @@ window.__seen = []; window.__answer = __ANSWER__; window.__hello = __HELLO__;
 addEventListener("message", function (e) {
   var m = e.data || {}; window.__seen.push(m);
   var f = document.getElementById("f").contentWindow; if (e.source !== f) return;
-  if (m.cockpit === "hello" && window.__hello) f.postMessage({cockpit: "hello", initData: "x", lang: "he", dir: "rtl", theme: "", focus: false, inset: {bottom: 34}}, "*");
+  if (m.cockpit === "hello" && window.__hello) f.postMessage({cockpit: "hello", token: "scoped-test-token", lang: "he", dir: "rtl", theme: "", focus: false, inset: {bottom: 34}}, "*");
   if (m.cockpit === "api") f.postMessage({cockpit: "api", id: m.id, status: window.__answer.status, data: window.__answer.data}, "*");
   if (m.cockpit === "back_done") window.__confirmed = true;
 });

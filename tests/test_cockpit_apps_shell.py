@@ -22,16 +22,20 @@ DOC = (Path(__file__).resolve().parent.parent / "docs" / "panel.md").read_text(e
 needs_node = pytest.mark.skipif(not NODE, reason="node is not installed")
 
 FUNCS = ("appOf", "activeApp", "uiOf", "frameName", "appCmd", "resetApp", "leaveApp", "freshFrame", "frameLoaded",
+         "getAppAuth", "forgetAppAuth", "appAuthError", "clearAppErr", "appFailed",
+         "appsOf", "appNamed", "appTitle", "showApp",
          "authFailed", "onAppMessage", "backTap", "appBackLayer", "pushBack", "backDepth", "retireBack",
          "bindBackLayer", "travelBack", "restoreBack", "trimBack", "currentBackLayer")
 
 PRELUDE = r"""
 var out = [], timers = [], clock = 100000, view = "app:sample", last = {sessions: []}, wa = {initData: "INIT"}, LANG = "he", RTL = true;
 var appFrames = {}, appUi = {}, backWait = {}, helloAt = {}, layoutSent = {};
+var appAuth = {sample: {token: "sample-token", expires: 1000}, other: {token: "other-token", expires: 1000}}, delivered = [];
 var backEntries = [{active:true,undo:function(){switchTo(home());},redo:function(){switchTo("app:sample");}}];
 var backIndex=1,backPending=false,backReplay=false,backHistory=false,backLayers={},backTrim=null,backSwitch=null;
 var APP_BODY = 16384, APP_BADGE_MAX = 999, BACK_WAIT = 1200, HELLO_SAME_PAGE = 2000;
-function mkWin(name) { return {postMessage: function (m) { out.push(["post", name, m.cockpit, m.focus]); }}; }
+var APP_NAME=/^[a-z0-9-]{1,24}$/, ICONS={box:"box"};
+function mkWin(name) { return {postMessage: function (m) { out.push(["post", name, m.cockpit, m.focus]); delivered.push([name,m]); }}; }
 var winSample = mkWin("sample"), winOther = mkWin("other"), winForeign = mkWin("foreign");
 appFrames.sample = {contentWindow: winSample, hidden: false};
 appFrames.other = {contentWindow: winOther, hidden: true};
@@ -50,12 +54,15 @@ function radioPlayerStop() { out.push(["player-stop"]); }
 function tabs() { out.push(["tabs"]); }
 function openChat() { out.push(["chat"]); }
 function appLayout(n) { return {focus: !!uiOf(n).focus, inset: {bottom: 0}}; }
-function toApp(n, msg) { out.push(["to", n, msg.cockpit]); }
+function toApp(n, msg) { out.push(["to", n, msg.cockpit]); delivered.push([n,msg]); }
 function switchTo(v) { view = v; out.push(["switch", v]); }
 function home() { return "me"; }
 function haptic() {}
 function fail() { out.push(["fail"]); }
-var S = {reopen: "x"};
+var S = {reopen: "x", offline: "o", retry: "r"};
+var appErr = null;
+function empty() { var c = {className: "card empty", attrs: {}, setAttribute: function (k, v) { this.attrs[k] = v; }, getAttribute: function (k) { return this.attrs[k]; }, appendChild: function () {}}; return c; }
+function el() { return {type: "", addEventListener: function () {}}; }
 var window = {addEventListener: function () {}};
 function pushLayout() {}
 function msg(win, data, origin) { onAppMessage({source: win, origin: origin === undefined ? "null" : origin, data: data}); }
@@ -65,7 +72,7 @@ function msg(win, data, origin) { onAppMessage({source: win, origin: origin === 
 def scenario(body: str):
     """Run the page's own functions in node and return what the stubs recorded (`out`)."""
     src = PRELUDE + "\n".join(func(n) for n in FUNCS) + "\n(async function () {\n" + body + \
-        "\nprocess.stdout.write(JSON.stringify({out: out, ui: appUi, view: view, boxes: boxes}));\n})();"
+        "\nawait new Promise(function(r){setImmediate(r);});\nprocess.stdout.write(JSON.stringify({out: out, ui: appUi, view: view, boxes: boxes, delivered: delivered}));\n})();"
     done = subprocess.run([NODE, "-e", src], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout)
@@ -220,6 +227,117 @@ def test_an_auth_error_leaves_the_app_and_unfolds_everything_before_the_error_sh
     assert ["post", "sample", "api", None] in got["out"] or any(e[:3] == ["post", "sample", "api"] for e in got["out"])
     kinds = [e[0] for e in got["out"]]
     assert kinds.index("fail") > max(i for i, k in enumerate(kinds) if k == "chrome")  # unfolded first, then the error
+
+
+@needs_node
+def test_hello_and_api_use_only_the_sending_apps_token():
+    got = scenario('''
+        globalThis.fetch = function (path, options) {
+          out.push(["fetch", path, options]);
+          return Promise.resolve({status: 200, json: function () { return Promise.resolve({ok: true}); }});
+        };
+        msg(winSample, {cockpit: "hello"});
+        msg(winOther, {cockpit: "hello"});
+        msg(winSample, {cockpit: "api", id: 1, body: {app: "other"}});
+    ''')
+    hellos = {name: m for name, m in got["delivered"] if m["cockpit"] == "hello"}
+    assert hellos["sample"]["token"] == "sample-token" and hellos["other"]["token"] == "other-token"
+    assert "INIT" not in json.dumps(got["delivered"]) and "initData" not in json.dumps(got["delivered"])
+    fetched = effects(got, "fetch")
+    assert len(fetched) == 1 and fetched[0][1] == "/app/sample/api"
+    assert fetched[0][2]["headers"] == {"X-Cockpit-App-Token": "sample-token", "Content-Type": "application/json"}
+
+
+@needs_node
+def test_the_parent_mints_and_refreshes_before_expiry_without_reloading_the_frame():
+    got = scenario('''
+        appAuth = {}; var calls=0;
+        globalThis.fetch = function(path, options) {
+          out.push(["mint", path, options]);
+          return Promise.resolve({status: 200, json: function() {
+            return Promise.resolve({token: "scoped-"+(++calls), expires: clock/1000+600});
+          }});
+        };
+        await Promise.all([getAppAuth("sample"), getAppAuth("sample")]);
+        tick(480000);
+        await new Promise(function(r){setImmediate(r);});
+        msg(winSample, {cockpit:"hello"});
+        await new Promise(function(r){setImmediate(r);});
+        out.push(["frame", appFrames.sample.contentWindow === winSample]);
+    ''')
+    minted = effects(got, "mint")
+    assert len(minted) == 2  # concurrent requests share one mint; one automatic refresh
+    assert all(m[1] == "/api/app-token" and json.loads(m[2]["body"]) == {"app": "sample"} for m in minted)
+    assert all(m[2]["headers"]["X-Telegram-Init-Data"] == "INIT" for m in minted)
+    refreshed = [m for name, m in got["delivered"] if m["cockpit"] == "auth"]
+    assert refreshed == [{"cockpit": "auth", "token": "scoped-2", "expires": 1180}]
+    assert "INIT" not in json.dumps(got["delivered"])
+    assert effects(got, "frame") == [["frame", True]]
+
+
+@needs_node
+def test_removing_auth_discards_pending_mints_and_cancels_refresh():
+    got = scenario('''
+        appAuth = {}; var resolve;
+        globalThis.fetch = function() { return new Promise(function(r){resolve=r;}); };
+        var request=getAppAuth("sample");
+        forgetAppAuth("sample");
+        resolve({status:200, json:function(){return Promise.resolve({token:"late", expires:700});}});
+        try {await request;} catch(e) {out.push(["retired",true]);}
+        tick(600000);
+    ''')
+    assert effects(got, "retired") == [["retired", True]] and not got["delivered"]
+
+
+@needs_node
+def test_frame_url_and_hello_never_contain_the_full_owner_login():
+    got = scenario('''
+        appFrames={}; appAuth={};
+        var box=document.getElementById("apps");
+        box.setAttribute=function(){};
+        box.appendChild=function(f){f.parentNode=box;out.push(["url",f.src]);};
+        document.createElement=function(){return {contentWindow:winSample,setAttribute:function(){},addEventListener:function(){}};};
+        globalThis.fetch=function(){return Promise.resolve({status:200,json:function(){return Promise.resolve({token:"scoped-url-token",expires:700});}});};
+        last={apps:[{name:"sample",title:"Sample",icon:"box"}]};
+        showApp(last);
+        await new Promise(function(r){setImmediate(r);});
+        msg(winSample,{cockpit:"hello"});
+    ''')
+    assert effects(got, "url") == [["url", "/app/sample/?auth=scoped-url-token"]]
+    assert got["delivered"][0][1]["token"] == "scoped-url-token"
+    assert "INIT" not in json.dumps(got) and "initData" not in json.dumps(got)
+
+
+@needs_node
+def test_a_transient_refresh_failure_retries_without_reloading_the_app():
+    got = scenario('''
+        appAuth={};var count=0;
+        globalThis.fetch=function(){
+          ++count;if(count===2)return Promise.reject(new Error("offline"));
+          return Promise.resolve({status:200,json:function(){return Promise.resolve({token:"scoped-"+count,expires:clock/1000+600});}});
+        };
+        await getAppAuth("sample");tick(480000);
+        await new Promise(function(r){setImmediate(r);});
+        tick(5000);await new Promise(function(r){setImmediate(r);});
+        out.push(["calls",count]);
+    ''')
+    assert effects(got, "calls") == [["calls", 3]]
+    assert [m for name, m in got["delivered"] if m["cockpit"] == "auth"] == [
+        {"cockpit": "auth", "token": "scoped-3", "expires": 1185}]
+    assert not effects(got, "fail")
+
+
+@needs_node
+def test_a_frame_reloaded_after_its_original_url_expires_uses_the_parents_current_token():
+    got = scenario('''
+        appFrames.sample.appTokenExpires=90;
+        appFrames.sample.src="/app/sample/?auth=expired-token";
+        frameLoaded("sample");
+        await new Promise(function(r){setImmediate(r);});
+        out.push(["url", appFrames.sample.src]);
+    ''')
+    assert effects(got, "url") == [["url", "/app/sample/?auth=sample-token"]]
+    assert not got["delivered"]  # only an actual navigation reloads the page
 
 
 # --- source checks (always run) --------------------------------------------------------------------

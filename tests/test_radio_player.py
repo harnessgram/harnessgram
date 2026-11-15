@@ -256,7 +256,7 @@ function el(tag,cls,text){
 }
 const box=el("div"),document={getElementById:()=>box,body:el("body")};
 const S={radio:"Radio",radioLive:"Live",radioPlayerOff:"Off",radioPlay:"Play",radioPause:"Pause",radioPlayerError:"Error"};
-let view="me",targetClosed=false;function home(){return "me";}
+let view="me",targetClosed=false;function home(){return "me";}function v2RadioArtwork(){}
 let info={enabled:true,on:true,token:"first",expires:600},status=200;
 function post(){return Promise.resolve({ok:status===200,status,json:()=>Promise.resolve(info)});}
 '''

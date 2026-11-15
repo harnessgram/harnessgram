@@ -1,7 +1,10 @@
 """Private, durable outbox for reply parts and delivery notices.
 
 Session locks serialize send/enqueue and send/remove without holding the queue
-lock during network calls. Never log payloads. Telegram has no idempotency key, so delivery
+lock during network calls. A part of a reply whose translation is still running carries
+`hold_until`: the drain leaves that session alone until the reply's own process replaces the
+part with its translation or releases it (the hold expires on its own if that process died).
+Never log payloads. Telegram has no idempotency key, so delivery
 is at-least-once: there is a narrow duplicate window if the process crashes after Telegram
 accepts a message but before the local removal is committed.
 """
@@ -123,6 +126,9 @@ def _drain_session(sender, session, now) -> int:
             entry = next((e for e in load(path, now) if e["session"] == session), None)
         if entry is None:
             break
+        hold = entry.get("hold_until")
+        if isinstance(hold, (int, float)) and hold > time.time():
+            break  # its translation is still running: the session waits, keeping its order
         try:
             found = sender.topics.place_of(entry["session"])
             chat = found.chat if found else entry["chat"]

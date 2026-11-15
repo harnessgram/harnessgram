@@ -139,7 +139,7 @@ def test_one_detached_run_per_request_and_a_refusal_frees_it(monkeypatch, capsys
     monkeypatch.setattr(inbox, "auto_compact", lambda s, ctx, cold=False, **kw: calls.append(kw) or False)
     compact.ask("s", "- keep the plan")                # a note that starts with a dash
     assert cli.main(["auto-compact", "s", "250000", "--asked"]) == 0
-    assert calls == [{"note": "- keep the plan", "asked": True}] * compact.ASK_TRIES  # refused: tried again here
+    assert calls == [{"note": "- keep the plan", "asked": True, "cold_attempt": ""}] * compact.ASK_TRIES  # refused: tried again here
     assert compact.peek_ask("s") is not None and not compact.claimed("s")    # and still free for a later turn
 
     def typed(s, ctx, cold=False, **kw):               # /compact was typed and the compaction runs

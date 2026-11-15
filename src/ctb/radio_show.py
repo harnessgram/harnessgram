@@ -2,7 +2,7 @@
 
 The pipeline asks `frame()` FPS times a second and gets JPEG bytes, and `strip()` for the news ticker that the
 encoder scrolls along the bottom (radio.encoder_args crops a moving window out of it, so the ticker moves
-smoothly without any drawing here). Between changes the picture is the same cached JPEG: no drawing at all.
+in small steps without any drawing here). Between changes the picture is the same cached JPEG: no drawing at all.
 A background thread (`run`) does the rest, off the stream's clock:
 - rotation: the overview, then each project's wall of notes, then the owner's desk; each stays for its dwell
   time and the next one slides in (radio_paint.transition). Transitions are cached per picture pair;
@@ -38,6 +38,7 @@ CACHE = 24                      # transitions kept in memory
 KEEP_PICTURES = 24              # slide pictures kept on disk (the oldest go first)
 SEEN_FOR = 2 * 3600.0           # a landing is remembered this long after it was last listed (it lists for an hour)
 TICKER_SPEED = 6                # pixels per frame (60 px a second at 10 fps)
+TICKER_STEP_FRAMES = 3          # advance every third input frame, retaining the same average speed
 
 
 # The only files a show writes, by name: clearing a folder removes these and nothing else.
@@ -146,7 +147,8 @@ class BoardShow:
     def cycle(self) -> int:
         """The encoder's scroll cycle: its window wraps every HALF pixels. A plain counter of frames handed out,
         never reset by a change of content, so the windows keep walking through the whole list."""
-        return (self.strip_n * TICKER_SPEED) // radio_paint.HALF
+        stepped = (self.strip_n // TICKER_STEP_FRAMES) * TICKER_STEP_FRAMES
+        return (stepped * self.strip_speed) // radio_paint.HALF
 
     def strip(self) -> bytes:
         """The ticker strip for the encoder's next frame: the strip of the current cycle (window k flowing into

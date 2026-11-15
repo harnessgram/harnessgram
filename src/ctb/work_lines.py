@@ -2,7 +2,8 @@
 
 A provider gives plain work items, one row per tracked item:
     {"line": key, "name": shown name, "id": str, "text": str, "status": "open" | "done",
-     "wait": "owner" | "", "updated": epoch seconds, "note": the item's latest note or ""}
+     "wait": "owner" | "", "updated": epoch seconds, "note": the item's latest note or "",
+     "impact": what it changes for the owner ("" when no one wrote it)}
 `line` is a project key (radio_board.project_key spelling: case and spacing folded), so a ledger file stem, a
 project group's name and a session title prefix meet on the same line.
 
@@ -70,6 +71,23 @@ def _text(value) -> str:
     return text if len(text) <= TEXT_CHARS else text[:TEXT_CHARS - 1] + "…"
 
 
+IMPACT_PREFIX = re.compile(r"^\s*impact\s*:\s*", re.I)
+
+
+def split_notes(item: dict) -> tuple:
+    """(latest ordinary note, impact text) of a ledger item. The impact is the item's `impact` field, else the
+    newest note that starts with "impact:" (what a ledger tool's `note <id> "impact: ..."` writes); an
+    impact note is never also the item's latest note."""
+    notes = item.get("notes") if isinstance(item.get("notes"), list) else []
+    texts = [n.get("text") if isinstance(n, dict) else n for n in notes]
+    texts = [n for n in texts if isinstance(n, str) and n.strip()]
+    impact = item.get("impact") if isinstance(item.get("impact"), str) else ""
+    if not impact.strip():
+        impact = next((IMPACT_PREFIX.sub("", n, count=1) for n in reversed(texts) if IMPACT_PREFIX.match(n)), "")
+    last = next((n for n in reversed(texts) if not IMPACT_PREFIX.match(n)), "")
+    return last, impact
+
+
 def rows_of(project: str, data) -> List[dict]:
     """The checked rows of one project's ledger data ({"items": [...]}); anything odd is left out."""
     project = project_name(project)
@@ -86,12 +104,11 @@ def rows_of(project: str, data) -> List[dict]:
         if updated is None or created is None:
             continue
         updated = updated or created
-        notes = it.get("notes") if isinstance(it.get("notes"), list) else []
-        last = next((n for n in reversed(notes) if isinstance(n, str) and n.strip()), "")
+        last, impact = split_notes(it)
         out.append({"line": line_key(project), "name": project, "id": str(it.get("id", ""))[:20],
                     "text": _text(it["text"]), "status": it["status"],
                     "wait": "owner" if it.get("wait") == "owner" else "", "updated": updated,
-                    "note": _text(last) if last else ""})
+                    "note": _text(last) if last else "", "impact": _text(impact) if impact.strip() else ""})
     return out
 
 

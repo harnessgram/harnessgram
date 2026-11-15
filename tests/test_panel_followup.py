@@ -196,3 +196,14 @@ def test_radio_words_need_the_radio_a_fresh_login_and_a_running_station(monkeypa
 
 def test_radio_words_are_refused_without_a_configured_radio(server):
     assert call(server, path="/api/radio-say", init=signed(), body=b'{"text": "hi"}')[0] == 404
+
+
+def test_voice_digest_setting_round_trip_requires_owner_auth(server):
+    for value in ("off", "important", "hourly", "every_3_hours"):
+        body = json.dumps({"name": "voice_digest", "value": value}).encode()
+        assert call(server, path="/api/setting", body=body)[0] == 403
+        code, _, data = call(server, path="/api/setting", init=signed(), body=body)
+        assert code == 200 and json.loads(data)["settings"]["voice_digest"] == value
+        assert json.loads(call(server, init=signed())[2])["settings"]["voice_digest"] == value
+    body = json.dumps({"name": "voice_digest", "value": "daily"}).encode()
+    assert call(server, path="/api/setting", init=signed(), body=body)[0] == 400

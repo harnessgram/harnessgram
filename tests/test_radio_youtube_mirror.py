@@ -206,13 +206,14 @@ def test_no_broadcast_without_live_home_audio(condition):
     assert not Y._state().get("broadcast_id")
 
 
-def test_mirror_creates_unlisted_broadcast_only_with_standing_start_and_hls():
+def test_mirror_creates_private_broadcast_only_with_standing_start_and_hls():
     c = mirror_cfg()
     live_home()
     Y.set_mirror(c, True)
     st, g = station(c)
     assert st.ensure_broadcast(st.service)
-    assert g.did("POST", "/liveBroadcasts")[0][3]["status"]["privacyStatus"] == "unlisted"
+    # the mirror carries the whole home audio (family schedule included): private, never unlisted
+    assert g.did("POST", "/liveBroadcasts")[0][3]["status"]["privacyStatus"] == "private"
     assert Y._state()["edition"] == "mirror" and Y._state()["owner_start"]
     assert st.ensure_broadcast(st.service)
     assert len(g.did("POST", "/liveBroadcasts")) == 1
@@ -248,6 +249,49 @@ def test_bridge_switched_off_during_setup_creates_no_broadcast(monkeypatch):
     assert not g.did("POST", "/liveBroadcasts")
 
 
+
+@pytest.mark.parametrize("stage", ["network", "encoder"])
+@pytest.mark.parametrize("revoked", ["rules", "enabled", "owner"])
+def test_mirror_rechecks_permission_after_slow_setup(monkeypatch, stage, revoked):
+    c = mirror_cfg()
+    live_home()
+    Y.set_mirror(c, True)
+    current = [Y.settings(c)]
+    owner_ok = [True]
+    original_started = Y.mirror_started
+    monkeypatch.setattr(Y, "mirror_started", lambda: owner_ok[0] and original_started())
+
+    def revoke():
+        if revoked == "rules":
+            current[0] = dict(current[0], filters={"reason": Y.RULES_INVALID})
+        elif revoked == "enabled":
+            current[0] = dict(current[0], enabled=False)
+        else:
+            owner_ok[0] = False
+
+    class Google(FakeGoogle):
+        def __call__(self, *args, **kwargs):
+            result = super().__call__(*args, **kwargs)
+            if stage == "network" and self.did("POST", "/liveStreams"):
+                revoke()
+            return result
+
+    st, g = station(c, Google())
+    st.reload = lambda: current[0]
+    monkeypatch.setattr(st, "start_board", lambda: setattr(st, "show", SimpleNamespace(failed="")))
+    def pick_encoder(*args):
+        if stage == "encoder":
+            revoke()
+        return "libx264"
+    monkeypatch.setattr(radio, "pick_encoder", pick_encoder)
+    monkeypatch.setattr(radio, "Pipeline", lambda *a, **k: pytest.fail("encoder must not start"))
+    monkeypatch.setattr(st, "give_up", lambda **kw: 0)
+    assert st._run() == 0
+    assert bool(g.did("POST", "/liveBroadcasts")) == (stage == "encoder")
+    if stage == "encoder":
+        assert g.did("DELETE", "/liveBroadcasts")
+    assert not Y._state().get("broadcast_id")
+
 def test_mirror_pipeline_reads_hls_and_full_board_never_staff(monkeypatch):
     c = mirror_cfg()
     live_home()
@@ -282,10 +326,12 @@ def test_mirror_board_uses_home_collector(monkeypatch):
     st, _ = station()
     seen = []
     st.show = SimpleNamespace(update=lambda projects: seen.append(projects))
-    monkeypatch.setattr(radio_board, "gather", lambda *a: {"home": True})
+    asked = []
+    monkeypatch.setattr(radio_board, "gather", lambda *a, **k: asked.append(k) or {"home": True})
     monkeypatch.setattr(radio_board, "collect", lambda source, *a, **k: [source])
     st.feed_board()
     assert seen == [[{"home": True}]]
+    assert asked == [{"public_only": True}]  # the mirror is public: only public cards are read
 
 
 @pytest.mark.parametrize("encoder", ["libx264", "h264_videotoolbox"])
@@ -376,7 +422,7 @@ def test_missing_playlist_waits_then_reconnects_without_failure_budget(monkeypat
         live_home()
     monkeypatch.setattr(st.quit, "wait", wait)
     assert st._run() == 0
-    assert len(runs) == 2 and waits == [1]
+    assert len(runs) == 2 and waits == [5]
     assert len(g.did("POST", "/liveBroadcasts")) == 2
     assert not Y._read(Y.folder() / "failures.json") and Y.mirror_started() and radio.wanted()
 
@@ -406,6 +452,114 @@ def test_bridge_off_midstream_ends_broadcast_and_preserves_home(monkeypatch):
     assert st._run() == 0
     assert len(g.did("POST", "/liveBroadcasts")) == 1 and g.did("DELETE", "/liveBroadcasts")
     assert Y.mirror_started() and radio.wanted()
+
+
+def test_invalid_rules_stop_live_mirror_and_block_resume(monkeypatch):
+    c = mirror_cfg()
+    live_home()
+    Y.set_mirror(c, True)
+    st, g = station(c)
+    valid = Y.settings(c)
+    invalid = dict(valid, filters={"reason": Y.RULES_INVALID})
+    current = [valid]
+    st.reload = lambda: current[0]
+    assert st.ensure_broadcast(st.service)
+    monkeypatch.setattr(st, "start_board", lambda: setattr(st, "show", SimpleNamespace(failed="")))
+    monkeypatch.setattr(radio, "pick_encoder", lambda *a: "libx264")
+    class Pipeline:
+        def __init__(self, *a, **kw):
+            self.keep = kw["keep"]
+        def run(self):
+            current[0] = invalid
+            assert not self.keep()
+            assert not st.ensure_broadcast(st.service)
+            return radio.MIRROR_OFF
+        def close(self):
+            pass
+    monkeypatch.setattr(radio, "Pipeline", Pipeline)
+    monkeypatch.setattr(st, "give_up", lambda **kw: 0)
+    assert st._run() == 0
+    assert g.did("DELETE", "/liveBroadcasts")
+
+
+@pytest.mark.parametrize("duration,expected_waits", [(10, 1), (60, 2)])
+def test_wait_deadline_resets_only_after_stable_stream(monkeypatch, duration, expected_waits):
+    c = mirror_cfg()
+    live_home()
+    Y.set_mirror(c, True)
+    st, _ = station(c)
+    clock = [0]
+    ready = [False]
+    waits = []
+    st.service.store.items.update({Y.INGEST_URL: "rtmps://example.test/live", Y.STREAM_KEY: "test"})
+    monkeypatch.setattr(Y.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(Y, "mirror_ready", lambda cfg: ready[0])
+    monkeypatch.setattr(st, "start_board", lambda: setattr(st, "show", SimpleNamespace(failed="")))
+    monkeypatch.setattr(st, "ensure_broadcast", lambda svc: True)
+    monkeypatch.setattr(st, "end_current", lambda svc: None)
+    monkeypatch.setattr(st, "give_up", lambda **kw: 0)
+    monkeypatch.setattr(radio, "pick_encoder", lambda *a: "libx264")
+    class Pipeline:
+        def __init__(self, *a, **kw): pass
+        def run(self):
+            clock[0] += duration
+            ready[0] = False
+            return radio.MODE_CHANGED
+        def close(self): pass
+    monkeypatch.setattr(radio, "Pipeline", Pipeline)
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) > 1:
+            clock[0] += Y.MIRROR_WAIT
+        else:
+            clock[0] += Y.MIRROR_WAIT - duration
+            ready[0] = True
+    monkeypatch.setattr(st.quit, "wait", wait)
+    assert st._run() == 0
+    assert len(waits) == expected_waits
+
+
+def test_setup_failure_counts_even_if_feed_disappears(monkeypatch):
+    c = mirror_cfg()
+    live_home()
+    Y.set_mirror(c, True)
+    st, _ = station(c)
+    ready = [True]
+    monkeypatch.setattr(Y, "mirror_ready", lambda cfg: ready[0])
+    def fail():
+        ready[0] = False
+        raise RuntimeError("setup failed")
+    monkeypatch.setattr(st, "start_board", fail)
+    monkeypatch.setattr(st, "end_current", lambda svc: None)
+    monkeypatch.setattr(st, "give_up", lambda **kw: 0)
+    monkeypatch.setattr(st, "note_failure", lambda: Y.MAX_FAILURES)
+    assert st._run() == 0
+    assert st.status["failures"] == Y.MAX_FAILURES
+
+
+def test_encoder_failure_counts_even_if_feed_disappears(monkeypatch):
+    c = mirror_cfg()
+    live_home()
+    Y.set_mirror(c, True)
+    st, _ = station(c)
+    ready = [True]
+    st.service.store.items.update({Y.INGEST_URL: "rtmps://example.test/live", Y.STREAM_KEY: "test"})
+    monkeypatch.setattr(Y, "mirror_ready", lambda cfg: ready[0])
+    monkeypatch.setattr(st, "start_board", lambda: setattr(st, "show", SimpleNamespace(failed="")))
+    monkeypatch.setattr(st, "ensure_broadcast", lambda svc: True)
+    monkeypatch.setattr(st, "end_current", lambda svc: None)
+    monkeypatch.setattr(st, "give_up", lambda **kw: 0)
+    monkeypatch.setattr(st, "note_failure", lambda: Y.MAX_FAILURES)
+    monkeypatch.setattr(radio, "pick_encoder", lambda *a: "libx264")
+    class Pipeline:
+        def __init__(self, *a, **kw): pass
+        def run(self):
+            ready[0] = False
+            return "encoder failed"
+        def close(self): pass
+    monkeypatch.setattr(radio, "Pipeline", Pipeline)
+    assert st._run() == 0
+    assert st.status["failures"] == Y.MAX_FAILURES
 
 
 def test_cockpit_requires_fresh_owner_confirmation_for_mirror(monkeypatch):
@@ -504,3 +658,22 @@ def test_board_initialization_failure_never_reuses_an_empty_show(monkeypatch):
             st.start_board()
         assert st.show is None
     assert len(shows) == 2 and not Y._state().get("broadcast_id")
+
+
+def test_missing_home_playlist_times_out_without_counting_encoder_failures(monkeypatch):
+    c = mirror_cfg()
+    live_home()
+    Y.set_mirror(c, True)
+    st, _ = station(c)
+    Y.mirror_playlist().unlink()
+    clock = [0]
+    waits = []
+    monkeypatch.setattr(Y.time, "monotonic", lambda: clock[0])
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+    monkeypatch.setattr(st.quit, "wait", wait)
+    monkeypatch.setattr(st, "give_up", lambda **kw: 42 if kw.get("why") == "ended" else -1)
+    assert st._run() == 42
+    assert waits == [5] * 60
+    assert not Y._read(Y.folder() / "failures.json")

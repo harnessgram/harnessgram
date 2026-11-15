@@ -134,7 +134,7 @@ def test_closed_flood_gate_is_waited_out_once(tmp_path, monkeypatch):
 
 
 def test_long_flood_limit_never_sends_around_the_gate(tmp_path, monkeypatch):
-    # A pre-existing gate blocks even the original; retain it without a translated duplicate.
+    # A pre-existing gate blocks even the original; retain ONE copy, translated, with the original folded.
     bot = FakeBot()
     slept = []
     monkeypatch.setattr(M.time, "sleep", lambda s: slept.append(s))
@@ -145,11 +145,12 @@ def test_long_flood_limit_never_sends_around_the_gate(tmp_path, monkeypatch):
     from ctb import reply_outbox
     with reply_outbox.locked() as path:
         entries = reply_outbox.load(path)
-    assert len(entries) == 1 and TEXT in entries[0]["text"] and "תרגום" not in entries[0]["text"]
+    assert len(entries) == 1 and "תרגום" in entries[0]["text"]
+    assert entries[0]["text"].index("תרגום") < entries[0]["text"].index("<blockquote expandable>" + TEXT)
     assert reply_outbox.drain(m.cfg, bot) == 0 and sends(bot) == []
     (state_dir() / flood.STATE_FILE).unlink()
     assert reply_outbox.drain(m.cfg, bot) == 1
-    assert len(sends(bot)) == 1 and TEXT in sends(bot)[0]["text"]
+    assert len(sends(bot)) == 1 and TEXT in sends(bot)[0]["text"] and "תרגום" in sends(bot)[0]["text"]
     assert reply_outbox.drain(m.cfg, bot) == 0
 
 

@@ -128,6 +128,10 @@ def test_auto_compact_inbox(tmp_path, bot, monkeypatch):
     """auto_compact sends Hebrew notification and triggers /compact command."""
     topics, box, thread = setup_inbox(tmp_path, bot)
     monkeypatch.setattr(I, "pane_for_session", lambda session: "%1")
+    # Routing is not proof of ownership; the real gate also checks the live session and foreground PID.
+    monkeypatch.setattr(I, "_pane_from_process", lambda session: "%1" if session == "sess-1" else None)
+    monkeypatch.setattr(I, "session_pid", lambda session: 42 if session == "sess-1" else None)
+    monkeypatch.setattr(I, "_pane_claude_targets", lambda pane: [(42, "start")] if pane == "%1" else [])
     monkeypatch.setattr(I, "pane_text", lambda pane, lines=45: "idle prompt")
     monkeypatch.setattr(I, "session_busy", lambda session: False)
     tmux = BoxedTmux()  # an empty input box that the real gate types into
@@ -150,14 +154,14 @@ def test_auto_compact_inbox(tmp_path, bot, monkeypatch):
     I.compact.precompact_marker("sess-1").unlink(missing_ok=True)
     res_cold = I.auto_compact("sess-1", 200_000, cold=True, cfg=cfg(), bot=bot, topics=topics, sleep_fn=lambda s: None)
     assert res_cold is True
-    assert any("🗜️ דחיסה אוטומטית לפני ההודעה שלך" in m["text"] for m in bot.methods("sendMessage"))
+    assert any("לפני ההודעה שלך" in m["text"] and "תוקף העותק" in m["text"] for m in bot.methods("sendMessage"))
 
 
 def test_cold_compact_conditions(tmp_path, monkeypatch):
     """cold_compact triggers compaction if idle > 1h, limit set, and ctx >= 150k."""
     session = "sess-cold"
     transcript = str(tmp_path / "transcript.jsonl")
-    Path(transcript).write_text("{}", encoding="utf-8")
+    Path(transcript).write_text(json.dumps({"type":"assistant", "timestamp":time.time()-4000}), encoding="utf-8")
 
     from ctb import usage
     monkeypatch.setattr(usage, "context_tokens", lambda path: (160_000, None))
@@ -166,11 +170,13 @@ def test_cold_compact_conditions(tmp_path, monkeypatch):
     compact.set_auto_compact_limit(0)
     assert compact.cold_compact(session, transcript, idle_since=time.time() - 4000) is False
 
-    # 2. Limit is set, but idle < 1h -> False
+    # 2. API activity is recent, even though the owner may have been away.
+    Path(transcript).write_text(json.dumps({"type":"assistant", "timestamp":time.time()-1000}))
     compact.set_auto_compact_limit(200)
     assert compact.cold_compact(session, transcript, idle_since=time.time() - 1000) is False
 
     # 3. Context < 150k -> False
+    Path(transcript).write_text(json.dumps({"type":"assistant", "timestamp":time.time()-4000}))
     monkeypatch.setattr(usage, "context_tokens", lambda path: (140_000, None))
     assert compact.cold_compact(session, transcript, idle_since=time.time() - 4000) is False
 
@@ -178,7 +184,8 @@ def test_cold_compact_conditions(tmp_path, monkeypatch):
     monkeypatch.setattr(usage, "context_tokens", lambda path: (180_000, None))
     compact_called = []
 
-    def mock_auto_compact(sess, ctx, cold):
+    def mock_auto_compact(sess, ctx, cold, cold_attempt):
+        compact.cold_transition(sess, cold_attempt, "started")
         compact_called.append((sess, ctx, cold))
         compact.marker(sess).parent.mkdir(parents=True, exist_ok=True)
         compact.marker(sess).write_text(str(time.time()), encoding="utf-8")

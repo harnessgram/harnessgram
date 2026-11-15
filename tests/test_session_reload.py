@@ -170,6 +170,21 @@ def test_exit_dialog_is_cancelled_never_answered(sessions, monkeypatch):
     assert keys == [("send-keys", "-t", "%idle", "Escape")]
 
 
+@pytest.mark.parametrize("live", [True, False])
+def test_reload_only_escapes_a_live_scheduled_task_dialog(sessions, monkeypatch, live):
+    from pathlib import Path
+    cfg, actions, _ = sessions
+    body = (Path(__file__).parent / "fixtures" / "exit-dialog-real.txt").read_text()
+    if not live:
+        body += "\n────────────\n❯ owner draft\n────────────\n"
+    monkeypatch.setattr(inbox, "_pane_command", lambda pane: "2.1.322")
+    monkeypatch.setattr(inbox, "pane_raw", lambda *a: body)
+    assert R.reload_sessions(cfg, session="idle")["skipped"] == [
+        {"session": "idle", "reason": "background" if live else "failed"}]
+    keys = [a for a in actions if a[0] == "send-keys"]
+    assert keys == ([("send-keys", "-t", "%idle", "Escape")] if live else [])
+
+
 def test_owner_typing_in_the_shell_never_gets_keys(sessions, monkeypatch):
     """A manual pane falls back to its shell, where the owner may be typing: open a new window instead."""
     cfg, actions, _ = sessions

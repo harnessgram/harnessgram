@@ -1,0 +1,43 @@
+/* "My schedule" card and its add sheet: logical properties only; direction comes from the root dir. */
+.cockpit-v2 .v2-schedule{margin-block:var(--v2-section) 0;padding:var(--v2-pad);border-radius:var(--v2-radius);background:var(--v2-glass);border:1px solid var(--v2-line);box-shadow:var(--v2-inset),var(--v2-shadow);color:var(--v2-ink);min-inline-size:0}
+.cockpit-v2 .sc-head{display:flex;align-items:center;justify-content:space-between;gap:var(--v2-gap-sm);margin-block-end:var(--v2-gap-sm)}
+.cockpit-v2 .sc-heading{display:flex;align-items:center;gap:7px;min-inline-size:0;margin:0;font-size:21px;font-weight:850;line-height:1.3}
+.cockpit-v2 .sc-heading svg{flex:none;inline-size:24px;block-size:24px;color:var(--v2-blue)}
+.cockpit-v2 .sc-heading span{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
+.cockpit-v2 .sc-add{flex:none;display:inline-flex;align-items:center;gap:6px;min-block-size:44px;padding-inline:14px;border-radius:var(--v2-pill)}
+.cockpit-v2 .sc-add svg{inline-size:18px;block-size:18px}
+.cockpit-v2 .sc-tabs{display:flex;gap:var(--v2-gap-sm);margin-block-end:var(--v2-gap-sm)}
+.cockpit-v2 .sc-tab{flex:1 1 0;min-inline-size:0;min-block-size:44px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding-inline:10px;border:1px solid var(--v2-line);border-radius:var(--v2-pill);background:var(--v2-soft);color:var(--v2-ink);font:inherit;font-weight:700}
+.cockpit-v2 .sc-tab.on{background:var(--v2-blue);border-color:var(--v2-blue-deep);color:#fff}
+.cockpit-v2 .sc-n{min-inline-size:22px;padding-inline:6px;border-radius:var(--v2-pill);background:#ffffff40;font-size:13px;line-height:22px;text-align:center}
+.cockpit-v2 .sc-rows{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--v2-gap-sm)}
+.cockpit-v2 .sc-row{display:grid;grid-template-columns:minmax(56px,auto) minmax(0,1fr) auto;align-items:center;gap:var(--v2-gap-sm);min-block-size:48px;padding-block:6px;padding-inline:var(--v2-pad-sm);border-radius:var(--v2-small);background:var(--v2-soft)}
+.cockpit-v2 .sc-row.cal{grid-template-columns:minmax(56px,auto) minmax(0,1fr)}
+.cockpit-v2 .sc-time{display:inline-flex;align-items:center;gap:4px;min-inline-size:0;font-size:14px;font-weight:700;color:var(--v2-muted)}
+.cockpit-v2 .sc-time svg{flex:none;inline-size:16px;block-size:16px}
+.cockpit-v2 .sc-time.late{color:var(--v2-no-ink)}
+.cockpit-v2 .sc-title{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;min-inline-size:0;overflow-wrap:anywhere;font-size:16px;line-height:1.35;text-align:start}
+.cockpit-v2 .sc-row.done .sc-title{text-decoration:line-through;color:var(--v2-muted)}
+.cockpit-v2 .sc-check{inline-size:44px;block-size:44px;display:grid;place-items:center;border:1px solid var(--v2-line);border-radius:50%;background:var(--v2-glass);color:var(--v2-blue);padding:0}
+.cockpit-v2 .sc-check.on{background:var(--v2-success);color:var(--v2-green)}
+.cockpit-v2 .sc-check svg{inline-size:22px;block-size:22px}
+.cockpit-v2 .sc-empty,.cockpit-v2 .sc-note{margin:0}
+.cockpit-v2 .sc-retry{min-block-size:44px;margin-block-start:var(--v2-gap-sm)}
+.cockpit-v2 .sc-warn{margin-block-start:var(--v2-gap-sm)}
+.cockpit-v2 .sc-sheet{color:var(--v2-ink)}
+:root.cockpit-v2[data-theme="dark"] .sc-sheet{background:var(--v2-page)}
+.cockpit-v2 .sc-hint{margin-block:10px 0;color:var(--v2-muted);font-size:15px}
+.cockpit-v2 .sc-field{inline-size:100%;box-sizing:border-box;min-block-size:76px;margin-block-start:12px}
+.cockpit-v2 .sc-actions{display:flex;flex-wrap:wrap;gap:10px;margin-block-start:12px}
+.cockpit-v2 .sc-save{min-block-size:44px;display:inline-flex;align-items:center;gap:6px}
+.cockpit-v2 .sc-out{margin-block-start:10px;color:var(--v2-no-ink);font-size:14px;overflow-wrap:anywhere}
+:root.cockpit-v2[data-theme="dark"] .sc-tab.on{color:#fff}
+.cockpit-v2 .sc-google{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--v2-gap-sm);margin-block-start:var(--v2-gap-sm);padding-block:12px;padding-inline:var(--v2-pad-sm);border-radius:var(--v2-small);border:1px dashed var(--v2-line);background:var(--v2-glass);min-inline-size:0}
+.cockpit-v2 .sc-google.on{border-style:solid;background:var(--v2-soft)}
+.cockpit-v2 .sc-g-label{display:flex;align-items:center;gap:8px;min-inline-size:0;flex:1 1 160px}
+.cockpit-v2 .sc-g-label svg{flex:none;inline-size:20px;block-size:20px;color:var(--v2-blue)}
+.cockpit-v2 .sc-g-text{display:flex;flex-direction:column;min-inline-size:0}
+.cockpit-v2 .sc-g-name{font-weight:750;font-size:15px;line-height:1.3;overflow-wrap:anywhere}
+.cockpit-v2 .sc-g-state{font-size:13px;color:var(--v2-muted);overflow-wrap:anywhere}
+.cockpit-v2 .sc-google.on .sc-g-state{color:var(--v2-green);font-weight:700}
+.cockpit-v2 .sc-google .btn{flex:none;min-block-size:44px;padding-inline:14px}

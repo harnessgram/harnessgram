@@ -162,10 +162,11 @@ from .i18n import YOUTUBE_DONE as _DONE
 from .i18n import YOUTUBE_FAILED as _FAILED
 
 
-def page(lang: str, ok: bool, nonce: str) -> bytes:
-    """The small page the browser shows after the callback: plain text, fixed wording, no script."""
+def page(lang: str, ok: bool, nonce: str, done: Optional[dict] = None, failed: Optional[dict] = None) -> bytes:
+    """The small page the browser shows after the callback: plain text, fixed wording, no script. `done` and `failed`
+    replace the YouTube wording (the Google Calendar sign-in uses its own)."""
     lang = "he" if lang == "he" else "en"
-    title, line1, line2 = (_DONE if ok else _FAILED)[lang]
+    title, line1, line2 = ((done or _DONE) if ok else (failed or _FAILED))[lang]
     direction = "rtl" if lang == "he" else "ltr"
     return (f'<!doctype html><html lang="{lang}" dir="{direction}"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer">'

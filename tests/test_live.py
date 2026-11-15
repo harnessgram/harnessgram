@@ -448,7 +448,8 @@ def test_keyboard_sent_only_on_the_first_reply_in_a_topic(tmp_path):
     m.send_reply("Topic 1", "sess-1", "Second reply in topic 1")
     sent2 = bot.methods("sendMessage")
     assert len(sent2) == 2
-    assert "reply_markup" not in sent2[1]
+    # (the fixed keyboard is not sent again; only the listen button, an inline row, rides on later replies)
+    assert "keyboard" not in sent2[1].get("reply_markup", {})
 
     # First reply in a different topic: keyboard is sent
     m.send_reply("Topic 2", "sess-2", "First reply in topic 2")

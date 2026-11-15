@@ -1,8 +1,6 @@
 """The `ctb` command line."""
 from __future__ import annotations
 
-import argparse
-import getpass
 import json
 import os
 import sys
@@ -17,7 +15,77 @@ MIRROR_TITLE = "Claude"  # `mirror` with no --title
 # helpers the hooks start that only SEND (no local state), by the kind scheduled.suppressed() knows
 SEND_ONLY_HELPERS = {"refresh-status": "status", "typing": "typing"}
 
-def _parser() -> argparse.ArgumentParser:
+def _knowledge(args) -> int:
+    from . import knowledge as K
+    try:
+        cfg = C.load()
+    except C.ConfigError:
+        print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+        return 1
+    action = args.knowledge_cmd
+    try:
+        if action == "scan":
+            index = K.scan(cfg)
+            kinds = {k: sum(1 for i in index["items"] if i["kind"] == k) for k in K.KINDS}
+            print(" ".join("%s=%d" % kv for kv in kinds.items()), "locked=%d" % sum(1 for i in index["items"] if i.get("locked")))
+        elif action == "list":
+            state = K.read_state()
+            for i in K.fresh_index(cfg)["items"]:
+                if args.kind in (None, i["kind"]):
+                    mark = "L" if i.get("locked") else ("+" if K.is_on(state, i["id"]) else "-")
+                    print(mark, i["id"], "|", i["title"])
+        elif action == "toggle":
+            entry = K.toggle(cfg, args.id, args.state == "on", origin="cli")
+            print("unchanged" if entry.get("unchanged") else "%s %s (log %s); applies from the next session"
+                  % (args.id, args.state, entry["id"]))
+        elif action == "undo":
+            entry = K.undo(cfg, args.log_id, origin="cli")
+            print("%s is %s again (log %s)" % (entry["item"], "on" if entry["after"] else "off", entry["id"]))
+        elif action == "history":
+            for e in K.history():
+                what = ("on" if e.get("after") else "off") if e["action"] == "toggle" else "suggested a change"
+                print(time.strftime("%Y-%m-%d %H:%M", time.localtime(e["at"])), e["id"], e["item"], what,
+                      "(undone)" if e["undone"] else "")
+        elif action == "render":
+            for path in K.render(cfg) or []:
+                print("wrote", path)
+        elif action == "notes":
+            if args.import_file:
+                try:
+                    with open(os.path.expanduser(args.import_file), encoding="utf-8") as f:
+                        text = f.read(K.MAX_NOTES_FILE + 1)
+                    if len(text) > K.MAX_NOTES_FILE:
+                        raise ValueError("too large")
+                    data = json.loads(text)
+                except (OSError, ValueError):
+                    print("Harnessgram: the notes file could not be read as JSON.", file=sys.stderr)
+                    return 2
+                counts = K.import_notes(cfg, data)
+                print(" ".join("%s=%d" % kv for kv in counts.items()))
+            else:
+                index = K.fresh_index(cfg)
+                rows = K.missing_notes(cfg, index)
+                if args.out:
+                    path = K.write_export(cfg, rows, args.out, index)
+                    print("wrote %d entries to %s" % (len(rows), K._spath(path)))
+                else:
+                    print(json.dumps(rows, ensure_ascii=False, indent=1))
+        elif action == "off":
+            items = K.off_items()
+            if args.json:
+                print(json.dumps([{"id": i["id"], "kind": i["kind"], "title": i.get("title", "")} for i in items],
+                                 ensure_ascii=False))
+            else:
+                for i in items:
+                    print(i["id"], "|", i.get("title", ""))
+    except K.KnowledgeError as exc:
+        print("Harnessgram: %s." % exc, file=sys.stderr)
+        return 2
+    return 0
+
+
+def _parser() -> "argparse.ArgumentParser":
+    import argparse
     p = argparse.ArgumentParser(prog="harnessgram", description="Harnessgram: Telegram remote control for Claude Code.",
                                 epilog="First run: harnessgram setup   (then: harnessgram doctor)")
     p.add_argument("--version", action="version", version=f"Harnessgram {__version__}")
@@ -43,9 +111,15 @@ def _parser() -> argparse.ArgumentParser:
                                     "(stdin: hook JSON; never blocks)")
     sub.add_parser("hook-notify", help="Claude Code Notification hook: ring the phone when the session needs you "
                                        "(stdin: hook JSON)")
+    sub.add_parser("hook-permission", help="Claude Code PermissionRequest hook: the owner answers the permission "
+                                           "prompt from the phone (stdin: hook JSON; no answer = no output)")
     sub.add_parser("hook-wake", help="async Stop hook: wake an idle session from Telegram (stdin: hook JSON)")
     sub.add_parser("hook-start", help="record the session's terminal pane (stdin: hook JSON)")
     sub.add_parser("hook-lifecycle", help="handle session lifecycle events")
+    rc = sub.add_parser("recall", help="what a session must not forget: open items of the owner ledger, the owner's messages "
+                                       "not yet in the ledger, and changed rules (the SessionStart hook adds it)")
+    rc.add_argument("--session", default="", help="session id (default: this Claude Code session)")
+    rc.add_argument("--source", choices=("compact", "resume", "clear"), default="resume", help=argparse.SUPPRESS)
     lc = sub.add_parser("lifecycle", help=argparse.SUPPRESS)
     lc.add_argument("--session", required=True)
     lc.add_argument("--kind", required=True)
@@ -76,8 +150,10 @@ def _parser() -> argparse.ArgumentParser:
     st_sub.add_parser("install", help="register the Studio as a Cockpit app (writes its folder; run again after an update)")
     rd = sub.add_parser("radio", help="team radio: a narrated live stream in the home group (macOS)")
     rds = rd.add_subparsers(dest="radio_cmd", required=True, metavar="action")
-    rds.add_parser("start", help="open the group's live stream and start the radio")
-    rds.add_parser("stop", help="stop the radio and end the live stream")
+    rds.add_parser("start", help="open the group's live stream and start the radio").add_argument(
+        "--play", action="store_true", help=argparse.SUPPRESS)  # started by pressing Play (radio_play.py)
+    rds.add_parser("stop", help="stop the radio and end the live stream").add_argument(
+        "--play", action="store_true", help=argparse.SUPPRESS)  # the idle stop of a Play-started station
     rst = rds.add_parser("status", help="print the radio's state as JSON")
     rst.add_argument("--live", action="store_true", help="also ask Telegram about the live stream")
     rds.add_parser("say", help="speak one line on the radio now").add_argument("text")
@@ -153,6 +229,7 @@ def _parser() -> argparse.ArgumentParser:
     ac.add_argument("session")
     ac.add_argument("ctx", type=int)
     ac.add_argument("cold", nargs="?", default="")
+    ac.add_argument("--cold-attempt", default="")
     ac.add_argument("--note", default="")
     ac.add_argument("--asked", action="store_true")
     cp = sub.add_parser("compact", help="ask for a compaction of this session when the current turn ends "
@@ -160,6 +237,34 @@ def _parser() -> argparse.ArgumentParser:
     cp.add_argument("--note", default="", help="one line: what the summary must keep")
     cp.add_argument("--cancel", action="store_true", help="take the request back")
     cp.add_argument("--session", default="", help="session id (defaults to CLAUDE_CODE_SESSION_ID)")
+    ad = sub.add_parser("addons", help="what Harnessgram adds to your agents: list the add-ons, switch one, or print "
+                                       "docs/addons.md")
+    ad.add_argument("action", nargs="?", default="list", choices=("list", "docs", "on", "off"))
+    ad.add_argument("key", nargs="?", default="")
+    il = sub.add_parser("idle-lines", help="open team items of the owner ledger that did not move for hours "
+                                          "(the bridge's idle-lines nudge asks the lead session to run this)")
+    il.add_argument("--project", default="", help="only this ledger project")
+    kn = sub.add_parser("knowledge", help="what the system knows: the agents' rules, memories, skills, tools and docs, "
+                                          "with on/off switches the owner controls (docs/knowledge.md)")
+    kns = kn.add_subparsers(dest="knowledge_cmd", required=True, metavar="action")
+    kns.add_parser("scan", help="read every configured source into the private index")
+    kl = kns.add_parser("list", help="print the index (one line per item)")
+    kl.add_argument("--kind", choices=("rule", "memory", "skill", "tool", "doc"), default=None)
+    kt = kns.add_parser("toggle", help="switch one item on or off (locked safety rules cannot be switched)")
+    kt.add_argument("id")
+    kt.add_argument("state", choices=("on", "off"))
+    ku = kns.add_parser("undo", help="undo one change from the history (by its log id)")
+    ku.add_argument("log_id")
+    kns.add_parser("history", help="the changes of the last 30 days, newest first")
+    kns.add_parser("render", help="write the overlay of switched-off items again")
+    kn_notes = kns.add_parser("notes", help="plain Hebrew and English notes: export what has none, or import new ones")
+    kn_mode = kn_notes.add_mutually_exclusive_group(required=True)
+    kn_mode.add_argument("--missing", action="store_true", help="print (or --out) every item and heading with no note, "
+                                                                   "masked, for an agent to write notes")
+    kn_mode.add_argument("--import", dest="import_file", metavar="FILE", help="validate and merge notes from FILE")
+    kn_notes.add_argument("--out", metavar="FILE", help="with --missing: write the export to FILE (mode 0600)")
+    ko = kns.add_parser("off", help="print what is switched off")
+    ko.add_argument("--json", action="store_true", help="machine-readable, for a hook")
     sub.add_parser("topic-icons", help="pick a fitting icon for every topic whose name changed")
     dl = sub.add_parser("delivered", help="react to messages a hook delivered (used by hooks)")
     dl.add_argument("--refs", default="", help="chat:message_id,...")
@@ -287,6 +392,12 @@ def _parser() -> argparse.ArgumentParser:
                                       "to Telegram)")
     tk.add_argument("action", choices=("list", "mute", "unmute"))
     tk.add_argument("name", nargs="?", default="", help="the task's name (mute/unmute)")
+    sc = sub.add_parser("schedule", help="the owner's \"My schedule\" card: what to register for the read-only "
+                                         "Google Calendar sign-in")
+    sc.add_argument("action", choices=("google-setup-info",))
+    sc.add_argument("--keychain-service", default=None, metavar="SERVICE",
+                    help="the Keychain service holding the client's client-id and client-secret items; the printed "
+                         "config line uses it")
     tn = sub.add_parser("topic-names", help="name session topics now (project: task); --dry-run only shows")
     tn.add_argument("--dry-run", action="store_true", help="show the names it would set; rename nothing")
     tn.add_argument("--limit", type=int, default=0, help="most topics to name in this run (default: a round)")
@@ -315,6 +426,9 @@ def _parser() -> argparse.ArgumentParser:
     da.add_argument("--detail", default="", help="more context, up to 1500 characters")
     da.add_argument("--yes", default="", help="label of the yes button (30 characters)")
     da.add_argument("--no", default="", help="label of the no button (30 characters)")
+    da.add_argument("--routine", action="store_true",
+                    help="a routine question the owner may also answer from a phone widget; never for money, "
+                         "deletion, publication, accounts, production or store steps")
     dcs.add_parser("list", help="print this session's open decisions")
     dcs.add_parser("cancel", help="withdraw one of this session's open decisions").add_argument("id")
     bk = sub.add_parser("bank", help="the reset bank: saved quota resets per provider, shown in the control "
@@ -340,6 +454,10 @@ def _parser() -> argparse.ArgumentParser:
         p.add_argument("--detail", default="", help="one or two more lines, up to 600 characters")
         if edit:
             p.add_argument("--id", default="", help="replace this open card of yours in place")
+        p.add_argument("--visibility", choices=("private", "team", "public"), default=None,
+                       help="who may see it: private (the owner only; the default for a new card), team (project "
+                            "topics) or public (may also reach the radio's YouTube station)"
+                            + ("; left out on an update, the card keeps its own" if edit else ""))
         return p
 
     cp = card("progress", "steps and a percentage that move while you work; update it with --id")
@@ -348,6 +466,10 @@ def _parser() -> argparse.ArgumentParser:
     cp.add_argument("--percent", type=int, default=None, help="0 to 100")
     cc = card("choice", "ask the owner to pick one of 2 to 6 options, once", edit=False)
     cc.add_argument("--option", action="append", default=[], help="an option's label, up to 30 characters (repeat)")
+    cc.add_argument("--image", action="append", default=[],
+                    help="PNG/JPEG/WebP under 20 MiB; repeat once per option in option order (private copies). Use it "
+                         "whenever the options are visual (designs, screenshots, pictures): the owner then sees each "
+                         "image on its own tile and taps it to enlarge; the choice button stays separate")
     card("ask", "ask the owner for a short typed answer, once", edit=False)
     cl = card("link", "one https link with an open button")
     cl.add_argument("url", help="the https:// link")
@@ -471,12 +593,12 @@ def _cmd_dispatcher(args) -> int:
 
 
 def _cmd_typing(args) -> int:
-    from . import mirror
+    from . import typing_notice
     try:
         cfg = C.load()
     except C.ConfigError:
         return 1
-    return mirror.run_typing(cfg, args.session) if cfg.ready else 1
+    return typing_notice.run_typing(cfg, args.session) if cfg.ready else 1
 
 
 def _cmd_team(args) -> int:
@@ -611,6 +733,7 @@ def _cmd_pair() -> int:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raw = {}
+    import getpass
     try:
         token = clean_token(raw.get("bot_token") or os.environ.get("CTB_BOT_TOKEN")
                             or getpass.getpass("Bot token from BotFather: "))
@@ -660,6 +783,23 @@ def _saved_token() -> bool:
         return False
 
 
+def _cmd_schedule(args) -> int:
+    """`ctb schedule google-setup-info`: the redirect URI and scope to register, and what is still missing."""
+    from . import google_calendar
+    try:
+        cfg = C.load()
+    except C.ConfigError as e:
+        print(f"Harnessgram: {e}", file=sys.stderr)
+        return 1
+    try:
+        lines = google_calendar.setup_info(cfg, args.keychain_service)
+    except google_calendar.CalendarError:
+        print("Harnessgram: --keychain-service may hold letters, digits, spaces and . _ @ + : - only.", file=sys.stderr)
+        return 2
+    print("\n".join(lines))
+    return 0
+
+
 def _cmd_tasks(args) -> int:
     from . import scheduled
     if args.action == "list":
@@ -678,14 +818,44 @@ def _cmd_tasks(args) -> int:
     return 0
 
 
+def _compact_helper_on() -> bool:
+    try:
+        from . import addons
+        return addons.enabled(None, "compact_helper")
+    except Exception:
+        return True
+
+
+def _addons(args) -> int:
+    from . import addons
+    if args.action == "docs":
+        print(addons.markdown(), end="")
+        return 0
+    try:
+        cfg = C.load()
+    except C.ConfigError:
+        print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+        return 1
+    if args.action == "list":
+        print(addons.listing(cfg))
+        return 0
+    try:
+        out = addons.set_on(cfg, args.key, args.action == "on")
+    except addons.AddonError as exc:
+        print(f"Harnessgram: {exc.code}: {args.key or '(no key)'}", file=sys.stderr)
+        return 2
+    print(f"{out['key']}: {'on' if out['on'] else 'off'}")
+    return 0
+
+
 # Commands that work while mirroring is off: they set the bridge up or only read and change local files.
-LOCAL_ONLY = {"doctor", "setup", "install", "uninstall", "pair", "project", "team", "bank", "dispatcher",
-              "wait-idle", "statusline", "compact", "tasks", "studio", "outbox"}
+LOCAL_ONLY = {"addons", "idle-lines", "recall", "knowledge", "doctor", "setup", "install", "uninstall", "pair", "project", "team", "bank", "dispatcher",
+              "wait-idle", "statusline", "compact", "tasks", "studio", "outbox", "schedule"}
 # Long-running services: they start either way and check the switch at every round or request themselves.
 SERVICES = {"serve", "heartbeat", "panel", "share-serve", "radio"}
 # Everything else talks to Telegram, the relay, an outside model or a session's queue: nothing while off.
 GUARDED = {"account", "auto-compact", "autopilot", "block", "board", "bot-api", "card", "dashboard", "decide", "delivered",
-           "direct-note", "finish-stop", "hook-ask", "hook-lifecycle", "hook-notify", "hook-post", "hook-prompt",
+           "direct-note", "finish-stop", "hook-ask", "hook-lifecycle", "hook-notify", "hook-permission", "hook-post", "hook-prompt",
            "hook-start", "hook-stop", "hook-stop-failure", "hook-wake", "lifecycle", "mirror", "notify",
            "progress", "prompt-mirror", "refresh-status", "session-log", "session-state", "take", "topic-icons",
            "topic-names", "topic-rename", "translate-warm", "typing", "widget", "sessions"}
@@ -712,8 +882,31 @@ def _off(args) -> Optional[int]:
     return 1
 
 
+class _Args:
+    """What argparse would hand back for the hook commands below (they take no other options)."""
+
+    def __init__(self, cmd: str, **values) -> None:
+        self.cmd = cmd
+        self.__dict__.update(values)
+
+
+def _quick_args(raw: List[str]) -> Optional["_Args"]:
+    """The arguments of the commands a Claude Code hook starts on every tool call (`hook-post`, `statusline`) and
+    of the `typing` helper it spawns, without building the whole command-line parser (about a tenth of a
+    second on a busy Mac). Any other command line, or a different shape of these, is None and goes to argparse."""
+    if raw in (["hook-post"], ["statusline"]):
+        return _Args(raw[0])
+    if len(raw) == 2 and raw[0] == "typing" and raw[1].startswith("--session=") and len(raw[1]) > len("--session="):
+        return _Args("typing", session=raw[1][len("--session="):])
+    return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    args = _parser().parse_args(argv)
+    raw = sys.argv[1:] if argv is None else list(argv)
+    if raw[:1] == ["assistant-exec"]:  # the launch of an assistant session (assistant.py); the rest is claude's
+        from .assistant import exec_main
+        return exec_main(raw[1:])
+    args = _quick_args(raw) or _parser().parse_args(argv)
     off = _off(args)
     if off is not None:
         return off
@@ -754,6 +947,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0  # held back for a muted scheduled task (scheduled.py)
     if cmd == "tasks":
         return _cmd_tasks(args)
+    if cmd == "schedule":
+        return _cmd_schedule(args)
     if cmd == "studio":
         from .studio.install import InstallError, install as studio_install
         try:
@@ -903,7 +1098,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             from .radio_youtube import cli as youtube_cli
             return youtube_cli(cfg, args.youtube_cmd, live=getattr(args, "live", False),
                                request=getattr(args, "request", None), mirror=getattr(args, "mirror", None))
-        return radio_cli(cfg, args.radio_cmd, text=getattr(args, "text", ""), live=getattr(args, "live", False))
+        return radio_cli(cfg, args.radio_cmd, text=getattr(args, "text", ""), live=getattr(args, "live", False),
+                         play=getattr(args, "play", False))
     if cmd == "share-serve":
         from .share import serve
         serve(args.port)
@@ -934,6 +1130,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if cmd == "hook-ask":
         from .hooks import hook_ask
         return hook_ask(sys.stdin.read())
+    if cmd == "hook-permission":
+        from .permission_request import run_hook
+        return run_hook(sys.stdin.read())
     if cmd == "hook-notify":
         from .hooks import hook_notify
         return hook_notify(sys.stdin.read())
@@ -960,9 +1159,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             from . import compact
             compact.run_asked(args.session, args.note or "",
                               lambda note: auto_compact(args.session, args.ctx, cold=args.cold == "cold",
-                                                        note=note, asked=True), settle)
+                                                        note=note, asked=True, cold_attempt=args.cold_attempt), settle)
         else:
-            auto_compact(args.session, args.ctx, cold=args.cold == "cold")
+            auto_compact(args.session, args.ctx, cold=args.cold == "cold", cold_attempt=args.cold_attempt)
             settle()
         return 0
     if cmd == "dispatcher":
@@ -1060,11 +1259,42 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not found:
             print(t("topic_names_none", lang=lang))
         return 0
+    if cmd == "knowledge":
+        return _knowledge(args)
+    if cmd == "recall":
+        from . import recall
+        session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        if not session:
+            print("Harnessgram: no session (run this inside a Claude Code session, or pass --session)", file=sys.stderr)
+            return 1
+        try:
+            cfg = C.load()
+        except C.ConfigError:
+            print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+            return 1
+        print(recall.build(cfg, session, args.source)
+              or "Nothing to recall for this session.")
+        return 0
+    if cmd == "idle-lines":
+        from . import idle_lines
+        try:
+            cfg = C.load()
+        except C.ConfigError:
+            print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+            return 1
+        print(idle_lines.listing(idle_lines.read_items(cfg, time.time()), args.project))
+        return 0
+    if cmd == "addons":
+        return _addons(args)
     if cmd == "compact":
         from . import compact
         session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
         if not session:
             print("Harnessgram: no session (run this inside a Claude Code session, or pass --session)", file=sys.stderr)
+            return 1
+        if not args.cancel and not _compact_helper_on():
+            print("Harnessgram: the owner switched agent-requested compaction off in the Cockpit; nothing was asked.",
+                  file=sys.stderr)
             return 1
         if args.cancel:
             started = compact.claimed(session)
@@ -1100,11 +1330,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         kind = args.card_cmd
         fields = {"progress": {"steps": getattr(args, "step", None), "at": getattr(args, "at", None),
                                "percent": getattr(args, "percent", None)},
-                  "choice": {"options": getattr(args, "option", None)},
+                  "choice": {"options": getattr(args, "option", None), "images": getattr(args, "image", None)},
                   "link": {"url": getattr(args, "url", ""), "label": getattr(args, "label", "")},
                   "numbers": {"figures": getattr(args, "figure", None)}}.get(kind, {})
         return card_run(cfg, kind, title=getattr(args, "title", ""), detail=getattr(args, "detail", ""),
-                        ident=getattr(args, "id", ""), **fields)
+                        ident=getattr(args, "id", ""), visibility=getattr(args, "visibility", None), **fields)
     if cmd == "block":
         from .blocks import run as block_run
         try:
@@ -1122,7 +1352,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         return decide_run(cfg, args.decide_cmd, title=getattr(args, "title", ""),
                           detail=getattr(args, "detail", ""), yes=getattr(args, "yes", ""),
-                          no=getattr(args, "no", ""), ident=getattr(args, "id", ""))
+                          no=getattr(args, "no", ""), ident=getattr(args, "id", ""),
+                          routine=bool(getattr(args, "routine", False)))
     return 2
 
 

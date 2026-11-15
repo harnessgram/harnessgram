@@ -84,7 +84,7 @@ def test_hook_updates_automatic_card_for_each_todowrite(tmp_path, monkeypatch):
     monkeypatch.setattr(decisions, "_place_of", lambda cfg, session: (-100, 1))
     monkeypatch.setattr(hooks, "typing", lambda *a: None)
     monkeypatch.setattr(hooks, "append_progress", lambda *a: None)
-    monkeypatch.setattr(hooks, "periodic_reminder", lambda *a: "")
+    monkeypatch.setattr(hooks, "periodic_reminder", lambda *a, **k: "")
     data = {"session_id": "session-a", "tool_name": "TodoWrite", "tool_input": {"todos": [
         {"content": "First", "status": "pending"}, {"content": "Second", "status": "pending"}]}}
     assert hooks.hook_post(json.dumps(data)) == 0
@@ -221,3 +221,8 @@ def test_percent_cannot_round_incomplete_list_to_finished(tmp_path, monkeypatch)
     todos.append({'content': 'current', 'status': 'in_progress'})
     rec = cards.sync_todos('s', -100, 1, todos, 'Plan', now=100)
     assert rec['percent'] == 99 and not cards.finished(rec)
+
+
+def test_finished_card_stays_in_view_thirty_minutes_before_auto_close():
+    """Review of #294: auto-close (which moves a card into old cards) must not beat the 30-minute fold."""
+    assert cards.PROGRESS_FINISHED_GRACE == 30 * 60

@@ -31,11 +31,90 @@ PLAYER_BYTES = 8 << 20  # the real bound: ~3 minutes of radio waiting for a stuc
 PLAYER_RESTART_SECONDS = 60
 
 
+class FlvTracker:
+    """Follows an FLV byte stream that arrives in chunks of any size. It knows where each tag starts and keeps the
+    stream's start (the FLV header, the metadata tag and the codec sequence headers: `prefix`), so a consumer that was
+    restarted midway can be given a clean start: the prefix first, then whole tags."""
+
+    LIMIT = 1 << 20   # the prefix is a few hundred bytes; a stream whose headers never settle is not followed further
+
+    def __init__(self):
+        self.stage, self.need = "head", 13        # head: the 9-byte header and the first PreviousTagSize
+        self.hdr = bytearray()                    # the 11-byte tag header being read
+        self.first2 = bytearray()                 # the first two payload bytes of the tag being read
+        self.kind = self.size = 0
+        self.raw = bytearray()                    # everything seen, until the prefix is complete
+        self.tag_start = 0
+        self.settled = False                      # the current tag is known to be a sequence header or not
+        self.consumed = 0
+        self.prefix = b""
+        self.done = False                         # the prefix is complete (or the stream is not FLV)
+
+    def _sequence_header(self) -> bool:
+        if self.kind == 18:
+            return True
+        b = self.first2
+        if self.kind == 8:
+            return len(b) == 2 and b[0] >> 4 == 10 and b[1] == 0       # AAC sequence header
+        if self.kind == 9:
+            return len(b) == 2 and b[0] & 0x0F == 7 and b[1] == 0      # AVC sequence header
+        return False
+
+    def feed(self, data: bytes) -> Optional[int]:
+        """Take the next chunk; returns the offset in it where a tag starts (the first one), or None."""
+        if not self.done:
+            self.raw += data
+        first, pos, n = None, 0, len(data)
+        while pos < n:
+            if self.stage == "tag" and not self.hdr:
+                self.tag_start = self.consumed + pos
+                if first is None:
+                    first = pos
+            take = min(self.need, n - pos)
+            part = data[pos:pos + take]
+            if self.stage == "head":
+                self.hdr += part[:max(0, 3 - len(self.hdr))]
+            elif self.stage == "tag":
+                self.hdr += part
+            elif len(self.first2) < 2:
+                self.first2 += part[:2 - len(self.first2)]
+            pos += take
+            self.need -= take
+            if (self.stage == "body" and not self.done and not self.settled
+                    and (len(self.first2) == 2 or self.kind not in (8, 9, 18))):
+                # Decided as soon as the tag's first bytes are known, however large the tag is: the saved start never
+                # depends on a big first video tag arriving whole.
+                self.settled = True
+                if not self._sequence_header():
+                    self.done, self.prefix, self.raw = True, bytes(self.raw[:self.tag_start]), bytearray()
+            if self.need:
+                continue
+            if self.stage == "head":
+                self.stage, self.need = "tag", 11
+                if bytes(self.hdr) != b"FLV":
+                    self.done, self.prefix, self.raw = True, b"", bytearray()   # not FLV: nothing to replay
+                self.hdr = bytearray()
+            elif self.stage == "tag":
+                self.kind, self.size = self.hdr[0] & 0x1F, int.from_bytes(self.hdr[1:4], "big")
+                self.stage, self.need, self.first2 = "body", self.size + 4, bytearray()
+                self.settled = False
+                self.hdr = bytearray()
+            else:
+                if not self.done and not self._sequence_header():
+                    self.done, self.prefix, self.raw = True, bytes(self.raw[:self.tag_start]), bytearray()
+                self.stage, self.need = "tag", 11
+        self.consumed += n
+        if not self.done and len(self.raw) > self.LIMIT:
+            self.done, self.prefix, self.raw = True, b"", bytearray()
+        return first
+
+
 class PlayerSegmenter:
     """Lossy, process-isolated encoder-output copy for the optional web player."""
 
     def __init__(self, path: Path, report=None, queue_size: int = PLAYER_QUEUE):
         self.path, self.report = Path(path), report or (lambda _line: None)
+        self._queue_size = queue_size
         self.queue: "queue.Queue[bytes]" = queue.Queue(maxsize=queue_size)
         self.process = None
         self.dropped = 0
@@ -43,6 +122,9 @@ class PlayerSegmenter:
         self._last_start = float("-inf")
         self._lock = threading.Lock()
         self._warned = False
+        self.flv = FlvTracker()
+        self._resync = False   # a segmenter that starts midway is given the stream's start and then a whole tag
+        self._started_once = False
 
     @staticmethod
     def args() -> List[str]:
@@ -71,7 +153,14 @@ class PlayerSegmenter:
                 self._warn()
                 return False
             self._warned = False
-            threading.Thread(target=self._write, daemon=True, name="radio-player-writer").start()
+            if self._started_once:
+                self._resync = True   # every restart, whether or not the old writer noticed its process died
+            self._started_once = True
+            # Each segmenter has its own queue: the writer of an earlier one can never take the new one's first bytes.
+            self.queue = queue.Queue(maxsize=self._queue_size)
+            self.queued = 0
+            threading.Thread(target=self._write, args=(self.process, self.queue), daemon=True,
+                             name="radio-player-writer").start()
             return True
 
     def _warn(self) -> None:
@@ -80,13 +169,26 @@ class PlayerSegmenter:
             self.report("radio player: output stalled or failed; continuing the broadcast")
 
     def offer(self, data: bytes) -> None:
-        if not data or not self._start():
+        if not data:
             return
+        first = self.flv.feed(data)
+        if not self._start():
+            self._resync = True
+            return
+        head = b""
+        if self._resync:
+            # A restarted segmenter must not receive bytes from the middle of a tag, or without the stream's header:
+            # it waits for the next tag boundary and is given the header and sequence headers first.
+            if first is None or not self.flv.done:
+                return
+            data, head, self._resync = data[first:], self.flv.prefix, False
         try:
-            if self.queued + len(data) > PLAYER_BYTES:
+            if self.queued + len(head) + len(data) > PLAYER_BYTES:
                 raise queue.Full
+            if head:
+                self.queue.put_nowait(head)
             self.queue.put_nowait(data)
-            self.queued += len(data)
+            self.queued += len(head) + len(data)
         except queue.Full:
             self.dropped += 1
             self._disable()  # kill is non-blocking; the Telegram reader proceeds immediately
@@ -94,6 +196,7 @@ class PlayerSegmenter:
     def _disable(self, warn: bool = True) -> None:
         with self._lock:
             process, self.process = self.process, None
+            self._resync = True
         if warn:
             self._warn()
         if process is not None:
@@ -108,12 +211,11 @@ class PlayerSegmenter:
                 break
         self.queued = 0
 
-    def _write(self) -> None:
-        process = self.process
+    def _write(self, process, source) -> None:
         try:
             while process is self.process and process.poll() is None:
                 try:
-                    data = self.queue.get(timeout=0.5)
+                    data = source.get(timeout=0.5)
                 except queue.Empty:
                     continue
                 self.queued -= len(data)
@@ -623,6 +725,41 @@ class Publisher:
             self._sock.close()
         except OSError:
             pass
+
+
+class LocalSink:
+    """The radio with no group stream: the same hand-over as Publisher (`player_output`, `send_flv`, `close`), but
+    nothing leaves this Mac. The encoder's FLV goes only to the private listen stream's segmenter, so there is no
+    connection, no stream key and no network traffic."""
+
+    diag = None
+    lead = 0.0
+    sent_bytes = 0
+
+    def __init__(self):
+        self.player: Optional[PlayerSegmenter] = None
+
+    def player_output(self, path: Path, report=None) -> None:
+        self.player = PlayerSegmenter(path, report)
+
+    def connect(self) -> None:
+        pass
+
+    def send_flv(self, stream: BinaryIO, stop: Optional[threading.Event] = None) -> None:
+        """Copy the encoder's output to the segmenter until it ends or `stop` is set. read1 returns what is ready, so
+        the listener hears the audio as the encoder makes it instead of waiting for a full buffer."""
+        read = getattr(stream, "read1", None) or stream.read
+        while not (stop and stop.is_set()):
+            data = read(4096)
+            if not data:
+                return
+            self.sent_bytes += len(data)
+            if self.player is not None:
+                self.player.offer(data)
+
+    def close(self) -> None:
+        if self.player is not None:
+            self.player.close()
 
 
 TAP_KEEP = 3  # newest tap files kept, the one being written included

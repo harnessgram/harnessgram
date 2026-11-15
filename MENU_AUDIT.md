@@ -19,6 +19,7 @@ Each line denotes a keyboard construction site; empty keyboards that remove butt
 - src/ctb/delivery.py:85 — markup — cancel
 - src/ctb/delivery.py:95 — cancel_markup — cancel
 - src/ctb/dialogs.py:657 — markup — cancel
+- src/ctb/permission_request.py:200 — card_markup — cancel (No declines the permission request and closes the card)
 - src/ctb/inbox.py:921 — send_status — close
 - src/ctb/inbox.py:977 — send_mode_menu — close
 - src/ctb/inbox.py:1240 — project_picker — cancel
@@ -59,19 +60,24 @@ Each line denotes a keyboard construction site; empty keyboards that remove butt
 - src/ctb/moves.py:145 — show_menu — back / close
 - src/ctb/moves.py:167 — suggest — cancel
 - src/ctb/panel_pin.py:97 — _markup — EXEMPT: permanent pinned topic link, not a menu.
-- src/ctb/cockpit_notice.py:66 — update — EXEMPT: one link to the open Cockpit question; the notice closes itself once answered.
+- src/ctb/cockpit_notice.py:69 — update — EXEMPT: one link to the open Cockpit question; the notice closes itself once answered.
 - src/ctb/dialogs.py:1506 — _background_card — EXEMPT: one Move to background button; the card clears itself when the command ends or after the tap.
 - src/ctb/sessions_menu.py:260 — list_view — close
 - src/ctb/sessions_menu.py:286 — detail_view — back
 - src/ctb/sessions_menu.py:291 — _confirm — cancel
 
 - src/ctb/telegram.py:151 — full_width — EXEMPT: reformats an existing keyboard without creating a menu.
+- src/ctb/sensitive_buttons.py:134 — mark_markup — EXEMPT: marks the sensitive buttons of an existing keyboard without creating a menu.
 
 ## Cockpit
 
+- src/ctb/panel_page.py — topic details sheet — Close, Escape/cancel, and Telegram/browser Back share the same close path; focus returns to its card when still present.
+- src/ctb/panel_page.py — completed topics — shared expandable section offers Collapse and Back.
 - src/ctb/panel_page.py:1237 — YouTube start confirmation — cancel
 - src/ctb/panel_page.py:1229 — YouTube project choices (always inline) — EXEMPT: always-visible inline settings, not a dismissible picker.
 - src/ctb/panel_page.py:1187 — native date picker — EXEMPT: native date picker is dismissed by the operating system.
 - src/ctb/panel_page.py:2043 — bottom bar More sheet — back (its More button toggles it; an outside tap or a tab choice closes it)
 - src/ctb/panel_page.py:1044 — session details — back (native details summary toggles)
 - src/ctb/panel_page.py:1310 — model choices (always inline) — EXEMPT: always-visible inline settings, not a dismissible picker.
+- src/ctb/inbox.py — auto_compact — EXEMPT: one Send-now button on the compaction notice; the compaction progress replaces it.
+- src/ctb/inbox.py — handle_button — EXEMPT: the Send-now notice after a tap: one disabled status line that the compaction replaces.

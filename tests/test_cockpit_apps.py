@@ -1,4 +1,4 @@
-"""Cockpit apps: manifests checked strictly, every /app/ route behind the owner's initData, a jailed media root
+"""Cockpit apps: manifests checked strictly, every /app/ route behind an app-scoped token, a jailed media root
 with HTTP Range, and an API command run without a shell, with a timeout and a small environment.
 
 The sample app lives only here: each test builds it in its own temporary state folder."""
@@ -72,17 +72,21 @@ def server():
     srv.server_close()
 
 
+def token(name="sample", **kw):
+    return panel.app_token(GOOD_TOKEN, OWNER, name, **kw)
+
+
 def get(srv, path, init=None, headers=None, auth=True):
     if auth:
-        init = signed() if init is None else init
+        init = token(path.split("/")[2]) if init is None else init
         path += ("&" if "?" in path else "?") + "auth=" + quote(init, safe="")
     return call(srv, "GET", path, headers=headers)
 
 
 def api(srv, body, init=None):
     raw = body if isinstance(body, bytes) else json.dumps(body).encode()
-    return call(srv, "POST", "/app/sample/api", init=signed() if init is None else init, body=raw,
-                headers={"Content-Type": "application/json"})
+    return call(srv, "POST", "/app/sample/api", body=raw,
+                headers={"Content-Type": "application/json", panel.APP_TOKEN_HEADER: token() if init is None else init})
 
 
 # --- manifests -----------------------------------------------------------------------------------
@@ -175,7 +179,7 @@ def test_a_page_symlink_out_of_the_app_folder_is_refused(server, tmp_path):
     lambda: signed(token="654321:" + "B" * 35),
     lambda: "garbage",
 ])
-def test_every_get_route_needs_the_owners_init_data(server, path, init):
+def test_every_get_route_rejects_owner_init_data_and_bad_credentials(server, path, init):
     make_app()
     (media_root() / "clip.mp4").write_bytes(b"\0" * 64)
     value = init()
@@ -189,26 +193,108 @@ def test_the_page_is_served_with_query_or_header_auth(server):
     code, hdrs, data = get(server, "/app/sample/")
     assert code == 200 and b"sample app" in data
     assert hdrs["Content-Type"] == "text/html; charset=utf-8" and hdrs["Cache-Control"] == "no-store"
-    assert call(server, "GET", "/app/sample/", init=signed())[0] == 200
+    assert call(server, "GET", "/app/sample/", headers={panel.APP_TOKEN_HEADER: token()})[0] == 200
 
 
 def test_a_repeated_or_malformed_auth_parameter_is_refused(server):
     make_app()
-    good = quote(signed(), safe="")
+    good = quote(token(), safe="")
     assert call(server, "GET", f"/app/sample/?auth={good}&auth={good}")[0] == 403
     assert call(server, "GET", f"/app/sample/?auth={good}&broken")[0] == 403
     assert call(server, "GET", f"/app/sample/?auth={good}&v=2")[0] == 200
 
 
-def test_the_api_needs_the_header_and_the_fresher_login(server):
+def test_app_routes_never_accept_full_owner_init_data(server):
     make_app()
-    old = signed(auth_date=int(time.time()) - panel.DECIDE_MAX_AGE - 60)
-    assert get(server, "/app/sample/", init=old)[0] == 200  # reading keeps the reading window
-    assert api(server, {"mode": "echo"}, init=old)[0] == 403  # acting needs the fresher one
+    (media_root() / "clip.mp4").write_bytes(b"private")
+    for path in ("/app/sample/", "/app/sample/media/clip.mp4"):
+        assert get(server, path, init=signed())[0] == 403
+        assert call(server, "GET", path, init=signed())[0] == 403
+        assert call(server, "GET", path, headers={panel.APP_TOKEN_HEADER: signed()})[0] == 403
+    assert call(server, "POST", "/app/sample/api", init=signed())[0] == 403
+    assert api(server, {"mode": "echo"}, init=signed())[0] == 403
     raw = json.dumps({"mode": "echo"}).encode()
-    assert call(server, "POST", "/app/sample/api?auth=" + quote(signed(), safe=""), body=raw)[0] == 404
+    assert call(server, "POST", "/app/sample/api?auth=" + quote(token(), safe=""), body=raw)[0] == 404
     assert call(server, "POST", "/app/sample/api", body=raw)[0] == 403
     assert api(server, {"mode": "echo"}, init=signed(tamper=True))[0] == 403
+
+
+def mint(server, name="sample", init=None, body=None):
+    return call(server, "POST", "/api/app-token", init=signed() if init is None else init,
+                body=json.dumps({"app": name} if body is None else body).encode())
+
+
+def test_only_the_owner_can_mint_a_short_lived_app_token(server):
+    make_app()
+    for bad in ("", signed(tamper=True), signed(user_id=OWNER + 1), token(),
+                signed(auth_date=int(time.time()) - panel.DECIDE_MAX_AGE - 1)):
+        assert mint(server, init=bad)[0] == 403
+    before = int(time.time())
+    code, headers, raw = mint(server)
+    data = json.loads(raw)
+    assert code == 200 and headers["Cache-Control"] == "no-store"
+    assert before < data["expires"] <= int(time.time()) + panel.APP_TOKEN_TTL
+    assert signed() not in data["token"] and GOOD_TOKEN not in raw.decode()
+    assert get(server, "/app/sample/", init=data["token"])[0] == 200
+    assert api(server, {"mode": "echo"}, init=data["token"])[0] == 200
+
+
+def test_minting_never_extends_the_owner_action_login(server):
+    make_app()
+    auth_date = int(time.time()) - panel.DECIDE_MAX_AGE + 90
+    code, _, raw = mint(server, init=signed(auth_date=auth_date))
+    assert code == 200
+    data = json.loads(raw)
+    assert data["expires"] == auth_date + panel.DECIDE_MAX_AGE
+    assert panel.valid_app_token(data["token"], GOOD_TOKEN, OWNER, "sample", now=data["expires"] - 1)
+    assert not panel.valid_app_token(data["token"], GOOD_TOKEN, OWNER, "sample", now=data["expires"])
+
+
+@pytest.mark.parametrize("body", [{}, {"app": "../sample"}, {"app": []}, {"app": "sample", "extra": True}])
+def test_minting_rejects_invalid_app_requests(server, body):
+    make_app()
+    assert mint(server, body=body)[0] == 400
+
+
+def test_tokens_are_bound_to_the_app_on_page_media_and_api_routes(server):
+    make_app()
+    make_app("other")
+    (media_root("other") / "private.png").write_bytes(b"private")
+    scoped = json.loads(mint(server)[2])["token"]
+    for path in ("/app/other/", "/app/other/media/private.png"):
+        assert get(server, path, init=scoped)[0] == 403
+        assert call(server, "GET", path, headers={panel.APP_TOKEN_HEADER: scoped})[0] == 403
+    assert call(server, "POST", "/app/other/api", headers={panel.APP_TOKEN_HEADER: scoped})[0] == 403
+    assert get(server, "/app/other/media/private.png", init=token("other"))[0] == 200
+    assert mint(server, name="unknown")[0] == 404
+
+
+def test_an_app_token_is_rejected_by_every_owner_api_and_cannot_mint_tokens(server):
+    make_app()
+    scoped = json.loads(mint(server)[2])["token"]
+    for route in panel.ROUTES:
+        assert call(server, "POST", route, init=scoped)[0] == 403, route
+        assert call(server, "POST", route, headers={panel.APP_TOKEN_HEADER: scoped})[0] == 403, route
+    assert call(server, init=signed())[0] == 200
+    assert not panel.valid_radio_token(scoped, GOOD_TOKEN, OWNER)
+
+
+@pytest.mark.parametrize("bad", [
+    lambda: token(now=time.time() - panel.APP_TOKEN_TTL - 1),
+    lambda: token(now=time.time() + panel.APP_TOKEN_TTL),
+    lambda: token()[:-64] + "0" * 64,
+    lambda: token().replace(".sample.", ".other."),
+    lambda: token() + ".extra",
+    lambda: panel.app_token(GOOD_TOKEN, OWNER + 1, "sample"),
+    lambda: panel.app_token("wrong-test-key", OWNER, "sample"),
+    lambda: panel.radio_token(GOOD_TOKEN, OWNER),
+])
+def test_expired_tampered_or_wrongly_scoped_tokens_never_reach_app_data(server, bad):
+    make_app()
+    (media_root() / "clip.mp4").write_bytes(b"private")
+    for path in ("/app/sample/", "/app/sample/media/clip.mp4"):
+        assert get(server, path, init=bad())[0] == 403
+    assert api(server, {}, init=bad())[0] == 403
 
 
 def test_other_methods_and_shapes_are_refused(server):
@@ -264,7 +350,7 @@ def test_a_media_file_is_served_whole(server, media):
     assert code == 200 and data == CLIP
     assert hdrs["Content-Type"] == "video/mp4" and hdrs["Accept-Ranges"] == "bytes"
     assert hdrs["Content-Length"] == str(len(CLIP)) and hdrs["X-Content-Type-Options"] == "nosniff"
-    assert hdrs["Cache-Control"].startswith("private") and "public" not in hdrs["Cache-Control"]
+    assert hdrs["Cache-Control"] == "no-store"
     assert hdrs["Content-Security-Policy"] == "default-src 'none'; sandbox"
     assert get(server, "/app/sample/media/shots/one.png")[1]["Content-Type"] == "image/png"
     assert get(server, "/app/sample/media/notes.json")[1]["Content-Type"] == "application/json"
@@ -476,11 +562,15 @@ def test_the_panel_page_frames_apps_safely():
     page = panel_page.PAGE
     assert 'f.setAttribute("sandbox","allow-scripts allow-forms")' in page and "allow-same-origin" not in page
     assert 'f.setAttribute("referrerpolicy","no-referrer")' in page
-    assert '"/app/"+name+"/?auth="+encodeURIComponent(wa.initData)' in page
-    handler = page[page.index("function onAppMessage("):]
+    assert '"/app/"+name+"/?auth="+encodeURIComponent(a.token)' in page
+    app_code = page[page.index("// --- cockpit apps:"):page.index("// --- tabs and the page around them")]
+    assert "initData:wa.initData" not in app_code and "encodeURIComponent(wa.initData)" not in app_code
+    assert app_code.count('"X-Telegram-Init-Data":wa.initData') == 1  # minting only, never a frame/API payload
+    handler = page[page.index("function onAppMessage("):page.index('window.addEventListener("message",onAppMessage);')]
     assert 'frameName(e.source)' in handler and 'e.origin!=="null"' in handler
     assert 'm.cockpit==="hello"' in handler and 'm.cockpit!=="api"' in handler
-    assert '"X-Telegram-Init-Data":wa.initData' in handler  # the API call goes through the panel, same origin
+    assert '"X-Cockpit-App-Token":a.token' in handler
+    assert '"X-Telegram-Init-Data"' not in handler and 'token:a.token,expires:a.expires' in handler
     assert ".concat(appTabs(d))" in page and "showApp(d);" in page
     assert "frame-src 'self'" in panel_page.csp("n", panel.FRAME_ANCESTORS)
     he, en = panel_page.STRINGS["he"], panel_page.STRINGS["en"]

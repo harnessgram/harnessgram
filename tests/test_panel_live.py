@@ -17,8 +17,8 @@ def test_live_activity_renders_below_steps_with_age_and_separate_language_lines(
         c.update(live_he="הבדיקות פועלות", task_he="בדיקת התיקון")
     strings = panel_page.STRINGS[lang]
     program = (DOM.replace("STRINGS", json.dumps(strings)).replace("SESSIONS", "[]").replace("WA", "null")
-               + "\nvar pf={format:String};function anim(k,v,f){f(v);}function plural(n,one,many){return n===1?one:many;}\n"
-               + "\n".join(func(n) for n in ("el", "says", "he", "progressBody"))
+               + "\nvar pf={format:String},cardTextOpen={},rtf=new Intl.RelativeTimeFormat(" + json.dumps(lang) + ",{numeric:'auto'});function anim(k,v,f){f(v);}function plural(n,one,many){return n===1?one:many;}\n"
+               + "\n".join(func(n) for n in ("el", "shown", "ago", "cardText", "progressBody"))
                + "\nvar box=new Element('div');progressBody(" + json.dumps(c) + ",box);"
                + "console.log(JSON.stringify(box.children.map(n=>({cls:n.className,text:n.textContent,"
                  "dir:n.dir,childDirs:n.children.map(c=>c.dir)}))));")
@@ -28,7 +28,7 @@ def test_live_activity_renders_below_steps_with_age_and_separate_language_lines(
     assert rendered[2]["text"] == strings["cardNow"]
     assert rendered[3]["text"] == c.get("live_he", c["live"])
     assert rendered[3]["childDirs"] == ["auto"]
-    assert rendered[4]["text"] == strings["cardLiveUpdated"].replace("{0}", "3")
+    assert rendered[4]["text"] == strings["cardUpdated"] + (" לפני 3 דקות" if lang == "he" else " 3 minutes ago")
     assert rendered[5]["text"] == strings["cardTask"]
     assert rendered[6]["text"] == c.get("task_he", c["task"])
     assert rendered[6]["childDirs"] == ["auto"]
@@ -37,5 +37,5 @@ def test_live_activity_renders_below_steps_with_age_and_separate_language_lines(
 
 def test_live_labels_exist_in_both_languages():
     assert panel_page.STRINGS["he"].keys() == panel_page.STRINGS["en"].keys()
-    for key in ("cardNow", "cardTask", "cardLiveUpdated"):
+    for key in ("cardNow", "cardTask", "cardUpdated", "cardTextMore", "cardTextLess"):
         assert panel_page.STRINGS["he"][key] and panel_page.STRINGS["en"][key]

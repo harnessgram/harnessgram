@@ -502,34 +502,36 @@ def test_the_room_cap_is_its_own_setting_with_a_hard_ceiling():
 def _station(c):
     st = radio.Station.__new__(radio.Station)
     st.cfg, st.s = c, radio.settings(c)
-    st.mixer, st.usage, st.cache = radio.Mixer(b"\x00\x00" * 100), V.Usage(radio.folder() / "tts-usage.json"), \
+    st.mixer, st.usage, st.cache = radio.Mixer(b"\x00\x00" * 100), V.paid_usage(radio.folder()), \
         radio.folder() / "tts-cache"
     st.caption_lock, st.captions, st.headline, st.talks, st.tag = threading.Lock(), {}, ("", ""), {}, 0
     st.room_tags, st.status, st.dir = set(), {}, radio.folder()
     return st
 
 
-def test_room_speech_is_counted_apart_never_passes_its_cap_and_then_uses_the_free_voice(monkeypatch):
+def test_room_speech_counts_toward_shared_budget_and_subcap_then_uses_free_voice(monkeypatch):
     c = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER, target_language="he", ui_language="he",
                gemini_vertex_project="p", radio={"room_tts_daily_minutes": 1})
     st = _station(c)
+    radio.radio_listeners.player_fetch(st.dir)
     calls = []
 
     def vertex(text, cfg, model, voice, style, max_seconds=0.0, **k):
         calls.append(voice)
-        return b"\x01\x00" * V.RATE * 12, 12.0   # every clip bills 12 s
+        seconds = min(8.0, max_seconds)  # the fake provider obeys the requested ceiling
+        return b"\x01\x00" * int(V.RATE * seconds), seconds
     monkeypatch.setattr(V, "vertex", vertex)
     monkeypatch.setattr(V, "system_voice", lambda text, voice: b"\x02\x00" * V.RATE)
-    room_usage = V.Usage(RR.usage_path())
+    room_usage = st.usage.for_room()
     routes = []
-    for n in range(8):
+    for n in range(10):
         st.speak_room(f"המבקר: שורה מספר {'א' * (n + 1)} של החדר.", {"kind": "critic", "key": "critic"}, lambda: True,
                       False)
         routes.append(st.status.get("route"))
         assert room_usage.today() <= 60.0 + 1e-6      # the room's 1 minute is never passed
     assert "say" in routes and routes.index("say") > 0 and set(calls) == {"Charon"}
-    assert st.usage.today() == 0.0                   # the radio's own minutes are untouched
-    assert RR.usage_path() != radio.folder() / "tts-usage.json"
+    assert st.usage.today() == room_usage.today() > 0  # every room second also uses the shared budget
+    assert room_usage.path == st.usage.path
 
 
 def test_a_room_cap_of_zero_never_calls_the_paid_voice(monkeypatch):
@@ -633,7 +635,7 @@ def _http_400_then_long_audio(calls):
     return urlopen
 
 
-def test_f1_the_room_cap_never_sends_a_request_without_a_length_ceiling(monkeypatch):
+def test_f1_the_room_cap_records_a_runaway_uncapped_answer_and_blocks_paid_speech(monkeypatch):
     calls = []
     monkeypatch.setattr(V, "NO_CEILING", set())
     monkeypatch.setattr(V.urllib.request, "urlopen", _http_400_then_long_audio(calls))
@@ -642,13 +644,15 @@ def test_f1_the_room_cap_never_sends_a_request_without_a_length_ceiling(monkeypa
     c = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER, target_language="he", ui_language="he",
                gemini_vertex_project="p", radio={"room_tts_daily_minutes": 15, "tts_model": "gemini-3.8-flash-tts"})
     st = _station(c)
+    radio.radio_listeners.player_fetch(st.dir)
     room_usage = V.Usage(RR.usage_path())
     room_usage.add(15 * 60 - 45)                         # 45 seconds left today
     st.speak_room("המבקר: " + "א" * 40, "critic", lambda: True, False)
-    assert len(calls) == 1 and calls[0]                  # only the request with the ceiling was sent
-    assert st.status["route"] == "say" and room_usage.today() <= 15 * 60
+    assert len(calls) == 2 and calls[0] and calls[1] is None   # refused with the ceiling, repeated without it
+    assert st.status["route"] == "say"                   # 300 s came back for a short line: discarded, never aired
+    assert V.paid_usage(st.dir).today() >= 300           # the full observed cost is recorded, not hidden
     st.speak_room("המבקר: " + "ב" * 40, "critic", lambda: True, False)
-    assert len(calls) == 1 and st.status["route"] == "say"  # the model is known to refuse: no paid request at all
+    assert len(calls) == 2 and st.status["route"] == "say"  # the overrun blocked the day: no further paid request
 
 
 def test_f8_usage_is_kept_per_date_and_a_clock_moved_back_never_renews_it(tmp_path):

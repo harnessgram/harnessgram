@@ -384,7 +384,7 @@ def test_cold_compact_context_below_threshold(tmp_path):
     write_private(state_dir() / "auto-compact", "200")
 
     t = tmp_path / "transcript.jsonl"
-    r = {"message": {"role": "assistant", "usage": {"input_tokens": 100_000}}}
+    r = {"type": "assistant", "timestamp": idle_since, "message": {"role": "assistant", "usage": {"input_tokens": 100_000}}}
     t.write_text(json.dumps(r) + "\n", encoding="utf-8")
 
     assert cold_compact("s", str(t), idle_since, clock=lambda: now) is False
@@ -397,16 +397,15 @@ def test_cold_compact_starts_and_waits_for_marker(tmp_path):
     write_private(state_dir() / "auto-compact", "200")
 
     t = tmp_path / "transcript.jsonl"
-    r = {"message": {"role": "assistant", "usage": {"input_tokens": 160_000}}}
+    r = {"type": "assistant", "timestamp": idle_since, "message": {"role": "assistant", "usage": {"input_tokens": 160_000}}}
     t.write_text(json.dumps(r) + "\n", encoding="utf-8")
 
     spawn_called = []
 
-    def fake_spawn(session, ctx):
+    def fake_spawn(session, ctx, *a, cold_attempt=None, **kw):
+        # The worker reports its own attempt as submitted; an unrelated session-wide marker never counts.
         spawn_called.append((session, ctx))
-        m = compact.marker(session)
-        m.parent.mkdir(parents=True, exist_ok=True)
-        m.write_text("1")
+        assert compact.cold_transition(session, cold_attempt, "started")
 
     res = cold_compact(
         "sess-cold",
@@ -433,7 +432,7 @@ def test_cold_compact_times_out_and_falls_back(tmp_path):
     write_private(state_dir() / "auto-compact", "200")
 
     t = tmp_path / "transcript.jsonl"
-    r = {"message": {"role": "assistant", "usage": {"input_tokens": 160_000}}}
+    r = {"type": "assistant", "timestamp": idle_since, "message": {"role": "assistant", "usage": {"input_tokens": 160_000}}}
     t.write_text(json.dumps(r) + "\n", encoding="utf-8")
 
     # spawn does not write any marker

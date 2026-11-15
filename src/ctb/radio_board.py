@@ -9,7 +9,7 @@ Three layers, each testable on its own:
   project, what waits for the owner), each slide a plain dict; `ticker(...)` is the running line under them.
 
 The staff edition never reads any of this: `staff_slide(view)` takes only `radio_staff.staff_view` output
-(allowlisted, gated project names and counts), so no item text can reach a staff frame.
+(allowlisted labels and numbers only), so no item or card text can reach a staff frame.
 """
 from __future__ import annotations
 
@@ -133,9 +133,11 @@ def agents_running(root: Path, now: float, stale: float = 6 * 3600) -> Dict[str,
     return out
 
 
-def gather(cfg, s: dict, now: float, asking: Iterable[str] = ()) -> dict:
+def gather(cfg, s: dict, now: float, asking: Iterable[str] = (), public_only: bool = False) -> dict:
     """Every source, read once, with each item's project already named (a key from `project_key`). Only reads:
-    the board, card, decision and topic files are replaced atomically by their writers."""
+    the board, card, decision and topic files are replaced atomically by their writers. `public_only`: for
+    anything that leaves the owner's surfaces (the YouTube mirror, audio it re-broadcasts): only cards whose
+    visibility is exactly "public" (cards.is_public) are read at all."""
     from . import board, cards, decisions, projects
     from .config import home_chat, state_dir
     from .sessions_menu import collect as session_entries
@@ -158,7 +160,7 @@ def gather(cfg, s: dict, now: float, asking: Iterable[str] = ()) -> dict:
     board_items = [(of_chat(chat, names_by_place.get((chat, thread), "")), item)
                    for chat, thread, item in board.all_items()]
     progress = [(of_chat(c["chat"], names_by_place.get((c["chat"], c["thread"]), "")), c)
-                for c in cards.open_cards() if c["kind"] == "progress"]
+                for c in cards.open_cards() if c["kind"] == "progress" and (not public_only or cards.is_public(c))]
     asked = [{"project": of_chat(r["chat"], names_by_place.get((r["chat"], r["thread"]), "")), "text": r["title"],
               "at": r["created"]} for r in decisions.open_decisions()]
     short_ids = set(asking)
@@ -168,6 +170,19 @@ def gather(cfg, s: dict, now: float, asking: Iterable[str] = ()) -> dict:
     return {"ledger": ledger_by_project(ledger_dir), "board": board_items, "cards": progress,
             "sessions": sessions, "agents": agents_running(state_dir() / "agents-topics", now),
             "decisions": asked, "questions": questions}
+
+
+def card_projects(cfg) -> List[Tuple[str, dict]]:
+    """[(project key, card)] for the open PUBLIC progress cards that live in a project's own group chat: the only
+    authoritative owner of a card. A card in the owner's home chat, or anywhere else, is never attributed to a
+    project (not even through its topic's title). Its one reader is the YouTube staff station, so a card whose
+    visibility is not exactly "public" (private by default, team, missing or unknown) is never returned. Only reads."""
+    from . import cards
+    from .config import home_chat
+    home = home_chat(cfg)
+    groups = {p.chat_id: p.name for p in getattr(cfg, "projects", []) or [] if p.chat_id != home}
+    return [(project_key(groups[c["chat"]]), c) for c in cards.open_cards()
+            if c.get("kind") == "progress" and c.get("chat") in groups and cards.is_public(c)]
 
 
 # --- one record per project (pure) ------------------------------------------------------------------
@@ -364,25 +379,37 @@ def digest(slide: dict) -> str:
     return hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
 
 
-# --- the staff edition: names and counts only -------------------------------------------------------------
+# --- the staff edition: progress, counts and checked lines only ----------------------------------------------
+
+def _small(value: object, most: int = 999) -> int:
+    return min(max(value, 0), most) if isinstance(value, int) and not isinstance(value, bool) else 0
+
 
 def staff_slide(view: dict) -> dict:
-    """The staff board from `radio_staff.staff_view` output ONLY: each listed project's gated label and two
-    counts. No other field of the view is read, so nothing else (no item text, nothing waiting on the owner)
-    can reach the picture."""
+    """The staff board from `radio_staff.staff_view` output ONLY: each listed project's label, its live cards as
+    numbers (done, total, percent) and the day's counts. No other field of the view is read and the view holds no
+    card text, so nothing else (no title, no step, nothing waiting on the owner) can reach the picture."""
     from . import radio_staff
     lang = view.get("lang") if view.get("lang") in ("he", "en") else "he"
+    prof = {"lang": lang, "filters": view.get("filters") or {}}
+    sections = view.get("sections") or []
     rows = []
     for p in (view.get("projects") or [])[:radio_staff.MAX_PROJECTS]:
         label = radio_staff.gate(p.get("label"), lang, 40)
-        if not label:
+        if not label or radio_staff.blocked(label, prof):
             continue
-        done = len(p.get("done") or []) if "done_today" in (view.get("sections") or []) else 0
-        open_n = p.get("open") if isinstance(p.get("open"), int) and not isinstance(p.get("open"), bool) else 0
-        rows.append({"name": label, "done": min(done, 999), "open": min(max(open_n, 0), 999)})
-    title = radio_staff.gate(view.get("title"), lang, 40) or (radio_staff.TITLE_HE if lang == "he" else radio_staff.TITLE_EN)
-    sl = {"kind": "staff", "lang": lang, "title": title, "rows": rows[:radio_staff.MAX_PROJECTS],
-          "clock": _clock(_num(view.get("at")) or time.time())}
+        done = len(p.get("done") or []) if "done_today" in sections else 0
+        cards = []
+        for c in (p.get("cards") or [])[:radio_staff.MAX_CARDS]:
+            if not isinstance(c, dict):
+                continue
+            total = _small(c.get("total"), 99)
+            cards.append({"done": min(_small(c.get("done"), 99), total) if total else 0, "total": total,
+                          "pct": _small(c.get("pct"), 100)})
+        rows.append({"name": label, "done": min(done, 999), "open": _small(p.get("open")),
+                     "pct": _small(p.get("pct"), 100) if cards else 0, "cards": cards})
+    sl = {"kind": "staff", "lang": lang, "title": radio_staff.station_title(view.get("title"), prof),
+          "rows": rows[:radio_staff.MAX_PROJECTS], "clock": _clock(_num(view.get("at")) or time.time())}
     sl["key"] = digest(sl)
     return sl
 

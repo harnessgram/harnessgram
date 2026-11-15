@@ -1,0 +1,21 @@
+/* "What Harnessgram adds to your agents": built on the knowledge page's parts; logical properties only. */
+.cockpit-v2 .va-entry{margin-block-start:0}
+.cockpit-v2 .va-now{display:flex;align-items:center;justify-content:center;gap:8px;min-block-size:44px;margin-block:6px 12px;padding-inline:var(--v2-pad);border-radius:var(--v2-pill);background:var(--v2-success);border:1px solid #b8e6b0;color:#155a10;font-size:15px;font-weight:800}
+.cockpit-v2 .va-now svg{inline-size:20px;block-size:20px;flex:none}
+.cockpit-v2 .va-group{padding:12px}
+.cockpit-v2 .va-note{margin-block:0 10px;margin-inline:6px;font-size:14px;color:var(--v2-muted);line-height:1.4}
+.cockpit-v2 .va-row{align-items:center;padding-inline-end:12px;min-inline-size:0}
+.cockpit-v2 .va-row-main{cursor:default;padding-block:12px;padding-inline:12px 4px;align-items:flex-start}
+.cockpit-v2 .va-row .vk-row-text b{-webkit-line-clamp:2}
+.cockpit-v2 .va-row .vk-row-text>.va-text{display:block;-webkit-line-clamp:unset;overflow:visible;overflow-wrap:anywhere}
+.cockpit-v2 .va-row .vk-row-text>.va-providers{display:block;margin-block-start:4px;font-size:12.5px;font-weight:700;color:var(--v2-blue);-webkit-line-clamp:unset}
+.cockpit-v2 .va-row .vk-sw{flex:none}
+.cockpit-v2 .va-always{flex:none;display:flex;flex-direction:column;align-items:center;gap:2px;max-inline-size:76px;padding-block:6px;color:#9a6c00;font-size:12px;font-weight:800;text-align:center;line-height:1.2}
+.cockpit-v2 .va-always svg{inline-size:24px;block-size:24px}
+.cockpit-v2 .va-always.off{color:var(--v2-orange)}
+:root.cockpit-v2[data-theme="dark"] .va-now{border-color:#3d7a42;color:#d6f5cf}
+:root.cockpit-v2[data-theme="dark"] .va-always{color:#ffd27a}
+:root.cockpit-v2[data-theme="dark"] .va-providers{color:#9fc0ff}
+@media(prefers-color-scheme:dark){:root.cockpit-v2:not([data-theme="light"]) .va-now{border-color:#3d7a42;color:#d6f5cf}
+ :root.cockpit-v2:not([data-theme="light"]) .va-always{color:#ffd27a}
+ :root.cockpit-v2:not([data-theme="light"]) .va-providers{color:#9fc0ff}}

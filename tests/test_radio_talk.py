@@ -175,12 +175,16 @@ def test_when_the_paid_minutes_run_out_the_free_voice_goes_on_and_says_so_once(t
     said = []
     monkeypatch.setattr(V, "system_voice", lambda text, voice: said.append(text) or b"\x02\x00" * 100)
     monkeypatch.setattr(V, "vertex", lambda *a, **k: (b"", 0.0))
+    st.s["tts_listening_minutes"] = 1
+    radio.radio_listeners.player_fetch(st.dir)
     st.usage.add(60.0)  # the whole minute is used
     st.speak("שורה ראשונה.")
     st.speak("שורה שנייה.")
     notices = [t for t in said if "נגמרו" in t]
     assert len(notices) == 1 and said[-1] == "שורה שנייה."  # announced once, then the free voice simply goes on
-    assert radio.minutes(cfg()) == {"tts_minutes_today": 0.0, "tts_daily_minutes": 25}  # its own usage file
+    minutes = radio.minutes(cfg())  # its own usage file
+    assert minutes["tts_minutes_today"] == 0.0 and minutes["tts_listening_minutes"] == 60
+    assert minutes["listening"] and minutes["listening_source"] == "player"
 
 
 def test_news_never_repeat_a_finished_session_whose_reply_is_spoken():

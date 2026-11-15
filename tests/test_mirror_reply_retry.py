@@ -341,9 +341,13 @@ def test_queued_translation_does_not_queue_a_second_fallback(rig, monkeypatch, m
     sender.send_reply("Test", "sess-1", original, lambda _: translated)
     entries = queue()
     assert len(entries) == 1
-    assert (translated if mode == "off" else original) in mirror._plain(entries[0]["text"])
+    # Every mode queues the owner's language; "edit" folds the original under it in the same part.
+    assert translated in mirror._plain(entries[0]["text"])
+    assert (original in mirror._plain(entries[0]["text"])) == (mode == "edit")
+    assert "hold_until" not in entries[0] and "reply" not in entries[0]
     heartbeat.run_once(cfg, bot, find=lambda _: None)
     assert len(bot.delivered) == 1 and queue() == []
+    assert translated in mirror._plain(bot.delivered[0]["text"])
 
 
 def test_third_flood_wait_can_still_succeed(rig, monkeypatch):
@@ -404,18 +408,176 @@ def test_queued_project_reply_moved_home_uses_current_chat(rig):
     assert sender.topics.place_of("sess-1") == home
 
 
-def test_partial_instant_reply_does_not_duplicate_original_parts(rig, monkeypatch):
+@pytest.mark.parametrize("mode", ["edit", "edit-off"])
+def test_partial_instant_reply_releases_only_its_original_remainder(rig, monkeypatch, mode):
+    # Part 1 arrived before the flood: the queued rest has no matching translated part, so the
+    # original remainder goes out unchanged; the reply never arrives twice.
     cfg, bot, sender = rig
-    cfg.original = "edit"
+    cfg.original = mode
     cfg.target_language = "he"
     bot.errors = [None, error(401)]
     monkeypatch.setattr(mirror, "translate_reply", lambda text, fn, lang: fn(text))
     sender.send_reply("Test", "sess-1", "x" * 12000, lambda _: "תשובה מתורגמת")
     assert len(bot.delivered) == 1 and len(queue()) > 1
+    assert all("hold_until" not in e for e in queue())
     heartbeat.run_once(cfg, bot, find=lambda _: None)
     assert queue() == []
     assert sum(mirror._plain(p["text"]).count("x") for p in bot.delivered) == 12000
     assert not any("תשובה מתורגמת" in p["text"] for p in bot.delivered)
+
+
+def test_parts_drained_before_the_swap_release_the_rest_unchanged(rig, monkeypatch):
+    # The hold ran out and the drain sent the first queued part: the swap must not resend the reply.
+    from ctb import flood
+    cfg, bot, sender = rig
+    cfg.original = "edit"
+    cfg.target_language = "he"
+    monkeypatch.setattr(mirror, "translate_reply", lambda text, fn, lang: fn(text))
+    flood.record_429(123, 30)
+    settle = mirror.Mirror._settle_queued
+
+    def drained_first(self, session, tag, *args, **kwargs):
+        with reply_outbox.locked() as path:
+            entries = reply_outbox.load(path)
+            first = next(i for i, e in enumerate(entries) if e.get("reply") == tag)
+            entries.pop(first)  # what the drain does after delivering it
+            reply_outbox.save(path, entries)
+        return settle(self, session, tag, *args, **kwargs)
+    monkeypatch.setattr(mirror.Mirror, "_settle_queued", drained_first)
+    sender.send_reply("Test", "sess-1", "x" * 12000, lambda _: "תשובה מתורגמת")
+    entries = queue()
+    assert entries and all("hold_until" not in e and "x" in e["text"] for e in entries)
+    assert not any("תשובה מתורגמת" in e["text"] for e in entries)
+
+
+def test_concurrent_reply_between_queued_parts_keeps_its_turn(rig, monkeypatch):
+    # Replies A and B of one session interleave as A1, B, A2: A2 must never overtake B.
+    from ctb import flood
+    cfg, bot, sender = rig
+    cfg.original = "edit-off"
+    cfg.target_language = "he"
+    monkeypatch.setattr(mirror, "translate_reply", lambda text, fn, lang: fn(text))
+    flood.record_429(123, 30)
+    post = mirror.Mirror._post
+    seen = []
+
+    def interleave(self, *args, **kwargs):
+        result = post(self, *args, **kwargs)
+        seen.append(1)
+        if len(seen) == 1:  # another reply of the same session queues its part between A1 and A2
+            with reply_outbox.locked() as path:
+                entries = reply_outbox.load(path)
+                b = dict(entries[-1], text="reply B")
+                b.pop("reply", None), b.pop("hold_until", None), b.pop("index", None)
+                reply_outbox.save(path, entries + [b])
+        return result
+    monkeypatch.setattr(mirror.Mirror, "_post", interleave)
+    sender.send_reply("Test", "sess-1", "x" * 12000, lambda _: "תשובה מתורגמת")
+    texts = [e["text"] for e in queue()]
+    assert len(texts) > 2 and texts[1] == "reply B"
+    assert all("x" in t for i, t in enumerate(texts) if i != 1)
+    assert not any("תשובה מתורגמת" in t for t in texts)
+    assert all("hold_until" not in e for e in queue())
+
+
+HE_LONG = "\n\n".join(f"פסקה מספר {i} " + "מילה " * 300 for i in range(4))
+EN_TEXT = "This is the final answer with enough English letters to require translation."
+
+
+@pytest.mark.parametrize("mode", ["edit", "edit-off"])
+def test_part_queued_during_flood_is_delivered_translated(rig, monkeypatch, mode):
+    from ctb import flood
+    cfg, bot, sender = rig
+    cfg.original = mode
+    cfg.target_language = "he"
+    monkeypatch.setattr(mirror, "translate_reply", lambda text, fn, lang: fn(text))
+    flood.record_429(123, 30)  # the topic is flood limited: the whole reply is queued
+    sender.send_reply("Test", "sess-1", EN_TEXT, lambda _: "התשובה בעברית")
+    assert bot.attempts == []
+    entries = queue()
+    assert entries and all("hold_until" not in e for e in entries)
+    assert "התשובה בעברית" in entries[0]["text"]
+    monkeypatch.setattr(flood, "remaining", lambda chat, now=None: 0.0)
+    heartbeat.run_once(cfg, bot, find=lambda _: None)
+    assert queue() == []
+    first = bot.delivered[0]["text"]
+    assert "(באיחור)\nהתשובה בעברית" in first  # the marker keeps a line of its own
+    if mode == "edit-off":
+        assert len(bot.delivered) == 1 and "English" not in first
+    else:
+        assert EN_TEXT in mirror._plain("".join(p["text"] for p in bot.delivered))  # folded under it
+
+
+def test_translation_failure_still_delivers_the_original(rig, monkeypatch):
+    cfg, bot, sender = rig
+    cfg.original = "edit"
+    cfg.target_language = "he"
+    bot.errors = [error(401)]
+
+    def broken(text, fn, lang):
+        raise RuntimeError("engine down")
+    monkeypatch.setattr(mirror, "translate_reply", broken)
+    sender.send_reply("Test", "sess-1", EN_TEXT, lambda _: "unused")
+    entries = queue()
+    assert len(entries) == 1 and EN_TEXT in mirror._plain(entries[0]["text"])
+    assert "hold_until" not in entries[0] and "reply" not in entries[0]  # released, not left waiting
+    heartbeat.run_once(cfg, bot, find=lambda _: None)
+    assert queue() == [] and len(bot.delivered) == 1
+    assert EN_TEXT in mirror._plain(bot.delivered[0]["text"])
+
+
+def test_translated_parts_keep_their_order_behind_earlier_parts(rig, monkeypatch):
+    cfg, bot, sender = rig
+    cfg.original = "edit-off"
+    cfg.target_language = "he"
+    bot.errors = [error(401)]
+    monkeypatch.setattr(mirror, "translate_reply", lambda text, fn, lang: fn(text))
+    sender._post(123, sender.topics, "sess-1", "Test", "earlier part")  # already waiting in the outbox
+    sender._post(123, sender.topics, "sess-2", "Other", "another session")
+    reply_markup = sender._reply_keyboard("", "sess-1")
+    sender.send_reply("Test", "sess-1", EN_TEXT, lambda _: HE_LONG, answer_to={"chat": 123, "id": 42})
+    entries = [e for e in queue() if e["session"] == "sess-1"]
+    assert entries[0]["text"] == "earlier part" and len(entries) > 2
+    translated = entries[1:]
+    assert translated[0]["answer_to"] == {"chat": 123, "id": 42}
+    assert all(e["answer_to"] is None for e in translated[1:])
+    assert all(e["options"]["reply_markup"] is None for e in translated[:-1])
+    last = dict(translated[-1]["options"]["reply_markup"])
+    assert last.pop("_listen")["inline_keyboard"][0][0]["callback_data"].startswith("ls:")  # the listen button rides along
+    assert last == reply_markup
+    heartbeat.run_once(cfg, bot, find=lambda _: None)
+    assert queue() == []
+    texts = [mirror._plain(p["text"]) for p in bot.delivered if p.get("message_thread_id") ==
+             sender.topics.place_of("sess-1").thread]
+    assert "earlier part" in texts[0]
+    assert len(texts) > 2 and all(t.startswith("\u200f(באיחור)\n") or t.startswith("(באיחור)\n") for t in texts[1:])
+    joined = "\n".join(texts[1:])
+    at = [joined.index(f"פסקה מספר {i} ") for i in range(4)]
+    assert at == sorted(at)  # every paragraph of the translation, in order
+    replies = [p for p in bot.delivered if "reply_parameters" in p]
+    assert len(replies) == 1 and replies[0]["reply_parameters"]["message_id"] == 42
+    assert "פסקה מספר 0 " in mirror._plain(replies[0]["text"])
+
+
+def test_drain_waits_for_a_running_translation_but_not_forever(rig, monkeypatch):
+    cfg, bot, sender = rig
+    bot.errors = [error(401), error(401)]
+    sender._queue_tag = "tag"
+    sender._post(123, sender.topics, "sess-1", "Test", "original part")
+    sender._queue_tag = None
+    sender._post(123, sender.topics, "sess-1", "Test", "later part")
+    sender._post(123, sender.topics, "sess-2", "Other", "free session")
+    held = queue()[0]
+    assert held["reply"] == "tag" and held["hold_until"] > time.time()
+    heartbeat.run_once(cfg, bot, find=lambda _: None)
+    assert [mirror._plain(p["text"]) for p in bot.delivered] == ["(delayed)\nfree session"]
+    assert [e["text"] for e in queue()] == ["original part", "later part"]  # the held session waits whole
+    now = time.time() + mirror.QUEUED_TRANSLATION_HOLD + 1  # the replying process died: the hold runs out
+    monkeypatch.setattr(reply_outbox.time, "time", lambda: now)
+    heartbeat.run_once(cfg, bot, find=lambda _: None)
+    assert queue() == []
+    assert [mirror._plain(p["text"]) for p in bot.delivered[1:]] == ["(delayed)\noriginal part",
+                                                                    "(delayed)\nlater part"]
 
 
 def test_a_damaged_outbox_starts_empty_and_never_stops_the_heartbeat(tmp_path):
@@ -590,3 +752,26 @@ def test_a_400_that_is_not_bad_html_keeps_the_part_pending(rig):
     seed_queue([entry("sess-1", "waits")])
     bot.errors = [error(400)]
     assert reply_outbox.drain(cfg, bot) == 0 and [e["text"] for e in queue()] == ["waits"]
+
+
+def test_slow_translation_releases_queued_original_before_its_hold_ends(rig, monkeypatch):
+    cfg, bot, sender = rig
+    cfg.original = "edit"
+    cfg.target_language = "he"
+    bot.errors = [error(401)]
+    release = threading.Event()
+
+    def slow(text, fn, lang):
+        release.wait(5)
+        return fn(text)
+    monkeypatch.setattr(mirror, "translate_reply", slow)
+    monkeypatch.setattr(mirror, "QUEUED_TRANSLATION_HOLD", 10.3)  # leaves the reply 0.3 s to settle
+    started = time.monotonic()
+    sender.send_reply("Test", "sess-1", EN_TEXT, lambda _: "התשובה בעברית")
+    release.set()
+    assert time.monotonic() - started < 3
+    entries = queue()
+    assert len(entries) == 1 and EN_TEXT in mirror._plain(entries[0]["text"])
+    assert "hold_until" not in entries[0]
+    heartbeat.run_once(cfg, bot, find=lambda _: None)
+    assert queue() == [] and EN_TEXT in mirror._plain(bot.delivered[0]["text"])

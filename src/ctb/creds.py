@@ -1,6 +1,7 @@
 """Credential-looking text: detection (refuse incoming), redaction (outgoing), and relay access."""
 from __future__ import annotations
 
+import functools
 import html
 import json
 import os
@@ -471,14 +472,64 @@ def _spaced_hides(word: str, val: str) -> bool:
     return _label_hides(word, val) and bool(re.search(r"\d", val))
 
 
+_MEMO_CHARS = 2048  # a longer text is cleaned each time: it is rare, and the memo stays small
+_MEMO_ENTRIES = 16384
+
+
 def redact_channel(text: str) -> str:
     """redact() plus the label-based cleaning for the alerts channel (see above). Cleaning catches known
     shapes, not everything. The text is decoded once first (normalize): a short labelled secret written
-    encoded ("%6ftp: 482913") is caught like a plain one; the decoded text is what goes out only then."""
-    return _decoded_aware(text or "", _redact_channel)
+    encoded ("%6ftp: 482913") is caught like a plain one; the decoded text is what goes out only then.
+
+    The answer depends on the text alone, so a short text is remembered (the panel cleans the same strings
+    again on every state build)."""
+    text = text or ""
+    if len(text) > _MEMO_CHARS:
+        return _decoded_aware(text, _redact_channel)
+    return _redact_channel_memo(text)
+
+
+@functools.lru_cache(maxsize=_MEMO_ENTRIES)
+def _redact_channel_memo(text: str) -> str:
+    return _decoded_aware(text, _redact_channel)
+
+
+# Cheap tests of whether a pattern below can match at all. Each one names text every match of its patterns must
+# contain, so a text without it is returned as it is by those patterns; the regular expressions themselves, which
+# scan every position, then run only on text that might hold what they look for. Case is folded by the same
+# engine and flags the patterns use, so both sides agree on what counts as the same letter.
+_LABEL_WORDS = ("pass", "pwd", "pw", "secret", "token", "key", "otp", "pin", "credential", "code", "auth")
+_HEBREW_LABEL_WORDS = ("\u05e1\u05d9\u05e1\u05de", "\u05d0\u05e1\u05d9\u05de\u05d5\u05df", "\u05d8\u05d5\u05e7\u05df",
+                       "\u05e1\u05d5\u05d3", "\u05de\u05e4\u05ea\u05d7", "\u05e7\u05d5\u05d3")
+_COMMAND_WORDS = ("mysql", "mariadb", "sshpass", "curl", "authorization", "cookie")
+_SPACE_LABEL_WORDS = ("pass", "pwd", "otp", "pin")
+_HINT_LABEL = re.compile("(?i)" + "|".join(_LABEL_WORDS + _HEBREW_LABEL_WORDS))
+_HINT_COMMAND = re.compile("(?i)" + "|".join(_COMMAND_WORDS))
+_HINT_SPACE_LABEL = re.compile("(?i)" + "|".join(_SPACE_LABEL_WORDS))
+_HINT_BEARER = re.compile(r"(?i)bearer")
+_HINT_IS = re.compile(r"(?i)[ \t]is")
+_HINT_SHAPE = re.compile(r"-----BEGIN|gh[pousr]_|github_pat_|sk-|AKIA|xox|AIza|eyJ|[0-9]{7}:|[A-Za-z0-9_+-]{32}")
+
+
+def _has_word(text: str, words: tuple, pattern: re.Pattern) -> bool:
+    """Whether `text` holds one of `words` in any case. Plain ASCII text is lowered and searched with `in`, which
+    is what the case-insensitive pattern means for it and is several times faster; any other text goes to
+    the pattern itself, so letters that fold in unusual ways (the long s, the Kelvin sign) count as before."""
+    if text.isascii():
+        low = text.lower()
+        return any(w in low for w in words)
+    return pattern.search(text) is not None
 
 
 def _redact_channel(text: str) -> str:
+    label = _has_word(text, _LABEL_WORDS, _HINT_LABEL)
+    if not label and not _has_word(text, _COMMAND_WORDS, _HINT_COMMAND) and not _HINT_SHAPE.search(text) \
+            and not _has_word(text, ("bearer",), _HINT_BEARER) and not ("://" in text and "@" in text):
+        return text
+    return _redact_channel_full(text, label)
+
+
+def _redact_channel_full(text: str, label: bool) -> str:
     def swap(hides):
         def pair(m: re.Match) -> str:
             if m.groupdict().get("qval") is not None:
@@ -493,14 +544,25 @@ def _redact_channel(text: str) -> str:
         return m.group() if not _label_hides("password", m.group("val")) else m.group("flag") + "[redacted]"
     def after(m: re.Match) -> str:
         return m.group("pre") + "[redacted]"
-    text = USERINFO.sub(lambda m: m.group(1) + ":[redacted]@", text)
-    text = FLAG_VALUE.sub(flag, text)
-    for pattern in (FLAG_P, CURL_USER, BASIC, COOKIE):
-        text = pattern.sub(after, text)
-    for pattern in (LABEL_VALUE, LABEL_NEXT, LABEL_IS, LABEL_HE):
-        text = pattern.sub(swap(_label_hides), text)
-    # The label passes go first: redact() would cut a quoted value at its first space ("'correct horse'").
-    return _redact(LABEL_SPACE.sub(swap(_spaced_hides), text))
+    if "://" in text and "@" in text:
+        text = USERINFO.sub(lambda m: m.group(1) + ":[redacted]@", text)
+    if label and "-" in text:
+        text = FLAG_VALUE.sub(flag, text)
+    if _has_word(text, _COMMAND_WORDS, _HINT_COMMAND):
+        for pattern in (FLAG_P, CURL_USER, BASIC, COOKIE):
+            text = pattern.sub(after, text)
+    if label:
+        # The label passes go first: redact() would cut a quoted value at its first space ("'correct horse'").
+        if ":" in text or "=" in text:
+            text = LABEL_VALUE.sub(swap(_label_hides), text)
+        if ":" in text:
+            text = LABEL_NEXT.sub(swap(_label_hides), text)
+        if _HINT_IS.search(text):
+            text = LABEL_IS.sub(swap(_label_hides), text)
+        text = LABEL_HE.sub(swap(_label_hides), text)
+        if _has_word(text, _SPACE_LABEL_WORDS, _HINT_SPACE_LABEL):
+            text = LABEL_SPACE.sub(swap(_spaced_hides), text)
+    return _redact(text)
 
 
 def _tail(val: str) -> str:

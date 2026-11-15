@@ -33,11 +33,12 @@ def test_the_app_routes_are_documented_with_their_logins():
     assert panel.APP_GET.fullmatch("/app/sample-app/") and panel.APP_GET.fullmatch("/app/sample-app/media/a/b.png")
     assert panel.APP_API.fullmatch("/app/sample-app/api")
     row = {line.split("|")[1].strip(): line for line in DOC.splitlines() if line.startswith("| `GET /app/") or line.startswith("| `POST /app/")}
-    assert "?auth=" in row["`GET /app/<name>/`"] and "1 hour" in row["`GET /app/<name>/`"]
+    assert "?auth=" in row["`GET /app/<name>/`"] and "10 minutes" in row["`GET /app/<name>/`"]
     assert "?auth=" in row["`GET /app/<name>/media/<path>`"]
     assert "header only" in row["`POST /app/<name>/api`"] and "15 minutes" in row["`POST /app/<name>/api`"]
     # the freshness windows quoted are the server's
     assert panel.MAX_AGE == 3600 and panel.DECIDE_MAX_AGE == 900
+    assert panel.APP_TOKEN_TTL == 600 and "`X-Cockpit-App-Token` header only" in row["`POST /app/<name>/api`"]
 
 
 def test_the_deployment_text_matches_the_installer():

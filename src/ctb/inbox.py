@@ -20,6 +20,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -31,7 +32,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import accounts, alerts, compact, delivery, dialogs, flood, framing, identity, members, pins, replay, sessions_menu, voice
+from . import accounts, alerts, compact, delivery, dialogs, flood, framing, identity, listen, members, pins, replay, sessions_menu, voice
 from . import lang as L
 from . import status
 from . import scheduled
@@ -40,6 +41,7 @@ from .i18n import both_langs, get_lang, t, t_en, t_he
 from . import agents_card, agents_topic, menus, moves
 from .agents_topic import AGENTS_TOPIC
 from .autopilot import at_prompt, away_active, set_away
+from .config import inbox_dir, safe_name  # noqa: F401  (re-exported: other modules take it from here)
 from .config import (ACTIVITY_LEVELS, AGENT_NOTICES, activity_level, set_activity_level, STATUS_REPOST, Config, home_chat, load as load_config, private_dir, set_setting,
                      setting_on, state_dir, write_private)
 from .telegram import Bot, TelegramError, reject_file_uris
@@ -98,11 +100,6 @@ def last_session(topics: Optional[TopicMap] = None) -> Optional[str]:
         return None
     newest = max(files, key=lambda p: p.stat().st_mtime)
     return newest.stem
-
-
-def safe_name(value: str) -> str:
-    """A session id or file name part that cannot escape its directory."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", value or "")[:120] or "_"
 
 
 def planned_restart_marker(session: str) -> Path:
@@ -414,6 +411,11 @@ class Inbox:
         try:  # the radio says this turn's reply when it answers a voice note (radio_talk.py)
             from . import radio_talk
             radio_talk.note_take(session, items)
+        except Exception:
+            pass
+        try:  # the owner's own words, kept for recall after a compaction (owner_journal.py)
+            from . import owner_journal
+            owner_journal.record(session, items)
         except Exception:
             pass
         try:
@@ -744,7 +746,7 @@ def run_delivered(cfg: Config, refs: List[str], bot=None) -> int:
 
 
 def default_inbox() -> Inbox:
-    return Inbox(state_dir() / "inbox")
+    return Inbox(inbox_dir())
 
 
 # --- voice, pictures, files ---------------------------------------------------
@@ -2664,6 +2666,19 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
             and chat.get("type", _home_type(cfg) if chat_id == home_chat(cfg) else None) == _chat_type(cfg, chat_id)
             and not (q.get("from") or {}).get("is_bot"))
     home_mine = mine and chat_id == home_chat(cfg)  # the buttons of the home group's global menus
+    if data.startswith("cold:"):
+        token = data[5:]
+        if not mine or not session or not re.fullmatch(r"[0-9a-f]{16}", token):
+            return "ignored"
+        cancelled = compact.cold_transition(session, token, "cancelled")
+        _answer_button(bot, q, t("compact_cold_cancelled" if cancelled else "compact_cold_late", lang=ui_lang))
+        try:
+            bot.call("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": m["message_id"],
+                "reply_markup": {"inline_keyboard": [[{"text": t("compact_cold_cancelled" if cancelled else
+                    "compact_cold_late", lang=ui_lang), "callback_data": "noop"}]]}})
+        except (TelegramError, KeyError):
+            pass
+        return "cold-cancelled" if cancelled else "cold-started"
     from .harness import legacy_topic_supported
     if not legacy_topic_supported(session):
         result = _refuse_harness(bot, cfg, m, q)
@@ -2830,6 +2845,9 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
             threading.Thread(target=lambda: command_when(q, cfg, bot, m, session), daemon=True).start()
         return "held"
 
+    if listen.CALLBACK.fullmatch(data):  # the listen button under a final reply: owner only, this topic's session
+        return listen.press(q, cfg, bot, session, mine)
+
     if data == "noop":
         _answer_button(bot, q, "")
         return "ignored"
@@ -2843,6 +2861,13 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
     if data.startswith("bd:"):  # a pin board button (board.py checks owner, chat, topic, message and item)
         from . import board
         return board.button(q, cfg, bot, inbox)
+
+    if data.startswith("pq:"):  # a permission request card's No: owner only, this topic's own session
+        from . import permission_request as PQ
+        if not mine or not session or not PQ.CALLBACK.fullmatch(data):
+            _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
+            return "ignored"
+        return PQ.button(q, cfg, bot, m, session, data)
 
     if data.startswith("dg:"):  # a dialog card: owner only, this topic's own session, one press per screen
         if not mine or not session or not re.fullmatch(r"dg:(?:s|[ebd]:[0-9a-f]{12}|[oxt]:\d{1,2}:[0-9a-f]{12}|k:(?:up|down|enter):[0-9a-f]{12})", data):
@@ -3155,6 +3180,18 @@ def _keyboard_word(text: str, session: Optional[str] = None) -> bool:
     return any(text in both_langs(k) for k in _KEYBOARD_KEYS) or text in _OLD_PANEL_BUTTONS
 
 
+def _unmarked(update: dict) -> dict:
+    """The update with a sensitive button's "hg!" marker (sensitive_buttons.py) taken off its callback data, so
+    every handler reads the data it put on the button. The marker only asks the app for Face ID; it grants nothing."""
+    q = update.get("callback_query") if isinstance(update, dict) else None
+    if not isinstance(q, dict) or not isinstance(q.get("data"), str):
+        return update
+    from .sensitive_buttons import CALLBACK_MARK, strip
+    if not q["data"].startswith(CALLBACK_MARK):
+        return update
+    return dict(update, callback_query=dict(q, data=strip(q["data"])))
+
+
 def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media, started: float,
            team_topics: Optional[TopicMap] = None, off_until: float = 0.0) -> str:
     """Process one update. Returns what happened (for tests and logs):
@@ -3162,6 +3199,7 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
     `off_until`: the second mirroring was last switched on (0 when it never was off); an edit made at or
     before it is not delivered."""
     from .harness import SessionRef, legacy_topic_supported
+    update = _unmarked(update)
     if update.get("widget_query"):
         from .widgets import handle_query
         return handle_query(update["widget_query"], cfg, bot, inbox)
@@ -3253,7 +3291,9 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
     if (typed_session and isinstance(m.get("text"), str) and not m.get("_forwarded")
             and not _keyboard_word((m.get("text") or "").strip(), typed_session)):
         try:  # a typed answer to the dialog open in this topic: before the keyboard words are mapped
-            answered = dialogs.typed_answer(cfg, bot, m, typed_session)
+            from . import permission_request  # a yes/no to the one open permission request of this topic first
+            answered = (permission_request.typed(cfg, bot, m, typed_session)
+                        or dialogs.typed_answer(cfg, bot, m, typed_session))
         except Exception as exc:
             poll_log(f"dialog typed answer failed: {type(exc).__name__}")
             answered = None
@@ -3399,6 +3439,36 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
             return "ignored"  # the radio streams in the home group only
         from . import radio
         return radio.telegram_command(cfg, word.partition(" ")[2], lambda text: _terminal_say(bot, cfg, m, text))
+    if word and word.split(maxsplit=1)[0].split("@")[0].lower() == "/podcast":
+        if chat.get("id") != home_chat(cfg):
+            return "ignored"  # the radio streams in the home group only
+        from . import radio_podcast
+        return radio_podcast.telegram_command(cfg, word.partition(" ")[2], lambda text: _terminal_say(bot, cfg, m, text))
+    if word and word.split(maxsplit=1)[0].split("@")[0].lower() == "/app" and chat.get("type") == "private":
+        from . import app_request  # the owner's private chat only; hidden unless app_request_command is set
+        if app_request.configured(cfg):
+            return app_request.telegram_command(cfg, word.partition(" ")[2], lambda text: _terminal_say(bot, cfg, m, text))
+    if word and word.split(maxsplit=1)[0].split("@")[0].lower() == "/todo":
+        from . import schedule  # the owner's own schedule (from_owner() has passed); never reaches a session
+        if is_secret(word):
+            _refuse(bot, _reply_chat(cfg, m), m, cfg)
+            return "refused"
+        return schedule.telegram_command(cfg, word.partition(" ")[2], lambda text: _terminal_say(bot, cfg, m, text))
+    command = word.split(maxsplit=1)[0].split("@")[0].lower() if word else ""
+    if command in ("/what", "/briefing"):
+        from . import briefing, work_map  # the owner's own views (from_owner() has passed); never reach a session
+        if command == "/briefing" and chat.get("id") != home_chat(cfg):
+            return "ignored"  # the briefing holds his schedule and every project's waiting items: the home chat only
+        say = lambda text: _terminal_say(bot, cfg, m, text, parse_mode="HTML", link_preview_options={"is_disabled": True})
+        if command == "/what":
+            return work_map.telegram_command(cfg, chat.get("id"), m.get("message_thread_id"), say)
+        return briefing.telegram_command(cfg, bot, _reply_chat(cfg, m), m.get("message_thread_id"), say)
+    if word and word.split(maxsplit=1)[0].split("@")[0].lower() == "/shop":
+        from . import family_board  # the owner's shopping list (from_owner() has passed); never reaches a session
+        if is_secret(word):
+            _refuse(bot, _reply_chat(cfg, m), m, cfg)
+            return "refused"
+        return family_board.shop_command(cfg, word.partition(" ")[2], lambda text: _terminal_say(bot, cfg, m, text))
     head, _, history_query = word.partition(" ")
     if head.split("@")[0].lower() == "/history" or word == "שיחות" or (en_ui and word.lower() in ("history", "conversations")):
         if len(word) > MAX_TEXT or is_secret(word):
@@ -3476,6 +3546,8 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
         if task and _voice_needs_approval(m):  # the owner's own recording: its transcript first, then the task
             voice_draft(cfg, bot, inbox, m, None, task, (m.get("caption") or "").strip(), "", start="picker")
             return "voice"
+        if car_mode_active():
+            _voice_echo(cfg, bot, m, task)
         return project_picker(cfg, bot, m, task)
     if not session and in_home:
         from . import dispatcher
@@ -3512,6 +3584,8 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
         if has_media and _voice_needs_approval(m):  # e.g. a project group's General: approve the transcript first
             voice_draft(cfg, bot, inbox, m, None, task, (m.get("caption") or "").strip(), "", start="general")
             return "voice"
+        if has_media and car_mode_active():
+            _voice_echo(cfg, bot, m, task)
         return general_start(cfg, bot, m, task, name=_task_topic_name(
             task, (m.get("text") or m.get("caption") or "").strip(), getattr(cfg, "ui_language", "en")) if has_media else None)
     return _queue_topic_input(cfg, bot, inbox, m, session, media, topic_session=topic_session,
@@ -3564,6 +3638,8 @@ def _queue_topic_input(cfg, bot, inbox, m, session, media, *, topic_session=None
     if corrected_voice:  # accepted: the edit draft is taken now (a refused correction above left it waiting)
         voice.take_editing(m.get("message_thread_id"), _chat_arg(cfg, m))
         m = dict(m, _voice=True)  # still a recording's words, as in General: never typed
+    elif car_mode_active():  # no buttons while driving: the transcript is echoed once, quietly
+        _voice_echo(cfg, bot, m, text)
     _away_welcome_back(cfg, bot, m.get("message_thread_id"), _chat_arg(cfg, m))
     # A forward is someone else's content: it travels beside the owner's words, never as them.
     text, forwarded_text = ("", text) if m.get("_forwarded") else (text, "")
@@ -3709,7 +3785,7 @@ _DIALOG_QUESTION = re.compile(r"(?mi)^\s*│\s*(?:do you want|would you like)") 
 # above the idle input box. It is a notice, not a question: its option row looked like a menu, so commands and
 # auto-compaction were refused for a question that never got a card. Claude
 # Code 2.1.3xx may draw it on ONE row, may fold its text to "↓ 2 more", and may put text after "0: Dismiss".
-_TIP_MARK = re.compile(r"✦")
+_TIP_MARK = re.compile(r"^\s*✦\s+Heads up\b")
 _TIP_DISMISS = re.compile(r"(?:^|\s)0:\s*Dismiss\b")
 _TIP_MORE = re.compile(r"^\s*↓\s*\d+\s+more\b")
 TIP_ROWS = 10  # rows from the notice's ✦ to its option row, at most
@@ -3721,10 +3797,11 @@ def tip_span(rows: List[str]) -> Optional[Tuple[int, int]]:
     for i in range(len(rows) - 1, -1, -1):
         if _TIP_MARK.search(rows[i]):
             for j in range(i, min(len(rows), i + TIP_ROWS)):
+                if j > i and (_TIP_MARK.search(rows[j]) or rows[j].lstrip().startswith(("❯", "─", "▔"))
+                              or re.match(r"^\s*\d+[.)]\s", rows[j])):
+                    break
                 if _TIP_DISMISS.search(rows[j]):
                     return i, j
-                if j > i and _TIP_MARK.search(rows[j]):
-                    break
     return None
 
 
@@ -3745,32 +3822,15 @@ def tip_on_screen(body: str) -> bool:
 
 
 def dismiss_tip(pane: str, wait: float = 0.4) -> bool:
-    """Close a tip notice before typing into the input box (it can take the Enter that would send the
-    line: four "📩 Telegram" were left unsent). True when no notice is (left) on the screen.
-    Its own "0: Dismiss" key is pressed only when nothing else on the screen is a question; a "0" that
-    landed in the input box instead (the notice did not have the keys) is taken out again."""
+    """Compatibility probe for callers that used to dismiss tips. A Heads-up notice
+    is not a dialog and does not own the keyboard: never send its advertised digits.
+    True when the remaining screen has no blocking question; no keys are sent."""
     try:
         body = pane_text(pane)
     except (OSError, subprocess.SubprocessError):
         return False
-    if not tip_on_screen(body):
-        return True
     rest = strip_tip(body)
-    if dialogs.parse(rest) is not None or _dialog_open(rest):
-        return False  # a real question is open too: never press a number into it
-    before, _ = input_box(pane)
-    if before is None or _tmux("send-keys", "-t", pane, "0").returncode:
-        return False
-    time.sleep(wait)
-    after, _ = input_box(pane)
-    # the box is read with its spaces folded, so a draft that ended in a space comes back as "draft 0"
-    if after is not None and after != before and after.endswith("0") and after[:-1].rstrip() == before:
-        _tmux("send-keys", "-t", pane, "BSpace")  # the "0" went into the box: take it out
-        return False
-    try:
-        return not tip_on_screen(pane_text(pane))
-    except (OSError, subprocess.SubprocessError):
-        return False
+    return not _dialog_open(rest)
 
 
 def take_back(pane: str, text: str) -> bool:
@@ -4273,8 +4333,10 @@ def _hung_at_limit(pane: str, session: str, state: Optional[str], pid: Optional[
     return not pid or accounts.shell_children(pid) is False
 
 
-def resume_session(session: str) -> bool:
-    """Writing in the topic of a closed terminal session reopens it (or restart button)."""
+def resume_session(session: str, first_prompt: Optional[str] = None) -> bool:
+    """Writing in the topic of a closed terminal session reopens it (or restart button). `first_prompt` is
+    passed to Claude Code as its prompt argument (one shell-quoted word after --resume), so the process
+    started here submits it itself and no other instance of the session ever receives it."""
     cur = accounts.account_for(session)
     better = accounts.roomier_account(cur)
     if better and better != cur:
@@ -4282,6 +4344,7 @@ def resume_session(session: str) -> bool:
     folder = session_folder(session) or str(projects_root())
     tm = "tg-" + session[:8]
     exact = "=" + tm  # tmux matches a leading "=" exactly, never as a prefix of another session
+    prompt_arg = " " + shlex.quote(first_prompt) if first_prompt else ""
     try:
         running = _pane_command(exact)
         if _is_claude_process(running) and not session_pid(session):  # no live session: a hung exit
@@ -4292,7 +4355,8 @@ def resume_session(session: str) -> bool:
                 return False
             _tmux("kill-session", "-t", exact)
         if _tmux("new-session", "-d", "-s", tm, "-c", folder,
-                 *shell_argv(f"{accounts.shell_command(session)} --remote-control --resume {session}")).returncode != 0:
+                 *shell_argv(f"{accounts.shell_command(session)} --remote-control --resume {session}"
+                             f"{prompt_arg}")).returncode != 0:
             return False
         for _ in range(50):  # about 25 seconds of half-second polls
             try:
@@ -4486,6 +4550,12 @@ def cli_command(cfg: Config, bot, m: dict, session: str, text: str, menu: bool =
         return "refused"
     outcome = ["retry"]
     def run():
+        nonlocal pane
+        if cmd == "/compact":
+            pane = _pane_from_process(session)
+            if not pane:
+                outcome[0] = "stale"
+                return
         if cmd == "/esc":
             _stop_now(cfg, bot, m, session, pane)
             return
@@ -4515,8 +4585,13 @@ def cli_command(cfg: Config, bot, m: dict, session: str, text: str, menu: bool =
                 return
             if cmd == "/model" and rest.strip():  # where Claude Code's answer to it will be written
                 model_from = _model_watch_start(session)
-            typed = (type_command(session, pane, line, verify_session=True) if synchronous
-                     else type_command(session, pane, line))
+            if cmd == "/compact":
+                from .idle_lines import _foreground_claude
+                typed = type_command(session, pane, line, verify_session=True,
+                                     still_ok=lambda: _foreground_claude(pane, session))
+            else:
+                typed = (type_command(session, pane, line, verify_session=True) if synchronous
+                         else type_command(session, pane, line))
             if typed == "stale":
                 outcome[0] = "stale"
                 return
@@ -4886,7 +4961,7 @@ def _question_or_screen(cfg: Config, bot, m: dict, session: str, key: str) -> bo
 def keypad_press(q: dict, cfg: Config, bot, m: dict, session: str) -> None:
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     key, _, stamp = (q.get("data") or "")[2:].partition(":")
-    pane = pane_for_session(session)
+    pane = _pane_from_process(session) if key == "/compact" else pane_for_session(session)
     if not pane or key not in set(KEYS) | {"refresh", "pad", "/compact", "/context"}:
         _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
         return
@@ -4897,7 +4972,12 @@ def keypad_press(q: dict, cfg: Config, bot, m: dict, session: str) -> None:
         if _dialog_open(pane_text(pane), session):
             _question_or_screen(cfg, bot, m, session, "cli_approval_app_only")
             return
-        typed = type_command(session, pane, key)
+        if key == "/compact":
+            from .idle_lines import _foreground_claude
+            typed = type_command(session, pane, key, verify_session=True,
+                                 still_ok=lambda: _foreground_claude(pane, session))
+        else:
+            typed = type_command(session, pane, key)
         if typed in ("draft", "busy"):
             _answer_button(bot, q, t("cli_draft_in_box" if typed == "draft" else "toast_session_busy_retry", lang=ui_lang))
             return
@@ -5263,6 +5343,8 @@ def input_box(pane: str) -> Tuple[Optional[str], bool]:
     if not box[0].startswith("❯"):
         return None, False
     text = " ".join(" ".join([box[0][1:]] + box[1:]).split())
+    # Notices above the box do not own the keyboard. Keep draft rows intact.
+    rows = strip_tip("\n".join(rows[:rules[-2]])).splitlines() + rows[rules[-2]:]
     ready = not any(MENU.search(row) for row in rows[-12:]) and not any("esc to interrupt" in row for row in rows)
     return text, ready
 
@@ -5289,7 +5371,7 @@ def typed_nudge(session: str, pane: str, text: str = NUDGE_TEXT, settle: float =
     caller holds the session's nudge lock and its terminal claim. True when submitted."""
     from .dialogs import tmux_text
     clean = " ".join(text.split())
-    if (not resumed and recently_moving(session)) or compact.command_pending(session) or not pane_runs_session(pane, session):
+    if nudge_paused(session) or (not resumed and recently_moving(session)) or compact.command_pending(session) or not pane_runs_session(pane, session):
         return False
     box, ready = input_box(pane)
     if box:  # the owner's own draft: nothing is pressed into it, not even the tip's "0"
@@ -5301,27 +5383,56 @@ def typed_nudge(session: str, pane: str, text: str = NUDGE_TEXT, settle: float =
     typed_mark(clean)
     if clean == " ".join(NUDGE_TEXT.split()):
         mark_nudge_typed(session)
-    if _tmux("send-keys", "-t", pane, "-l", "--", tmux_text(clean)).returncode:
-        raise OSError("tmux send-keys failed")
-    deadline = time.monotonic() + settle
-    while True:
-        box, ready = input_box(pane)
-        if box == clean or time.monotonic() >= deadline:
-            break
-        time.sleep(0.05)
-    if box == clean and ready and pane_runs_session(pane, session):
-        if _tmux("send-keys", "-t", pane, "Enter").returncode:
-            _tmux("send-keys", "-t", pane, "C-u")  # never leave the nudge half sent
+    # Persist before typing so even a failed/partial send cannot start a retype loop.
+    write_private(_nudge_pause_path(session), repr(time.time()))
+    sent = False
+    try:
+        if _tmux("send-keys", "-t", pane, "-l", "--", tmux_text(clean)).returncode:
             raise OSError("tmux send-keys failed")
-        if not submitted(pane, clean, ""):
-            if take_back(pane, clean):  # Enter did not send it (a notice took the key): not left behind
+        deadline = time.monotonic() + settle
+        while True:
+            box, ready = input_box(pane)
+            if box == clean or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        if box == clean and ready and pane_runs_session(pane, session):
+            if _tmux("send-keys", "-t", pane, "Enter").returncode:
+                raise OSError("tmux send-keys failed")
+            sent = submitted(pane, clean, "")
+        return sent
+    finally:
+        if sent:
+            clear_nudge_pause(session)
+            clear_nudge_typed(session)
+        elif pane_runs_session(pane, session):
+            # A fresh exact match only: never erase a suffix from an owner's draft.
+            box, _ = input_box(pane)
+            if box == clean and _tmux("send-keys", "-t", pane, *(["BSpace"] * len(clean))).returncode == 0:
                 clear_nudge_typed(session)
-            return False
-        clear_nudge_typed(session)
-        return True
-    if box == clean:  # only our own text is in the box (a menu or a turn appeared): take it out again
-        _tmux("send-keys", "-t", pane, "C-u")
-    return False  # anything else in the box is the owner's: left untouched
+
+
+NUDGE_PAUSE = 600
+
+
+def _nudge_pause_path(session: str) -> Path:
+    return private_dir(state_dir() / "nudge-paused") / safe_name(session)
+
+
+def nudge_paused(session: str, now: Optional[float] = None) -> bool:
+    """A failed wake pauses retries for at most ten minutes, including across restarts."""
+    try:
+        at = float(_nudge_pause_path(session).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return 0 <= (time.time() if now is None else now) - at < NUDGE_PAUSE
+
+
+def clear_nudge_pause(session: str) -> None:
+    """A verified send or real owner prompt allows automatic wakes again."""
+    try:
+        _nudge_pause_path(session).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _canon(text: Optional[str]) -> str:
@@ -5414,7 +5525,8 @@ def _line_gone(pane: str, want: str, wait: float = 2.0) -> bool:
         time.sleep(0.1)
 
 
-def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, verify_session: bool = False) -> str:
+def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, verify_session: bool = False,
+                 still_ok: Optional[Callable[[], bool]] = None, before_enter: Optional[Callable[[], None]] = None) -> str:
     """The one place a slash line is typed into a session's input box (live bug: the nudge
     "📩 Telegram" and `/compact` joined into the plain prompt "📩 Telegram/compact"). One strict rule, under
     the session's nudge lock (the listener, the sweeper and `ctb auto-compact` are different processes: only
@@ -5425,7 +5537,9 @@ def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, ver
     Accepted limit: tmux has no atomic compare-and-send, so text the owner types in the single moment between
     the last exact read and Enter can still go out with the line.
     Recovery sets `verify_session`: the live process record must still map this session to this pane
-    before typing and Enter. Returns "sent", "draft", "busy", "failed" or "stale"."""
+    before typing and Enter. `still_ok` (optional): a caller's own check, asked at the same two moments; False
+    there also gives "stale". `before_enter` (optional) runs once every check passed, right before Enter (a caller
+    records what is about to be sent); if it fails, our line is taken back and nothing is sent. Returns "sent", "draft", "busy", "failed" or "stale"."""
     want = _canon(line)
     try:
         guard = _nudge_guard(session)
@@ -5454,7 +5568,7 @@ def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, ver
             return "busy"
         if box:
             return "draft"
-        if verify_session and _pane_from_process(session) != pane:
+        if verify_session and _pane_from_process(session) != pane or still_ok is not None and not still_ok():
             return "stale"
         typed_mark(line)
         if _tmux("send-keys", "-t", pane, "-l", line).returncode:
@@ -5465,13 +5579,22 @@ def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, ver
             if (box is not None and _canon(box) == want) or time.monotonic() >= deadline:
                 break
             time.sleep(0.05)
-        if verify_session and _pane_from_process(session) != pane:
+        if verify_session and _pane_from_process(session) != pane or still_ok is not None and not still_ok():
             return "stale"
         if box is None or _canon(box) != want or not ready:
             # Not exactly our line (owner text came in, or nothing readable): no Enter. Only our own tail goes.
             if box and _canon(box) != want and _canon(box).endswith(want):
                 _erase_tail(pane, line, len(line), False)
             return "draft" if box else "failed"
+        if before_enter is not None:
+            try:
+                before_enter()
+            except Exception:
+                _erase_tail(pane, line, len(line), False)
+                return "failed"
+        if (verify_session and _pane_from_process(session) != pane
+                or still_ok is not None and not still_ok()):
+            return "stale"
         if _tmux("send-keys", "-t", pane, "Enter").returncode:
             _erase_tail(pane, line, len(line), False)
             return "failed"
@@ -5554,6 +5677,31 @@ def _voice_needs_approval(m: dict) -> bool:
             and not m.get("_forwarded") and not car_mode_active())
 
 
+def _voice_echo(cfg: Config, bot, m: dict, text: str) -> None:
+    """One quiet reply with the transcript of an owner recording that went in without a preview (car mode, or a
+    preview that could not be sent), so the owner still sees what was heard. Never for a forward, and never
+    when the voice_echo add-on is off; no buttons, no sound."""
+    import html
+    from . import addons
+    try:
+        if (not (m.get("voice") or m.get("audio") or m.get("video_note")) or m.get("_forwarded")
+                or not voice.confirm_on() or not addons.enabled(cfg, "voice_echo")):
+            return
+        ui_lang = getattr(cfg, "ui_language", None) or get_lang()
+        label = f"\U0001F3A4 {L.strings(cfg.target_language)['voice']} "
+        heard = voice.shown(text, label)
+        if not heard:
+            return
+        params = {"chat_id": _reply_chat(cfg, m), "disable_notification": True, "parse_mode": "HTML",
+                  "reply_parameters": {"message_id": m["message_id"], "allow_sending_without_reply": True},
+                  "text": t("voice_sent_heard", lang=ui_lang, text=html.escape(heard[:3500]))}
+        if m.get("message_thread_id"):
+            params["message_thread_id"] = m["message_thread_id"]
+        bot.call("sendMessage", params)
+    except Exception:
+        pass  # the echo is a courtesy: it never blocks or fails the recording itself
+
+
 def _start_voice_task(cfg: Config, bot, m: dict, start: str, text: str, user_text: str = "",
                       shown: str = "") -> str:
     """An approved recording that had no session: open its task like typed text would. `shown`: the words the
@@ -5568,6 +5716,20 @@ def _start_voice_task(cfg: Config, bot, m: dict, start: str, text: str, user_tex
             return offered
     return general_start(cfg, bot, m, text,
                          name=_task_topic_name(text, user_text, getattr(cfg, "ui_language", "en")))
+
+
+RESTART_WAIT = 150  # seconds a restarted session gets to come up before the topic hears it failed
+
+
+def wait_for_session(session: str, seconds: int = RESTART_WAIT, pid_of=None, sleep=time.sleep) -> bool:
+    """True once the resumed session has a process. A loaded Mac can take well over 30 s to bring a
+    session up, and a short wait told the owner it failed while it was still starting."""
+    pid_of = pid_of or session_pid
+    for _ in range(max(1, seconds)):
+        if pid_of(session):
+            return True
+        sleep(1)
+    return bool(pid_of(session))
 
 
 CORRECTED_VOICE = "\U0001F3A4 (voice message; the owner corrected its transcript) "
@@ -5616,6 +5778,7 @@ def voice_draft(cfg: Config, bot, inbox: Inbox, m: dict, session: Optional[str],
             _start_voice_task(cfg, bot, m, start, text, user_text)
         else:
             _queue_owner(cfg, bot, inbox, m, session, text, user_text, context_prefix)
+        _voice_echo(cfg, bot, m, text)
 
 
 def voice_button(q: dict, cfg: Config, bot, m: dict, inbox: Inbox) -> str:
@@ -6036,12 +6199,7 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
                         pass
                     return
                 resume_session(session)
-                ok = False
-                for _ in range(30):
-                    if session_pid(session):
-                        ok = True
-                        break
-                    time.sleep(1)
+                ok = wait_for_session(session)
                 try:
                     bot.call("editMessageText", dict(edit,
                         text=t("restart_step2_success", lang=ui_lang) if ok
@@ -7233,7 +7391,7 @@ def account_command(cfg: Config, bot, m: dict, session: Optional[str], rest: str
 def auto_compact(session: str, ctx: int | float, cold: bool = False,
                  cfg: Optional[Config] = None, bot: Optional[Bot] = None,
                  topics: Optional[TopicMap] = None, sleep_fn=time.sleep, clock_fn=time.time,
-                 note: str = "", asked: bool = False) -> bool:
+                 note: str = "", asked: bool = False, cold_attempt: str = "") -> bool:
     """Run /compact once the session is idle after a reply, with the same
     progress bar as a pressed 🗜️. Skipped if the owner wrote meanwhile or one ran recently.
     cold: the owner wrote after an hour's break, the cache is cold anyway; compact before the
@@ -7241,6 +7399,8 @@ def auto_compact(session: str, ctx: int | float, cold: bool = False,
     if not cold:
         sleep_fn(8)
     c = cfg or load_config()
+    if cold and c.cold_compact != "on":
+        return False
     b = bot or Bot.from_config(c, strict=True)
     t_map = topics or TopicMap(state_dir() / "topics.json", b, home_chat(c), cfg=c)
     found = t_map.place_of(session)
@@ -7266,16 +7426,41 @@ def auto_compact(session: str, ctx: int | float, cold: bool = False,
     said = (t("compact_asked", lang=ui_lang, k=k) if asked else t("compact_auto_cold", lang=ui_lang, k=k) if cold
             else t("compact_auto", lang=ui_lang, k=k))
     line = "/compact" + (" " + keep if keep and not is_secret(keep) else "")
+    cold_token = None
+    if cold:
+        # Give the owner a real cancellation window before claiming the terminal. No Esc is ever sent.
+        cold_token = cold_attempt or compact.cold_offer(session)
+        # A slow worker must not replace the waiter's cancelled attempt or announce after fallback.
+        with compact.cold_lock(session):
+            if compact.cold_status(session, cold_token) != "waiting":
+                return False
+            _terminal_say(b, c, where, said, reply_markup={"inline_keyboard": [[{
+                "text": t("compact_cold_send_now", lang=ui_lang), "callback_data": "cold:" + cold_token}]]})
+        sleep_fn(5)
     if not _claim_terminal(session):  # another pane action (a move, a close) is running: try again later
         return False
     try:
-        typed = type_command(session, pane, line)
+        gate = compact.cold_submission(session, cold_token) if cold_token else contextlib.nullcontext(None)
+        with gate as submission:
+            if cold_token and submission is None:
+                return False
+            # Re-resolve AFTER the cancellation wait/terminal claim: the old pane may now host someone else.
+            pane = _pane_from_process(session)
+            if not pane:
+                return False
+            from .idle_lines import _foreground_claude
+            typed = type_command(session, pane, line, verify_session=True,
+                                 still_ok=lambda: _foreground_claude(pane, session),
+                                 before_enter=submission["before_enter"] if submission else None)
+            if submission:
+                submission["sent"] = typed == "sent"
     finally:
         _release_terminal(session)
     if typed != "sent":  # a draft, a busy or unreadable box, a refused Enter: quiet and retryable
         poll_log(f"auto-compact of {session[:8]} not typed ({typed})")
         return False
-    _terminal_say(b, c, where, said)  # said and followed only for a /compact that really went in
+    if not cold:
+        _terminal_say(b, c, where, said)
     _start_compact_progress(c, b, thread, session, pane, _reply_chat(c, where))
     return True
 
@@ -7632,6 +7817,8 @@ def serve(cfg: Config) -> int:
                     next_dashboard = time.monotonic() + 120
                 if time.monotonic() >= next_dialogs:  # an open dialog stays visible until it is answered
                     _terminal_background("__dialogs__", lambda: dialogs.remind(cfg, bot, topics))
+                    from . import permission_request  # a request answered at the computer or cancelled: its card closes
+                    _terminal_background("__permission__", lambda: permission_request.sweep(cfg, bot))
                     next_dialogs = time.monotonic() + 15
                 if time.monotonic() >= next_panel_pin:  # General's pin is invisible inside the topics
                     from . import panel_pin

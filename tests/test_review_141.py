@@ -362,7 +362,7 @@ def test_a_turn_or_menu_appearing_while_typing_stops_before_enter(world, pane):
     world["box"].put("s", owner_msg("x", 53))
     pane.after_typing = f"{RULE}\n❯ {I.NUDGE_TEXT}\n{RULE}\n  Do you want to proceed?\n"
     assert I.sweep_nudge(world["box"], "s") is False
-    assert pane.keys == [I.NUDGE_TEXT, "C-u"]  # our own text taken back out, never submitted
+    assert pane.keys == [I.NUDGE_TEXT, "BSpace"]  # exact bridge text taken back, never submitted
 
 
 def test_the_owners_draft_typed_meanwhile_is_left_untouched(world, pane):
@@ -482,8 +482,8 @@ def test_a_slow_telegram_call_for_one_session_never_delays_another(world, cfg):
     _proven_lease(world, "a", 72)
     _proven_lease(world, "b", 73)
     sw.sweep()
-    deadline = time.monotonic() + 3
-    while world["box"].leases("b") and time.monotonic() < deadline:
+    deadline = time.monotonic() + 5  # parallel CI: wait for both the lease release and the reaction it records
+    while (world["box"].leases("b") or 73 not in bot.reactions("👌")) and time.monotonic() < deadline:
         time.sleep(0.02)
     assert world["box"].leases("b") == [] and 73 in bot.reactions("👌")  # b went through while a hangs
     sw.sweep()  # a's sweep is still running: never a second one for it

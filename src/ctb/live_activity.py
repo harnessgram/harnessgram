@@ -6,9 +6,16 @@ import re
 import time
 from pathlib import PurePath
 
-from . import cards
-from .creds import redact_channel
 from .config import private_dir, read_map, state_dir, write_private
+from .lazy import lazy_module
+
+# Imported when first used: a throttled call (most of them) reads one small file and needs neither.
+cards = lazy_module(".cards")
+
+
+def redact_channel(text):
+    from .creds import redact_channel as redact
+    return redact(text)
 
 INTERVAL = 10
 
@@ -52,25 +59,31 @@ def read(session):
     return {}
 
 
+def _recent(session, now):
+    """Whether a snapshot was written less than INTERVAL ago: what read() reports, without cleaning its text."""
+    row = read_map(_path(session))
+    text, at = row.get("text"), row.get("at")
+    return (isinstance(text, str) and bool(text) and isinstance(at, (int, float)) and not isinstance(at, bool)
+            and 0 <= now - float(at) < INTERVAL)
+
+
 def record(session, data, now=None):
     if not isinstance(session, str) or not session:
         return False
     now = time.time() if now is None else now
+    if _recent(session, now):  # too soon for another one: nothing to describe or clean
+        return False
     text = describe(data)
     if not text:
         return False
     path = _path(session)
-    old = read(session)
-    if old and 0 <= now - old["at"] < INTERVAL:
-        return False
     private_dir(path.parent)
     with open(str(path) + ".lock", "a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return False
-        old = read(session)
-        if old and 0 <= now - old["at"] < INTERVAL:
+        if _recent(session, now):
             return False
         write_private(path, json.dumps({"text": text, "at": now}, ensure_ascii=False))
     return True

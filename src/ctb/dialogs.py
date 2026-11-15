@@ -480,7 +480,7 @@ def compacting_screen(body: str) -> bool:
 _EXIT_BG_TITLE = re.compile(r"(?i)^background work is running$")
 _EXIT_BG_OPTIONS = ("exit and stop tasks", "move to background and exit", "stay")
 _NUMBERED_ROW = re.compile(r"^\s*(?:[❯›]\s*)?(\d{1,2})[.)]\s+(\S.*)$")
-_TASK_ROW = re.compile(r"^(?:shell|agent|monitor|task|workflow|local agent|remote agent)s? · \S", re.I)
+_TASK_ROW = re.compile(r"^(?:shell|agent|monitor|task|workflow|local agent|remote agent|scheduled(?: task)?)s?\s+·\s+\S", re.I)
 FOOTER_MARK = re.compile(r"⏵⏵|⏸|\? for shortcuts|\bmode on\b")
 
 
@@ -496,7 +496,18 @@ def exit_background_screen(body: str) -> bool:
     if title is None:
         return False
     below = rows[title + 1:]
-    fixed = [r for r in below if not _TASK_ROW.match(r.strip())]  # the task list may be any length
+    # A narrow pane wraps a scheduled task's kind and description onto the next row.
+    # Count that continuation as task content, while still checking EVERY row for a
+    # prompt/footer below: a transcript quotation must never become a live dialog.
+    fixed, task = [], False
+    for r in below:
+        if _TASK_ROW.match(r.strip()):
+            task = True
+        elif task and r.startswith(" ") and not _NUMBERED_ROW.match(r) and not _REAL_HINT.fullmatch(r.strip()):
+            continue
+        else:
+            task = False
+            fixed.append(r)
     if len(fixed) > 12 or any(FOOTER_MARK.search(r) for r in below):
         return False
     numbered, last_numbered = [], 0
@@ -1640,6 +1651,9 @@ def remind(cfg: Config, bot, topics, now: Optional[float] = None) -> int:
                 rec_del(session)
             _first_seen.pop(session, None)
             continue
+        from . import permission_request
+        if permission_request.open_for(session, now=time.time()):
+            continue  # the permission request has its own card (exact request, answered through the hook)
         ident = _identity_of(d, body)
         live.add(session)
         seen = _first_seen.get(session)

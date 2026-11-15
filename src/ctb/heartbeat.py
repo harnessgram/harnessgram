@@ -20,6 +20,8 @@ from .config import Config, home_chat, state_dir
 from .telegram import Bot
 from .topics import TopicMap, session_state, set_state
 
+OWNER_VIEWS_EVERY = 60.0  # seconds between the work map and morning briefing rounds
+_owner_views = {"at": 0.0}
 EVERY = 30   # seconds between rounds; all topics share one chat's rate limit (a round costs 2-3 calls)
 ACTIVE = 45  # the transcript must have changed this recently
 FIRST_CARD_IDLE = 30 * 60  # a session quiet for longer gets no first card (a deploy must not flood every topic)
@@ -272,6 +274,18 @@ def run_once(cfg: Config, bot=None, now: Optional[float] = None,
     except Exception:
         pass  # optional housekeeping must never interrupt replies
     try:
+        from . import briefing, work_map
+        from .sessions_menu import collect
+        from .topics import TopicMap
+        from .config import home_chat, state_dir
+        if (work_map.enabled(cfg) or briefing.enabled(cfg)) and now - _owner_views["at"] >= OWNER_VIEWS_EVERY:
+            _owner_views["at"] = now
+            seen = collect(TopicMap(state_dir() / "topics.json", None, home_chat(cfg), cfg=cfg), now=now)
+            work_map.tick(cfg, bot, now, entries=seen)  # the pinned work map of each project, edited in place
+            briefing.tick(cfg, bot, now, entries=seen)  # the morning briefing, once a day at the wake time
+    except Exception:
+        pass  # optional: never holds up replies
+    try:
         from . import hook_health
         hook_health.check(cfg, bot, now)
     except Exception:
@@ -281,7 +295,24 @@ def run_once(cfg: Config, bot=None, now: Optional[float] = None,
     except Exception as exc:  # a damaged outbox never stops the heartbeat
         from .mirror import log
         log(f"reply outbox drain failed ({type(exc).__name__})")
-    chats = {home_chat(cfg), *(p.chat_id for p in cfg.projects)}
+    try:
+        from . import missed_replies
+        missed_replies.sweep(cfg, now)  # a final reply whose Stop worker died (e.g. mid-install) goes out now
+    except Exception as exc:
+        from .mirror import log
+        log(f"missed reply sweep failed ({type(exc).__name__})")
+    try:
+        from . import idle_lines
+        idle_lines.tick(cfg, now)  # idle team lines go to their lead session (never to Telegram)
+    except Exception as exc:  # optional: never holds up replies or the placeholder
+        from .mirror import log
+        log(f"idle lines check failed ({type(exc).__name__})")
+    try:
+        from . import voice_digest
+        voice_digest.start(cfg, bot, now)
+    except Exception:
+        logging.getLogger(__name__).warning("Voice digest could not start")
+    chats ={home_chat(cfg), *(p.chat_id for p in cfg.projects)}
     if not any(flood.is_open(chat, now) for chat in chats):
         return 0  # every chat is flooded: the placeholder can wait, replies cannot
     if cfg.codex_harness_enabled is True:

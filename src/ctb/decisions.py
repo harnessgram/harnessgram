@@ -22,7 +22,6 @@ import time
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
-from . import fmt
 from .board import BIDI_CONTROLS
 from .framing import PANEL_APPROVES
 from .config import Config, home_chat, private_dir, state_dir, write_private
@@ -41,6 +40,7 @@ MAX_OPEN_PER_SESSION = 5
 LOCK_WAIT = 2.0  # seconds the panel waits for the decisions and inbox locks before answering 503
 KEEP_CLOSED = 50  # answered or cancelled decisions kept, newest first, so a late tap gets a clear refusal
 ID_RE = re.compile(r"[0-9a-f]{16}")
+PERM_RE = ID_RE  # the id of the Claude Code permission request a decision answers (permission_request.py)
 _CALL_TIMEOUT = 2
 
 
@@ -139,7 +139,15 @@ def _record(ident, raw) -> Optional[dict]:
     if state not in ("open", "answered", "cancelled"):
         return None
     rec = {"id": ident, **{k: raw[k] for k in strings}, "chat": raw["chat"], "thread": raw["thread"],
-           "created": float(raw["created"]), "state": state, "choice": "", "note": "", "closed": 0.0}
+           "created": float(raw["created"]), "state": state, "choice": "", "note": "", "closed": 0.0,
+           # only an explicit True: an old, damaged or unmarked record is never routine (sensitive_buttons.py)
+           "routine": raw.get("routine") is True}
+    if isinstance(raw.get("perm"), str) and PERM_RE.fullmatch(raw["perm"]):
+        rec["perm"] = raw["perm"]  # answered only through permission_request.decide, never queued as a message
+        # The exact request, verbatim (never cleaned: the owner approves what Claude Code will run), and whether the
+        # phone may only decline it (permission_request.describe).
+        rec["request"] = raw["request"] if isinstance(raw.get("request"), str) and len(raw["request"]) <= 4000 else ""
+        rec["decline_only"] = raw.get("decline_only") is not False or not rec["request"]
     if state != "open":
         rec["closed"] = float(raw["closed"]) if _num(raw.get("closed")) else 0.0
     if state == "answered":
@@ -191,14 +199,22 @@ def open_decisions() -> List[dict]:
 # --- the agent's side -------------------------------------------------------------
 
 def create(session: str, chat: int, thread: int, title: str, detail: str = "", yes: str = "", no: str = "",
-           lang: str = "en", now: Optional[float] = None) -> dict:
+           lang: str = "en", now: Optional[float] = None, perm: str = "", request: str = "",
+           decline_only: bool = True, routine: bool = False) -> dict:
+    """`perm`: the id of a Claude Code permission request (permission_request.py only). Its answer goes to that
+    request's hook, never to the session as a message. `routine`: the asking agent says this question approves
+    nothing sensitive, so the owner may also answer it from a phone widget. Text that names a sensitive area keeps it
+    sensitive anyway (sensitive_buttons.py)."""
     now = time.time() if now is None else now
+    if perm and not PERM_RE.fullmatch(perm):
+        raise DecisionError("bad permission request id")
     rec = {"session": session, "chat": chat, "thread": thread,
            "title": clean(title, TITLE_CHARS, "title"),
            "detail": clean(detail, DETAIL_CHARS, "detail", multiline=True, required=False),
            "yes": clean(yes, LABEL_CHARS, "yes label", required=False) or t("decide_yes", lang=lang),
            "no": clean(no, LABEL_CHARS, "no label", required=False) or t("decide_no", lang=lang),
-           "created": now, "state": "open"}
+           "created": now, "state": "open", "routine": routine is True and not perm,
+           **({"perm": perm, "request": request, "decline_only": bool(decline_only)} if perm else {})}
     if reads_as(rec["yes"], READS_AS_NO):
         raise DecisionError(f"the yes label {rec['yes']!r} reads as a no; name what yes does, e.g. \"Ship it\"")
     if reads_as(rec["no"], READS_AS_YES):
@@ -231,6 +247,23 @@ def cancel(session: str, ident: str, now: Optional[float] = None) -> dict:
         if rec["state"] != "open":
             raise DecisionError(f"decision {ident} is already {rec['state']}", "closed")
         rec.update(state="cancelled", closed=now, notice_pending=True)
+        _save(path, data)
+    return rec
+
+
+def settle_permission(ident: str, state: str, choice: str = "", now: Optional[float] = None) -> Optional[dict]:
+    """Close an open permission decision (permission_request.py): "answered" with the owner's choice, or
+    "cancelled" when its request closed. The topic card says what happened; nothing is queued."""
+    now = time.time() if now is None else now
+    with _locked() as path:
+        data = _load(path)
+        rec = data.get(ident) if isinstance(ident, str) else None
+        if rec is None or rec["state"] != "open" or not rec.get("perm"):
+            return None
+        if state == "answered" and choice in ("yes", "no"):
+            rec.update(state="answered", choice=choice, closed=now, final_state="delivered", final_at=now)
+        else:
+            rec.update(state="cancelled", closed=now)
         _save(path, data)
     return rec
 
@@ -279,11 +312,14 @@ def delivered_text(rec: dict, choice: str, note: str) -> str:
     return "\n".join(lines)
 
 
-def answer(cfg: Config, inbox, ident: str, choice: str, note: str = "", now: Optional[float] = None) -> dict:
+def answer(cfg: Config, inbox, ident: str, choice: str, note: str = "", now: Optional[float] = None,
+           check=None) -> dict:
     """Record the owner's answer once and queue it to the asking session. The decision is saved as closed
     first and the message queued second; a queueing that failed before the message was written reopens it
     under the same lock (a delivered answer is never reopened). A busy lock is
-    waited for at most LOCK_WAIT seconds in all (DecisionError "busy")."""
+    waited for at most LOCK_WAIT seconds in all (DecisionError "busy"). `check(rec)`, when given, sees the open
+    record under the lock before anything is changed and may refuse it by raising DecisionError (the widget
+    route refuses a sensitive decision this way, so no other answer path can slip between its check and the write)."""
     from .inbox import LockBusy
     from .progress import append_boundary
     if choice not in ("yes", "no"):
@@ -298,6 +334,10 @@ def answer(cfg: Config, inbox, ident: str, choice: str, note: str = "", now: Opt
             raise DecisionError("no such decision", "unknown")
         if rec["state"] != "open":
             raise DecisionError(f"already {rec['state']}", "closed", rec["state"], rec["choice"])
+        if rec.get("perm"):  # a Claude Code permission request: answered by permission_request.decide only
+            raise DecisionError("a permission request is answered by its own hook", "invalid")
+        if check is not None:
+            check(dict(rec))
         found = _where(cfg, rec)
         rec.update(state="answered", choice=choice, note=note, closed=now, delivery_key=secrets.token_hex(8),
                    notice_pending=True)
@@ -381,7 +421,7 @@ def _fail(reason: str) -> int:
 
 
 def run(cfg: Config, action: str, title: str = "", detail: str = "", yes: str = "", no: str = "",
-        ident: str = "", bot=None) -> int:
+        ident: str = "", bot=None, routine: bool = False) -> int:
     """`ctb decide <action>`: 0 when it worked, 1 with a one-line reason when it was refused. The session is
     always the one the command runs inside (see caller_session)."""
     try:
@@ -405,7 +445,7 @@ def run(cfg: Config, action: str, title: str = "", detail: str = "", yes: str = 
         if not cfg.ready:
             raise DecisionError("bot_token / owner_chat_id missing in the config")
         lang = getattr(cfg, "ui_language", "") or "en"
-        rec = create(sid, chat, thread, title, detail, yes, no, lang)
+        rec = create(sid, chat, thread, title, detail, yes, no, lang, routine=routine)
         from . import cockpit_notice
         cockpit_notice.update(cfg, rec, True, bot)
         print(f"decision {rec['id']} is waiting in the control panel: {rec['title']}")

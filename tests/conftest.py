@@ -20,6 +20,7 @@ import shlex
 import subprocess
 import tempfile
 import threading
+import time
 
 import pytest
 
@@ -176,6 +177,15 @@ def session_sandbox(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def no_state_keeping(monkeypatch):
+    """The panel keeps a finished state build for a few seconds (state_cache.py). Most tests change something and read
+    the state again at once, so they run with nothing kept; requests that arrive together still share one build.
+    The tests of the keeping itself set state_cache.TTL back."""
+    from ctb import state_cache
+    monkeypatch.setattr(state_cache, "TTL", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def no_live_processes():
     """Fails the test in which tmux or claude was refused (also from a thread an earlier test left running)."""
     with _LOCK:
@@ -203,6 +213,45 @@ def pytest_sessionfinish(session, exitstatus):
         session.exitstatus = 1
 
 
+_MONOTONIC = time.monotonic  # tests replace time.monotonic with fake clocks; the teardown keeps the real one
+
+
+@pytest.fixture(autouse=True)
+def joins_its_threads():
+    """A thread a test started must not outlive it: a late write would land in the NEXT test's state folder
+    (CTB_STATE_DIR is read at write time), which made tests/test_outbound_places.py flaky on CI. Waits up to
+    3 s in total for threads this test started; a test whose thread may run longer stubs it."""
+    before = set(threading.enumerate())
+    yield
+    deadline = _MONOTONIC() + 3.0
+    for thread in [t for t in threading.enumerate() if t not in before]:
+        left = deadline - _MONOTONIC()
+        if left <= 0:
+            break
+        thread.join(left)
+
+
+
+class _RefusingKeychain:
+    """Every test's Keychain for google_calendar.py: holds nothing and stores nothing."""
+
+    def get(self, item):
+        return None
+
+    def has(self, item):
+        return False
+
+    def set(self, item, value):
+        return False
+
+    def delete(self, item):
+        pass
+
+
+def _refuse_google(*a, **kw):
+    raise AssertionError("a test tried to reach Google")
+
+
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     """Every test gets its own config and state dirs; nothing touches the real home."""
@@ -226,6 +275,11 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_TMPDIR", str(no_tmux))
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
+    # Google Calendar (google_calendar.py): never this Mac's Keychain, never Google. Its own tests put fakes in place.
+    import ctb.google_calendar as google_calendar
+    monkeypatch.setattr(google_calendar, "STORE", _RefusingKeychain())
+    monkeypatch.setattr(google_calendar, "REQUEST", _refuse_google)
+    google_calendar.reset()
     from ctb import accounts, i18n, inbox
     # A queued owner message wakes its session from a daemon thread (`_reopen_or_nudge`) that sleeps for
     # seconds (up to a minute when it reopens) and then reads the pane: it outlived its test, ran with the
@@ -351,6 +405,15 @@ def real_policy(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_radio_start_on_play(monkeypatch):
+    """A playlist request of the listen link with no audio starts the radio (radio_play.py), as a detached
+    `ctb radio start --play`. No test may launch that: the start is a recorder that does nothing. The tests of the
+    feature itself (test_radio_play.py) replace it with their own recorder."""
+    from ctb import radio_play
+    monkeypatch.setattr(radio_play, "_spawn_start", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _claude_probe_answers_found(monkeypatch):
     """Before a session window opens, usershell.probe asks the user's real shell whether it finds claude. Tests
     must not start the machine's shell profile, so every test gets "found"; the probe's own tests in
@@ -378,7 +441,7 @@ def _slash_typing_gate_is_a_plain_typist(request, monkeypatch):
         return
     import ctb.inbox as inbox
 
-    def plain(session, pane, line, settle=1.0):
+    def plain(session, pane, line, settle=1.0, **kwargs):
         inbox.typed_mark(line)
         first = inbox._tmux("send-keys", "-t", pane, "-l", line)
         second = inbox._tmux("send-keys", "-t", pane, "Enter")
@@ -442,3 +505,13 @@ def _no_hook_health_alert(request, monkeypatch):
         return
     from ctb import hook_health
     monkeypatch.setattr(hook_health, "check", lambda *a, **kw: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_owner_views_in_the_heartbeat():
+    """The work map and the morning briefing run inside the heartbeat round; tests of other things must not see a
+    briefing arrive because the wall clock is past the wake time. Their own tests reset this to 0.0."""
+    from ctb import heartbeat
+    heartbeat._owner_views["at"] = float("inf")
+    yield
+    heartbeat._owner_views["at"] = float("inf")

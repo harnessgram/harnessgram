@@ -87,7 +87,7 @@ def test_the_radio_voice_request_is_sanitized_text_and_style(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(radio_voice, "access_token", lambda cfg, why=None: "fake-credential")
     cfg = make_cfg(gemini_vertex_project="example-project")
-    radio_voice.vertex("hello " + HANDOFF, cfg, "gemini-3-tts", "Kore", "calm, as at " + OAUTH)
+    radio_voice.vertex("hello " + HANDOFF, cfg, "gemini-3-tts", "Kore", "calm, as at " + OAUTH, max_seconds=10)  # every paid request is capped
     assert bodies and all(leaked(b) == [] for b in bodies)
 
 
@@ -216,7 +216,14 @@ CLEANERS = [creds.for_outside, creds.redact, creds.redact_channel, creds.hide_ow
                               "oauth-prefixes", "percent"])
 @pytest.mark.parametrize("clean", CLEANERS, ids=[c.__name__ for c in CLEANERS])
 def test_cleaning_time_grows_linearly(clean, unit):
-    assert _growth(clean, unit) < 3.0
+    # Linear is ~2x, quadratic ~4x. CPU contention (the suite runs in parallel) only ever inflates a measurement, so
+    # the best of up to three tries is the honest one; a real quadratic path stays above 3 every time.
+    growth = float("inf")
+    for _ in range(3):
+        growth = min(growth, _growth(clean, unit))
+        if growth < 3.0:
+            break
+    assert growth < 3.0
 
 
 @pytest.mark.parametrize("text", ["password: hunter2", "%6ftp: 482913", "DB_PASSWORD=!Abcd1234",

@@ -600,7 +600,9 @@ def overview(sl: dict, out: str) -> Frame:
 
 
 def staff(sl: dict, out: str) -> Frame:
-    """The staff overview: each listed project's name and two counts (radio_board.staff_slide), nothing else."""
+    """The staff board (radio_board.staff_slide): per listed project its label, an overall ring with the percent,
+    a bar and done/total for EVERY live card in the slide (the spoken line counts exactly these) and the day's
+    counts. Numbers and the label only."""
     t, d = _lang(sl)
     f = Frame(out)
     tower_stage(f, sl, sl.get("title") or t["overview"], t["staff_sub"], t, d, edition=t["edition"])
@@ -611,21 +613,35 @@ def staff(sl: dict, out: str) -> Frame:
     for (x, y, w, h), r in zip(_grid(len(rows)), rows):
         f.fill(x, y, w, h, CARD + "E8", r=16)
         f.stroke(x, y, w, h, LINE, 1.5, r=16)
-        f.text(r["name"], x + 12, y + 14, w - 24, 34 if not big else 66, 24 if not big else 28, WHITE, "heavy",
+        f.text(r["name"], x + 12, y + 10, w - 24, 34 if not big else 56, 22 if not big else 28, WHITE, "heavy",
                align="c", wrap=big, lh=0.95, dir=_dir(r["name"]))
-        n = r["done"] + r["open"]
-        cy, rad = (y + 190, min(70.0, w / 2 - 40)) if big else (y + 96, 40.0)
-        ring(f, x + w / 2, cy, rad, r["done"] / n if n else 0.0, MINT, lw=12 if big else 8)
-        tw = 30.0 if big else 20.0
-        rows_y = (y + 300, y + 400) if big else (y + 150, y + 196)
-        for (label, value, colour), ry in zip(((t["done_today"], r["done"], MINT), (t["in_work"], r["open"], AMBER)), rows_y):
+        cards = r.get("cards") or []
+        cy, rad = (y + 128, min(52.0, w / 2 - 40)) if big else (y + 74, 30.0)
+        ring(f, x + w / 2, cy, rad, (r.get("pct") or 0) / 100 if cards else 0.0, MINT, lw=10 if big else 7)
+        pct = f"{min(r.get('pct') or 0, 100)}%" if cards else "-"
+        tw = 20.0 if big else 13.0
+        digits(f, pct, x + w / 2 + len(pct) * (tw + 3) / 2, cy - tw * 0.75, tw, tw * 1.5, fg=WHITE, size=round(tw))
+        by = y + (210 if big else 116)
+        bh = 14 if big else 9
+        for c in cards:   # every card of the slide (at most radio_staff.MAX_CARDS): what is drawn is what is said
+            bw = w - 24 - (86 if big else 62)
+            bx = x + w - 12 - bw   # the bar on the reading side, done/total on the other
+            f.fill(bx, by, bw, bh, LINE, r=bh / 2)
+            frac = min(c["pct"], 100) / 100  # the card's own percent (its whole plan), as said
+            if frac > 0:
+                f.fill(bx + bw * (1 - frac), by, bw * frac, bh, MINT, r=bh / 2)
+            ftw = 14.0 if big else 9.0
+            if c["total"]:
+                fraction(f, c["done"], c["total"], x + 12 + fraction_width(c["done"], c["total"], ftw), by - ftw * 0.4,
+                         ftw, ftw * 1.5, round(ftw * 0.95))
+            by += 44 if big else 22
+        ctw = 18.0 if big else 12.0
+        rows_y = (y + h - 70, y + h - 36) if big else (y + h - 52, y + h - 27)
+        for (label, value, colour), ry in zip(((t["done_today"], r["done"], MINT), (t["in_work"], r["open"], AMBER)),
+                                              rows_y):
             v = str(min(value, 999))
-            if big:
-                digits(f, v, x + w / 2 + len(v) * (tw + 3) / 2, ry, tw, tw * 1.5, fg=colour, size=round(tw * 0.95))
-                f.text(label, x, ry + tw * 1.5 + 6, w, 26, 18, DIM, "bold", align="c", dir=d)
-            else:
-                f.text(label, x + w / 2 + 6, ry, w / 2 - 18, tw * 1.5, 16, DIM, "bold", dir=d)
-                digits(f, v, x + w / 2 - 6, ry, tw, tw * 1.5, fg=colour, size=round(tw * 0.95))
+            f.text(label, x + w / 2 + 6, ry, w / 2 - 18, ctw * 1.5, 15 if big else 12, DIM, "bold", dir=d)
+            digits(f, v, x + w / 2 - 6, ry, ctw, ctw * 1.5, fg=colour, size=round(ctw * 0.95))
     f.line(48, FOOT_Y, R, FOOT_Y, LINE, 1.5)
     f.text(t["staff_foot"], 400, FOOT_Y + 6, R - 400, 32, 20, DIM, "semibold", dir=d)
     return f

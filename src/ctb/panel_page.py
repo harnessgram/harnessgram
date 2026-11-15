@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from .i18n import t
 
@@ -27,8 +28,10 @@ STRINGS = {
         "hooksReload": "טעינת הסשנים מחדש", "hooksHint": "רק סשנים פנויים עם הגדרות ישנות ייטענו מחדש. סשן עובד או חלון עם שאלה יידלגו.",
         "hooksRunning": "טוען סשנים פנויים מחדש…", "hooksReloaded": "נטענו מחדש", "hooksSkipped": "דולגו", "hooksReloadFailed": "הטעינה לא הושלמה. אפשר לנסות שוב.",
         "reload_busy": "עדיין עובד, יש שאלה או טיוטה", "reload_current": "כבר מעודכן", "reload_no_pane": "אין חלון זמין",
+        "hooksNReloaded": "נטענו מחדש: #", "hooksNCurrent": "מעודכנים: #", "hooksNBusy": "עובדים עכשיו, דולגו: #",
+        "hooksNOther": "צריכים בדיקה: #", "hooksNone": "אין סשנים לטעינה",
         "reload_unknown": "לא ניתן לוודא שהסשן פנוי", "reload_failed": "הטעינה לא הושלמה", "reload_dialog": "ממתין לאישור בחלון", "reload_not_live": "כבר לא פעיל",
-        "radioPlay": "האזנה", "radioPause": "השהיה", "radioLive": "בשידור חי",
+        "radioPlay": "האזנה", "radioPause": "השהיה", "listenSafari": "האזנה בספארי", "listenFailed": "לא הצלחתי ליצור קישור. נסו שוב", "listenRevoke": "ביטול קישורי האזנה", "listenRevokeHint": "קישורי האזנה בספארי פעילים. ביטול סוגר את כולם", "listenRevoked": "קישורי ההאזנה בוטלו", "devicesTitle": "וידג'טים מחוברים", "devicesHint": "מכשירים שהווידג'טים שלהם קוראים את הקוקפיט. ניתוק עובד מיד", "devicesAdded": "נוסף", "devicesRevoke": "ניתוק", "devicesRevoked": "המכשיר נותק", "devicesFailed": "לא הצלחתי לנתק. נסו שוב", "radioLive": "בשידור חי",
         "radioPlayerOff": "הרדיו כבוי", "radioPlayerError": "ההאזנה נעצרה. אפשר לנסות שוב",
         "macTitle": "המחשב", "macUnavailable": "המידע אינו זמין כרגע", "macMemory": "לחץ זיכרון וזיכרון פנוי משוער", "macCpu": "עומס מעבד לדקה, חמש דקות ורבע שעה", "macCores": "ליבות", "macDisk": "מקום פנוי בכונן המערכת, ללא מקום שניתן לפינוי ובכוננים אחרים", "macBattery": "סוללה", "macPower": "מחובר לחשמל", "macOnBattery": "פועל על סוללה", "macNoBattery": "אין סוללה", "macUptime": "זמן מאז ההפעלה", "macHours": "שעות", "macGb": "גיגה־בייט", "macTopCpu": "שימוש ממוצע במעבד לאורך חיי התהליך", "macTopMemory": "הפעילים ביותר בזיכרון", "macTest": "הרצת בדיקות", "macEncoder": "קידוד וידאו", "macAgent": "סוכן", "macBrowser": "דפדפן", "macBuild": "כלי בנייה", "macOther": "תהליך אחר", "macOk": "המצב תקין", "macWarn": "כדאי לבדוק את מצב המחשב", "macCritical": "נדרשת תשומת לב למצב המחשב", "macMemoryOk": "יש זיכרון פנוי", "macMemoryWarn": "לחץ הזיכרון עולה", "macMemoryCritical": "לחץ הזיכרון גבוה", "macCpuOk": "העומס נמוך ביחס לליבות", "macCpuWarn": "העומס בחמש הדקות האחרונות מתקרב למספר הליבות", "macCpuCritical": "העומס בחמש הדקות האחרונות גבוה ביחס לליבות", "macDiskOk": "יש מקום פנוי", "macDiskWarn": "המקום הפנוי מצטמצם", "macDiskCritical": "נותר מעט מקום פנוי", "macBatteryOk": "מצב הסוללה תקין", "macBatteryWarn": "הסוללה מתרוקנת", "macBatteryCritical": "הסוללה כמעט ריקה",
         "moreTabs": "עוד", "title": "הקוקפיט", "here": "הנושא הזה", "all": "כל הלוח",
@@ -42,7 +45,7 @@ STRINGS = {
         "bg1": "משימה ברקע", "bg": "משימות ברקע", "bgNone": "אין משימות ברקע",
         "now": "עכשיו", "updated": "עודכן", "updating": "מתעדכן…", "refresh": "רענון",
         "pull": "משכו למטה לרענון", "release": "שחררו לרענון",
-        "denied": "אין גישה ללוח", "open": "יש לפתוח את הלוח מתוך טלגרם",
+        "denied": "אין גישה ללוח", "renderFailed": "שגיאה בהצגת הלוח", "open": "יש לפתוח את הלוח מתוך טלגרם",
         "reopen": "ההתחברות לטלגרם פגה. סגרו את הלוח ופתחו אותו מחדש",
         "busy": "המערכת עסוקה, נסו שוב", "failed": "השליחה נכשלה, נסו שוב", "retry": "נסו שוב",
         "offline": "אין חיבור כרגע, ננסה שוב בעוד רגע",
@@ -74,11 +77,32 @@ STRINGS = {
         "more": "עוד",
         "radioSay": "השמעה ברדיו", "radioSayPh": "מה להשמיע עכשיו?", "radioSayBtn": "להשמיע עכשיו",
         "radioSaid": "יושמע ברדיו בעוד רגע", "radioIsOff": "הרדיו כבוי",
+        "set_voice_digest": "תקציר קולי",
+        "hint_voice_digest": "עדכוני הרדיו בהודעה קולית אחת. שקט בלילה ובחלונות שבת וחג שהוגדרו.",
+        "digest_off": "כבוי", "digest_important": "חשובים בלבד", "digest_hourly": "כל שעה",
+        "digest_every_3_hours": "כל שלוש שעות",
         "set_radio_every_reply": "הרדיו אומר כל תשובה",
         "hint_radio_every_reply": "כל תשובה של סשן נאמרת ברדיו בקצרה. כבוי: רק תשובה להקלטה קולית.",
         "set_radio_board": "מופע הפרויקטים ברדיו",
         "hint_radio_board": "התמונה של הרדיו זזה: עמודה לכל פרויקט, קיר משימות לכל פרויקט (הושלם, בעבודה, הבא בתור) ופס מבזקים. כבוי: הכרטיס הרגיל.",
-        "radioMinutes": "דקות קול משובח היום", "radioOf": "מתוך",
+        "radioMinutes": "דקות קול משובח היום", "radioOf": "מתוך", "radioBudgetUnavailable": "תקציב הקול אינו זמין", "radioConfiguredCap": "תקרה מוגדרת", "radioActiveCap": "תקרה פעילה",
+        "radioListening": "יש מאזין לרדיו", "radioNotListening": "לא זוהה מאזין — הקול החינמי ייבחר למבזק הבא",
+        "radioListenerUnknown": "לא ניתן לוודא האזנה — הקול החינמי ייבחר למבזק הבא",
+        "radioDetectionOff": "זיהוי האזנה אינו זמין — חלה המגבלה הרגילה",
+        "radioListenerPlayer": "נגן הקוקפיט", "radioListenerCall": "השידור בטלגרם", "radioModeGroup": "מצב: שידור חי בקבוצה והאזנה פרטית", "radioModePrivate": "מצב: האזנה פרטית בלבד", "radioModeNext": "השינוי יחול בהפעלה הבאה של הרדיו",
+        # the podcast queue on the radio (radio_podcast.py)
+        "podcast": "פודקאסט ברדיו", "podIdle": "שום פרק לא מתנגן", "podLoading": "מוריד את הפרק…",
+        "podRadioOff": "הרדיו כבוי. הפרק ישודר כשתדליקו אותו", "podPlay": "המשך", "podPause": "השהיה",
+        "podSkip": "דילוג", "podStop": "עצירה", "podRemove": "הסרה", "podQueue": "בתור",
+        "podAdd": "הוספת פרק", "podFeeds": "בחרו פודקאסט", "podFetching": "מביא את הפרקים…",
+        "podNoEpisodes": "אין פרקים להשמעה בפיד הזה", "podBack": "חזרה לרשימה",
+        "podLinkPh": "הדביקו קישור לפרק או לפיד", "podLinkBtn": "הוספה לתור", "podAdded": "הפרק נוסף לתור",
+        "podErr_bad": "הבקשה לא תקינה", "podErr_url": "הקישור לא מותר: רק קישורים מאובטחים לאתרים ציבוריים",
+        "podErr_fetch": "לא הצלחתי להביא את הפודקאסט", "podErr_feed": "זה לא פיד פודקאסט עם פרק להשמעה",
+        "podErr_too_big": "הקובץ גדול מדי", "podErr_unknown": "אין פיד או פרק כזה", "podErr_full": "התור מלא",
+        "podErr_dup": "הפרק כבר בתור", "podErr_unsuitable": "הפרק לא עובר את כללי ההתאמה של הרדיו",
+        "podErr_explicit": "הפרק מסומן כמיועד לבוגרים", "podErr_rules": "בודק ההתאמה אינו זמין", "podErr_notext": "בקישור אין כותרת או תיאור לבדיקה: הדביקו פיד או דף פרק",
+        "podErr_decode": "אי אפשר היה להשמיע את הפרק",
         # the brainstorming room on the radio (radio_room.py)
         "set_radio_room": "סיעור מוחות ברדיו",
         "hint_radio_room": "חדר חי ברדיו: מנחה, מבקר, מעצב, מנכ״ל ונציג לכל פרויקט קשור מדברים בשלושה סבבים. שום דבר לא נשלח לסשן בלי לחיצה שלך.",
@@ -138,7 +162,7 @@ STRINGS = {
         "ytMirrorOn": "הפעלת מראה קבועה", "ytMirrorOff": "כיבוי המראה וביטול ההרשאה",
         "ytMirrorConfirm": "לאשר שידור של כל תוכן הרדיו הביתי בערוץ הזה, בכל פעם שהרדיו פועל?",
         "ytTitle": "רדיו הצוות ב־" + _iso("YouTube"),
-        "ytHint": "שידור לא רשום לשיתוף עם הצוות: רק שמות הפרויקטים שבחרת ומספרים, בלי שום דבר פרטי.",
+        "ytHint": "שידור לא רשום לשיתוף עם הצוות: רק התקדמות ומספרים של הפרויקטים שבחרת, בלי שום טקסט של משימות.",
         "ytSetup": "החיבור עוד לא הוגדר. צריך הגדרה חד־פעמית של פרטי ההתחברות במחשב.",
         "ytConnect": "התחברות עם " + _iso("YouTube"), "ytNotConnected": "לא מחובר", "ytReady": "מחובר",
         "ytLiveNow": "בשידור", "ytConnectedAs": "מחובר לערוץ",
@@ -149,7 +173,7 @@ STRINGS = {
         "ytCleanup": "שידור קודם עוד לא נסגר. הוא ייסגר בפעולה הבאה.",
         "ytBridgeOff": "הגשר כבוי, ולכן אין שידור. אפשר רק לעצור או לנתק.",
         "ytEnable": "רדיו הצוות פעיל", "ytEnableHint": "כבוי: אי אפשר לעלות לשידור, ושידור פעיל נעצר.",
-        "ytProjects": "על אילו פרויקטים הצוות ישמע", "ytProjectsHint": "רק שם הפרויקט ומספרים. בלי בחירה, הרדיו רק מזדהה.",
+        "ytProjects": "על אילו פרויקטים הצוות ישמע", "ytProjectsHint": "השם מההגדרות שלך או שם כללי, התקדמות ומספרים. בלי בחירה, הרדיו רק מזדהה.",
         "ytNoProjects": "אין עדיין פרויקטים לבחירה.", "ytUnspeakable": "השם לא יוקרא: יש בו אותיות לועזיות או ספרות.",
         "ytStart": "עלייה לשידור", "ytConfirm": "זה יעלה עכשיו שידור חי לא רשום בערוץ:",
         "ytConfirmGo": "כן, לעלות לשידור", "ytCancel": "ביטול", "ytStop": "עצירת השידור",
@@ -157,6 +181,7 @@ STRINGS = {
         "ytReconnect": "צריך להתחבר מחדש לערוץ: ההתחברות השמורה שייכת ללקוח התחברות שכבר לא קיים כאן, או שיש כמה ואי אפשר לדעת איזה.",
         "ytRevokeFailed": "הערוץ נותק כאן, אבל גוגל לא אישרה את ביטול ההרשאה. אפשר להסיר אותה בדף הגישה של חשבון גוגל.",
         "ytNeedsEnable": "כדי לעלות לשידור צריך להפעיל את רדיו הצוות.", "ytOpFailed": "הפעולה האחרונה לא הצליחה.",
+        'ytErr_youtube_rules_invalid': 'שורה ברשימת המילים הפרטית אינה מילה פשוטה. תקן אותה ונסה שוב.', 'ytErr_youtube_disabled': 'רדיו הצוות כבוי. הפעל אותו ונסה שוב.', 'ytErr_youtube_not_connected': 'הערוץ אינו מחובר. חבר אותו ונסה שוב.', 'ytErr_youtube_not_enabled': 'שידור חי אינו מופעל בערוץ. יש להפעיל אותו ב־\u2068YouTube Studio\u2069.', 'ytErr_youtube_api_failed': 'יוטיוב דחה את הבקשה. נסה שוב.', 'ytErr_youtube_job_failed': 'לא ניתן להפעיל את השידור ברקע. נסה שוב.', 'ytErr_youtube_busy': 'הרדיו עסוק בשינוי אחר. נסה שוב בעוד רגע.', 'ytErr_youtube_channel_changed': 'הערוץ השתנה. אשר שוב את העלייה לשידור.', 'ytErr_youtube_confirm_missing': 'אישור השידור פג או כבר נוצל. אשר שוב.', 'ytErr_youtube_macos_only': 'שידור זה פועל רק במחשב מק.', 'ytErr_youtube_stop_first': 'יש לעצור תחילה את רדיו הצוות.', 'ytErr_youtube_no_client': 'לא הוגדרה התחברות לערוץ.', 'ytErr_youtube_connect_failed': 'ההתחברות לערוץ נכשלה. נסה שוב.', 'ytErr_youtube_connect_timeout': 'זמן ההתחברות הסתיים. נסה שוב.', 'ytErr_youtube_scope_missing': 'ההרשאה לערוץ לא ניתנה. התחבר שוב ואשר אותה.', 'ytErr_youtube_no_channel': 'לחשבון הזה אין ערוץ.', 'ytErr_youtube_secret_store_failed': 'לא ניתן לשמור את פרטי ההתחברות.', 'ytErr_youtube_connect_stale': 'ההתחברות כבר אינה בתוקף. התחבר שוב.',
         "bridge": "הגדרות הגשר", "saved": "נשמר", "off": "כבוי",
         "set_away": "מצב היעדרות", "hint_away": "סשן שעבד בשש השעות האחרונות ממשיך לבד לפי ההמלצה שלו, עד שתחזור. סשנים ישנים לא מתעוררים.",
         "set_voice_confirm": "אישור הקלטות", "hint_voice_confirm": "הקלטה קולית מתומללת ומחכה לאישור שלך לפני שליחה.",
@@ -173,6 +198,7 @@ STRINGS = {
         "set_auto_topic_names": "שמות נושאים אוטומטיים", "hint_auto_topic_names": "שולחת קטעי שיחה לספק הענן שעשוי לחייב את החשבון או הפרויקט המוגדר; עד 150 בקשות ביום אינן מגבלת הוצאה.",
         "set_activity": "פעילות חיה", "hint_activity": "כמה מהעבודה של הסוכן מוצג בנושא בזמן שהוא עובד: רק המילים שלו, הצעדים האחרונים, או הכול כולל פלט.",
         "act_quiet": "שקט", "act_normal": "רגיל", "act_full": "הכול",
+        "coldOn": "פעיל", "set_cold_compact": "כיווץ לפני הודעה אחרי הפסקה", "hint_cold_compact": "אחרי שעה בלי פעילות המודל, תוקף העותק השמור של השיחה (מטמון) פג וכל השיחה נקראת שוב במחיר מלא. כיווץ לפני השליחה מוזיל את ההודעה הזו ואת הבאות, אך לוקח כדקה ומשאיר רק סיכום של פרטים ישנים.",
         "set_auto_compact": "דחיסה אוטומטית", "hint_auto_compact": "גודל ההקשר שבו סשן נדחס לבד.",
         "tabMe": "בשבילי", "tabAgents": "סוכנים", "appFrame": "כלי פרטי",
         "heroOne": "שאלה מחכה לך", "heroMany": "שאלות מחכות לך",
@@ -180,9 +206,12 @@ STRINGS = {
         "questionClosed": "השאלה הזאת כבר נסגרה", "showOpenQuestions": "הצגת השאלות הפתוחות",
         "allClear": "הכל רגוע", "allClearHint": "שום דבר לא מחכה לך כרגע. הסוכנים ממשיכים לעבוד.",
         "cardsAsk": "הסוכנים שואלים", "cardsShow": "עדכונים מהסוכנים", "cardsOld": "כרטיסים ישנים",
-        "cardsOldHint": "כרטיסים של סשנים שהסתיימו או עדכונים שנסגרו.",
+        "cardsOldHint": "כרטיסים של סשנים שהסתיימו, עדכונים שנסגרו או התקדמות שהושלמה לפני חצי שעה לפחות.",
         "cardUpdated": "עודכן", "cardStale": "לא מעודכן", "cardAuto": "כרטיס אוטומטי מרשימת המשימות", "cardClosed": "נסגר אוטומטית", "cardDismiss": "הסרה",
-        "cardWorking": "עובדים עכשיו", "cardActivityUpdated": "עודכן לפני {0} שניות", "cardNow": "עכשיו", "cardTask": "המשימה הפעילה", "cardLiveUpdated": "עודכן לפני {0} דקות",
+        "cardWorking": "עובדים עכשיו", "cardNow": "עכשיו", "cardTask": "המשימה הפעילה",
+        "cardTextMore": "הצגת הטקסט המלא", "cardTextLess": "קיצור הטקסט",
+        "cardChoose": "בחר", "cardEnlarge": "הגדלת התמונה", "cardImageClose": "סגירת התמונה",
+        "cardImageHint": "אפשר לצבוט להגדלה ולגרור את התמונה", "cardImageError": "התמונה לא זמינה כרגע",
         "k_progress": "התקדמות", "k_choice": "בחירה", "k_ask": "תשובה קצרה", "k_link": "קישור", "k_numbers": "נתונים",
         "cardSent": "התשובה ממתינה למסירה לסוכן", "cardAlready": "כבר נענה", "cardGone": "הכרטיס כבר נסגר",
         "deliveryTitle": "מסירת תשובות", "deliveryQueued": "ממתינה למסירה לסוכן",
@@ -198,8 +227,10 @@ STRINGS = {
         "hooksReload": "Reload sessions", "hooksHint": "Only idle sessions with older settings reload. Working sessions, drafts and dialogs are skipped.",
         "hooksRunning": "Reloading idle sessions…", "hooksReloaded": "Reloaded", "hooksSkipped": "Skipped", "hooksReloadFailed": "Reload did not finish. You can try again.",
         "reload_busy": "Working, dialog or draft", "reload_current": "Already current", "reload_no_pane": "No available pane",
+        "hooksNReloaded": "Reloaded: #", "hooksNCurrent": "Up to date: #", "hooksNBusy": "Working now, skipped: #",
+        "hooksNOther": "Need a check: #", "hooksNone": "No sessions to reload",
         "reload_unknown": "Cannot verify idle state", "reload_failed": "Reload did not finish", "reload_dialog": "Waiting for a terminal approval", "reload_not_live": "No longer live",
-        "radioPlay": "Listen", "radioPause": "Pause", "radioLive": "Live",
+        "radioPlay": "Listen", "radioPause": "Pause", "listenSafari": "Listen in Safari", "listenFailed": "Could not create the link. Try again", "listenRevoke": "Revoke listening links", "listenRevokeHint": "Safari listening links are active. Revoking closes all of them", "listenRevoked": "Listening links revoked", "devicesTitle": "Connected widgets", "devicesHint": "Devices whose widgets read the Cockpit. Revoking works at once", "devicesAdded": "Added", "devicesRevoke": "Revoke", "devicesRevoked": "Device revoked", "devicesFailed": "Could not revoke. Try again", "radioLive": "Live",
         "radioPlayerOff": "Radio is off", "radioPlayerError": "Playback stopped. Try again",
         "macTitle": "This Mac", "macUnavailable": "Information is not available yet", "macMemory": "Memory pressure and estimated available memory", "macCpu": "CPU load over one, five and fifteen minutes", "macCores": "cores", "macDisk": "Free space on the system volume, excluding purgeable space and other volumes", "macBattery": "Battery", "macPower": "Connected to power", "macOnBattery": "On battery", "macNoBattery": "No battery", "macUptime": "Time since startup", "macHours": "hours", "macGb": "GB", "macTopCpu": "Highest lifetime average CPU use", "macTopMemory": "Highest memory use", "macTest": "Test run", "macEncoder": "Video encoding", "macAgent": "Agent", "macBrowser": "Browser", "macBuild": "Build tool", "macOther": "Other process", "macOk": "Everything looks normal", "macWarn": "Check the computer status", "macCritical": "The computer needs attention", "macMemoryOk": "Memory is available", "macMemoryWarn": "Memory pressure is rising", "macMemoryCritical": "Memory pressure is high", "macCpuOk": "Load is low for the core count", "macCpuWarn": "The five minute load is approaching the core count", "macCpuCritical": "The five minute load is high for the core count", "macDiskOk": "Free space is available", "macDiskWarn": "Free space is getting low", "macDiskCritical": "Very little free space remains", "macBatteryOk": "Battery level is normal", "macBatteryWarn": "Battery is running low", "macBatteryCritical": "Battery is almost empty",
         "moreTabs": "More", "title": "Cockpit", "here": "This topic", "all": "Everything",
@@ -213,7 +244,7 @@ STRINGS = {
         "bg1": "background task", "bg": "background tasks", "bgNone": "No background tasks",
         "now": "now", "updated": "Updated", "updating": "Updating…", "refresh": "Refresh",
         "pull": "Pull down to refresh", "release": "Release to refresh",
-        "denied": "Access denied", "open": "Open the panel from inside Telegram",
+        "denied": "Access denied", "renderFailed": "Could not show the board", "open": "Open the panel from inside Telegram",
         "reopen": "Your Telegram login expired. Close the panel and open it again",
         "busy": "Busy, try again", "failed": "Could not send, try again", "retry": "Try again",
         "offline": "No connection right now, trying again shortly",
@@ -245,11 +276,32 @@ STRINGS = {
         "more": "More",
         "radioSay": "Say on the radio", "radioSayPh": "What should the radio say now?", "radioSayBtn": "Say it now",
         "radioSaid": "The radio will say it in a moment", "radioIsOff": "The radio is off",
+        "set_voice_digest": "Voice digest",
+        "hint_voice_digest": "Radio updates in one voice note. Quiet at night and during configured Sabbath and holiday windows.",
+        "digest_off": "Off", "digest_important": "Important only", "digest_hourly": "Hourly",
+        "digest_every_3_hours": "Every 3 hours",
         "set_radio_every_reply": "Radio speaks every reply",
         "hint_radio_every_reply": "Every session's reply is said briefly on the radio. Off: only replies to voice notes.",
         "set_radio_board": "Project show on the radio",
         "hint_radio_board": "The radio's picture moves: a column per project, a task wall per project (done, in work, next up) and a news ticker. Off: the usual card.",
-        "radioMinutes": "Paid voice minutes today", "radioOf": "of",
+        "radioMinutes": "Paid voice minutes today", "radioOf": "of", "radioBudgetUnavailable": "Voice budget unavailable", "radioConfiguredCap": "Configured cap", "radioActiveCap": "Active cap",
+        "radioListening": "A listener is detected", "radioNotListening": "No listener detected — the free voice will be selected for the next bulletin",
+        "radioListenerUnknown": "Listening could not be verified — the free voice will be selected for the next bulletin",
+        "radioDetectionOff": "Listening detection unavailable — fallback cap applies",
+        "radioListenerPlayer": "Cockpit player", "radioListenerCall": "Telegram live stream", "radioModeGroup": "Mode: live stream in the group and private listening", "radioModePrivate": "Mode: private listening only", "radioModeNext": "The change applies the next time the radio starts",
+        # the podcast queue on the radio (radio_podcast.py)
+        "podcast": "Podcast on the radio", "podIdle": "Nothing is playing", "podLoading": "Downloading the episode…",
+        "podRadioOff": "The radio is off. The episode goes on the air when you turn it on", "podPlay": "Resume",
+        "podPause": "Pause", "podSkip": "Skip", "podStop": "Stop", "podRemove": "Remove", "podQueue": "Queue",
+        "podAdd": "Add an episode", "podFeeds": "Pick a podcast", "podFetching": "Getting the episodes…",
+        "podNoEpisodes": "No playable episodes in this feed", "podBack": "Back to the list",
+        "podLinkPh": "Paste an episode or feed link", "podLinkBtn": "Add to the queue", "podAdded": "Added to the queue",
+        "podErr_bad": "That request is not valid", "podErr_url": "That link is not allowed: https links to public sites only",
+        "podErr_fetch": "Could not get the podcast", "podErr_feed": "That is not a podcast feed with a playable episode",
+        "podErr_too_big": "That file is too large", "podErr_unknown": "No such feed or episode", "podErr_full": "The queue is full",
+        "podErr_dup": "Already in the queue", "podErr_unsuitable": "The episode does not pass the radio's suitability rules",
+        "podErr_explicit": "The episode is marked explicit", "podErr_rules": "The suitability checker is not available", "podErr_notext": "That link has no title or description to check: paste a feed or an episode page",
+        "podErr_decode": "The episode could not be played",
         "set_radio_room": "Brainstorm room on the radio",
         "hint_radio_room": "A live room on the radio: a moderator, a critic, a designer, a CEO and a delegate per related project talk in three rounds. Nothing goes to a session without your tap.",
         "room": "Brainstorm", "roomHint": "Pick a topic and the team talks it through on the air.",
@@ -305,7 +357,7 @@ STRINGS = {
         "ytMirrorOn": "Enable standing mirror", "ytMirrorOff": "Stop mirror and revoke permission",
         "ytMirrorConfirm": "Broadcast all home radio content on this channel whenever the radio is on?",
         "ytTitle": "Staff radio on YouTube",
-        "ytHint": "An unlisted stream to share with the staff: only the project names you pick and counts, nothing private.",
+        "ytHint": "An unlisted stream to share with the staff: only progress and numbers of the projects you pick, never any task text.",
         "ytSetup": "Not set up yet: the sign-in client needs a one-time setup on the computer.",
         "ytConnect": "Connect with YouTube", "ytNotConnected": "Not connected", "ytReady": "Connected",
         "ytLiveNow": "Live", "ytConnectedAs": "Connected to the channel",
@@ -316,7 +368,7 @@ STRINGS = {
         "ytCleanup": "An earlier broadcast is not closed yet; the next action closes it.",
         "ytBridgeOff": "The bridge is off, so nothing is streamed. You can only stop or disconnect.",
         "ytEnable": "Staff radio on", "ytEnableHint": "Off: going live is not possible and a live stream stops.",
-        "ytProjects": "Projects the staff hear about", "ytProjectsHint": "Only the project name and counts. With none picked, the radio only says who it is.",
+        "ytProjects": "Projects the staff hear about", "ytProjectsHint": "Your staff label or a neutral name, progress and counts. With none picked, the radio only says who it is.",
         "ytNoProjects": "No projects to pick yet.", "ytUnspeakable": "This name will not be read: it has Latin letters or digits.",
         "ytStart": "Go live", "ytConfirm": "This starts an unlisted live stream now on the channel:",
         "ytConfirmGo": "Yes, go live", "ytCancel": "Cancel", "ytStop": "Stop the broadcast",
@@ -325,6 +377,7 @@ STRINGS = {
         "ytReconnect": "Connect the channel again: the saved sign-in belongs to a sign-in client that is no longer here, or there are several and it is not clear which.",
         "ytRevokeFailed": "The channel is disconnected here, but Google did not confirm removing the permission. You can remove it on your Google account's access page.",
         "ytNeedsEnable": "Turn the staff radio on to go live.", "ytOpFailed": "The last action did not work.",
+        'ytErr_youtube_rules_invalid': 'A line in the private word list is not a plain word. Fix it and try again.', 'ytErr_youtube_disabled': 'Turn on the staff radio and try again.', 'ytErr_youtube_not_connected': 'Connect the channel and try again.', 'ytErr_youtube_not_enabled': 'Live streaming is not enabled on this channel. Enable it in YouTube Studio.', 'ytErr_youtube_api_failed': 'YouTube declined the request. Try again.', 'ytErr_youtube_job_failed': 'Could not start the broadcast in the background. Try again.', 'ytErr_youtube_busy': 'The radio is handling another change. Try again shortly.', 'ytErr_youtube_channel_changed': 'The channel changed. Confirm going live again.', 'ytErr_youtube_confirm_missing': 'The go-live confirmation expired or was already used. Confirm again.', 'ytErr_youtube_macos_only': 'This broadcast requires a Mac.', 'ytErr_youtube_stop_first': 'Stop the staff radio first.', 'ytErr_youtube_no_client': 'The channel sign-in is not configured.', 'ytErr_youtube_connect_failed': 'Channel sign-in failed. Try again.', 'ytErr_youtube_connect_timeout': 'Sign-in timed out. Try again.', 'ytErr_youtube_scope_missing': 'Channel permission was not granted. Connect again and allow it.', 'ytErr_youtube_no_channel': 'This account has no channel.', 'ytErr_youtube_secret_store_failed': 'Could not save the sign-in details.', 'ytErr_youtube_connect_stale': 'The sign-in is no longer valid. Connect again.',
         "bridge": "Bridge settings", "saved": "Saved", "off": "Off",
         "set_away": "Away mode", "hint_away": "A session that worked in the last six hours carries on with its own recommendation until you are back. Older sessions are not woken.",
         "set_voice_confirm": "Confirm voice notes", "hint_voice_confirm": "A voice note is transcribed and waits for your OK before it is sent.",
@@ -341,6 +394,7 @@ STRINGS = {
         "set_auto_topic_names": "Automatic topic names", "hint_auto_topic_names": "May send conversation excerpts to the cloud provider and charge the configured account or project; the 150 daily request limit is not a spending limit.",
         "set_activity": "Live activity", "hint_activity": "How much of an agent's work its topic shows while it works: only its words, the latest steps, or everything with output.",
         "act_quiet": "Quiet", "act_normal": "Normal", "act_full": "Everything",
+        "coldOn": "On", "set_cold_compact": "Compact before a message after a break", "hint_cold_compact": "After an hour without API activity, the saved conversation copy (cache) has expired, so the whole conversation is read again at full price. Compacting first makes this message and the next ones cheaper, but takes about a minute and keeps only a summary of older details.",
         "set_auto_compact": "Auto-compact", "hint_auto_compact": "The context size at which a session compacts itself.",
         "tabMe": "For me", "tabAgents": "Agents", "appFrame": "Private tool",
         "heroOne": "question waiting for you", "heroMany": "questions waiting for you",
@@ -348,9 +402,12 @@ STRINGS = {
         "questionClosed": "This question was already closed", "showOpenQuestions": "Show open questions",
         "allClear": "All clear", "allClearHint": "Nothing is waiting for you right now. Your agents keep working.",
         "cardsAsk": "Your agents ask", "cardsShow": "Updates from your agents", "cardsOld": "Older cards",
-        "cardsOldHint": "Cards from ended sessions or updates that were closed.",
+        "cardsOldHint": "Cards from ended sessions, closed updates, or progress completed at least half an hour ago.",
         "cardUpdated": "Updated", "cardStale": "Stale", "cardAuto": "Automatic card from the task list", "cardClosed": "Closed automatically", "cardDismiss": "Dismiss",
-        "cardWorking": "Working now", "cardActivityUpdated": "Updated {0} seconds ago", "cardNow": "Now", "cardTask": "Current task", "cardLiveUpdated": "Updated {0} min ago",
+        "cardWorking": "Working now", "cardNow": "Now", "cardTask": "Current task",
+        "cardTextMore": "Show full text", "cardTextLess": "Shorten text",
+        "cardChoose": "Choose", "cardEnlarge": "Enlarge image", "cardImageClose": "Close image",
+        "cardImageHint": "Pinch to zoom and drag to pan", "cardImageError": "Image is unavailable right now",
         "k_progress": "Progress", "k_choice": "Choice", "k_ask": "Short answer", "k_link": "Link", "k_numbers": "Figures",
         "cardSent": "Your answer is queued for delivery", "cardAlready": "Already answered", "cardGone": "This card is already closed",
         "deliveryTitle": "Answer delivery", "deliveryQueued": "Queued for delivery",
@@ -377,16 +434,41 @@ _REQUEST_STRINGS = {
     "he": {"requestsTitle": "בקשות", "requestsProject": "לפי פרויקט", "requestsAll": "כל הפרויקטים",
            "oldHint": "פריטים שמחכים זמן רב. תזכורות עוברות לכאן שלושה ימים אחרי המועד, או אחרי שבועיים בלי מועד. אפשר להסיר או להחזיר אותן לרשימה הפעילה.",
            "requestsYou": "נדרש ממך", "requestsTeam": "בטיפול הצוות", "requestsDone": "בוצע",
+           "requestDone": "בוצע", "requestDrop": "לא רלוונטי", "requestPush": "לקדם", "requestConfirm": "לאשר?", "requestClosed": "הבקשה כבר נסגרה", "requestSaved": "הפעולה נשמרה", "requestsOlder": "ישנות", "requestsReviewOld": "לעבור על הבקשות הישנות",
            "requestsSteps": "שלבי הטיפול", "requestsEmpty": "אין בקשות פתוחות כרגע",
+           "requestsNeedsYou": "מחכות לך", "requestsShowAll": "לכל {n} הבקשות",
+           "requestsMore": "עוד {n} בקשות", "requestsOpenCount": "{n} פתוחות",
+           "requestsOwnerCount": "{n} מחכות לך", "requestsBackAll": "חזרה לכל הבקשות",
+           "requestsOwnerEmpty": "אין בקשות שמחכות לך כרגע",
            "restoreRem": "להחזיר לרשימה הפעילה", "remRestored": "התזכורת חזרה לרשימה הפעילה"},
     "en": {"requestsTitle": "Requests", "requestsProject": "By project", "requestsAll": "All projects",
            "oldHint": "Items waiting a long time. Reminders move here three days after their deadline, or after two weeks without a date. Clear or restore them to the active list.",
            "requestsYou": "You", "requestsTeam": "Team is working", "requestsDone": "Done",
+           "requestDone": "Done", "requestDrop": "Not relevant", "requestPush": "Push forward", "requestConfirm": "Confirm?", "requestClosed": "Already closed", "requestSaved": "Action saved", "requestsOlder": "Older", "requestsReviewOld": "Review old items",
            "requestsSteps": "Steps", "requestsEmpty": "No open requests right now",
+           "requestsNeedsYou": "Needs you", "requestsShowAll": "Show all {n}",
+           "requestsMore": "Show {n} more", "requestsOpenCount": "{n} open",
+           "requestsOwnerCount": "{n} need you", "requestsBackAll": "Back to all requests",
+           "requestsOwnerEmpty": "Nothing needs you right now",
            "restoreRem": "Restore to active list", "remRestored": "Reminder restored to active list"},
 }
 for _lang, _pairs in _REQUEST_STRINGS.items():
     STRINGS[_lang].update(_pairs)
+
+STRINGS["he"].update({"topicsTitle": "נושאים", "topicsEmpty": "נושאים מהיומן יופיעו כאן אוטומטית",
+    "topic_owner": "מחכה לך", "topic_stuck": "תקוע", "topic_working": "בעבודה",
+    "topic_decided": "הוחלט", "topic_done": "הושלם", "topicsDone": "נושאים שהושלמו",
+    "topicDecision": "ההחלטה האחרונה", "topicNext": "הצעד הבא", "topicLatest": "העדכון האחרון", "topicNoDecision": "טרם נרשמה החלטה",
+    "topicNoNext": "טרם נרשם צעד הבא", "topicTimeline": "היסטוריית הנושא", "topicNoNotes": "טרם נרשמו עדכונים",
+    "topicClose": "סגירה", "topicPRs": "בקשות מיזוג", "topicPRUnknown": "מצב לא ידוע",
+    "topicPR_open": "פתוחה", "topicPR_draft": "טיוטה", "topicPR_merged": "מוזגה"})
+STRINGS["en"].update({"topicsTitle": "Topics", "topicsEmpty": "Ledger topics appear here automatically",
+    "topic_owner": "Waiting for you", "topic_stuck": "Stuck", "topic_working": "In progress",
+    "topic_decided": "Decided", "topic_done": "Done", "topicsDone": "Completed topics",
+    "topicDecision": "Last decision", "topicNext": "Next step", "topicLatest": "Latest update", "topicNoDecision": "No decision recorded yet",
+    "topicNoNext": "No next step recorded yet", "topicTimeline": "Topic timeline", "topicNoNotes": "No updates recorded yet",
+    "topicClose": "Close", "topicPRs": "Pull requests", "topicPRUnknown": "State unknown",
+    "topicPR_open": "Open", "topicPR_draft": "Draft", "topicPR_merged": "Merged"})
 
 PAGE = r"""<!doctype html>
 <html lang="__LANG__" dir="__DIR__">
@@ -480,7 +562,7 @@ svg.i{inline-size:20px;block-size:20px;stroke:currentColor;fill:none;stroke-widt
 #apps{margin-block-end:12px}
 .appframe{display:block;inline-size:100%;block-size:calc(var(--tg-viewport-stable-height,100vh) - 176px - max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px)));min-block-size:360px;border:0;
 border-radius:0;background:transparent}
-#apps[hidden],.appframe[hidden]{display:none}
+#apps[hidden],.appframe[hidden],.apperr[hidden]{display:none}
 /* focus mode: the app asked to fold the header and tabs, so its frame fills the page edge to edge (the top inset stays) */
 body.focus{padding-block-end:0;padding-inline:0}
 body.focus #apps{margin-block-end:0}
@@ -538,6 +620,7 @@ padding-block-end:max(env(safe-area-inset-bottom),var(--tg-safe-area-inset-botto
 .ask-top{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--hint);margin-block-end:8px}
 .ask-top .where{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700;color:var(--warn-ink)}
 .q{font-size:18px;font-weight:750;line-height:1.38;overflow-wrap:anywhere;white-space:pre-line}
+.pq-request{margin-block-start:6px;font-size:13px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere;text-align:start;unicode-bidi:isolate}
 .detail{margin-block-start:6px;font-size:15px;line-height:1.5;color:var(--text);opacity:.78;white-space:pre-line;overflow-wrap:anywhere}
 .tr{display:inline-flex;align-items:center;gap:6px;margin-block-start:8px;font-size:12.5px;color:var(--hint)}
 .dotpulse{inline-size:6px;block-size:6px;border-radius:50%;background:var(--accent);animation:blink 1.1s ease-in-out infinite}
@@ -658,6 +741,16 @@ display:flex;align-items:center;justify-content:center;gap:6px;transition:border
 .link-btn{border:0;background:transparent;color:var(--link);font-weight:650;font-size:14px;cursor:pointer;padding:6px 0}
 details>summary{list-style:none;cursor:pointer}
 details>summary::-webkit-details-marker{display:none}
+
+.pod .podnow{font-size:15.5px;font-weight:700;line-height:1.5;overflow-wrap:anywhere}
+.pod .podsub{font-size:12.5px;color:var(--hint);margin-block-start:2px}
+.pod .btns{flex-wrap:wrap}.pod .btns .btn{min-inline-size:96px}
+.pod .podrow{display:flex;gap:12px;align-items:center;padding-block:10px;border-block-start:1px solid var(--line)}
+.pod .podrow>span{flex:1;min-inline-size:0;overflow-wrap:anywhere;font-size:14.5px;line-height:1.45}
+.pod .podeps{display:grid;gap:8px;margin-block-start:12px}
+.pod .podeps .btn{justify-content:flex-start;text-align:start;min-block-size:48px;padding-block:8px;font-size:15px;font-weight:600}
+.pod .podlink{display:flex;gap:8px;margin-block-start:12px;flex-wrap:wrap}
+.pod .podlink input{flex:1 1 180px;min-inline-size:0;min-block-size:48px;border:1.5px solid var(--line);border-radius:14px;background:var(--field);color:var(--text);font:inherit;font-size:15px;padding-inline:12px;box-sizing:border-box}
 /* the old group: calm and secondary, one line, a wide tap target for a thumb */
 .oldg{margin-block:6px 14px}
 .oldg>.compact-toggle{min-block-size:48px;color:var(--hint);background:var(--soft)}
@@ -679,6 +772,7 @@ white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row.tap{cursor:pointer}.row.tap>svg.i{color:var(--off);inline-size:16px;block-size:16px}
 :root[dir="rtl"] .row.tap>svg.i{transform:scaleX(-1)}
 .row.col{align-items:stretch}
+.idle-more{padding-block:10px;color:var(--hint);font-size:12.5px}
 .row .when{flex:none;font-size:12px;color:var(--hint);white-space:nowrap}
 .pad{padding-block:10px 0}
 .link-btn.go{display:inline-flex;align-items:center;gap:4px;font-size:13px;padding:2px 0}
@@ -728,6 +822,10 @@ border:2px solid var(--card);z-index:1}
 .ac-k .tp{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-inline-size:60%}
 .ac-t{font-size:16.5px;font-weight:750;line-height:1.35;margin-block-start:3px;overflow-wrap:anywhere;white-space:pre-line}
 .ac-d{font-size:14px;color:var(--hint);margin-block-start:3px;line-height:1.45;overflow-wrap:anywhere;white-space:pre-line}
+.card-copy-toggle{display:block;inline-size:100%;min-inline-size:0;min-block-size:44px;border:0;padding-block:0;padding-inline:0;background:transparent;text-align:start;font:inherit;cursor:pointer}
+.card-copy-preview{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden;text-overflow:ellipsis;overflow-wrap:break-word;word-break:normal}
+.card-copy-toggle.expanded .card-copy-preview{display:block;-webkit-line-clamp:unset;line-clamp:unset;overflow:visible}
+.card-copy-toggle:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:4px}
 .ac.busy{opacity:.85}
 /* one session's cards under one head: its robot, topic and tag once, a way into its topic, then its cards */
 .sgrp{margin-block-end:14px}
@@ -772,6 +870,21 @@ overflow-wrap:anywhere;transition:transform .12s,background .2s,border-color .2s
 :root[data-theme="dark"] .copt.on{background:var(--go);color:var(--on-go)}
 .copt:disabled{cursor:default}
 .copt:disabled:not(.on){opacity:.5}
+.choice-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-block-start:14px}
+.choice-tile{min-inline-size:0;display:flex;flex-direction:column;gap:8px;padding:8px;border:1px solid var(--line);border-radius:16px;background:var(--field)}
+.choice-preview{display:block;inline-size:100%;padding:0;border:0;border-radius:10px;overflow:hidden;background:var(--card);cursor:zoom-in;min-block-size:96px}
+.choice-preview img{display:block;inline-size:100%;block-size:auto;aspect-ratio:4/3;object-fit:contain}
+.choice-preview:disabled{cursor:wait}.choice-label{overflow-wrap:anywhere;font-weight:700}
+.choice-tile .copt{inline-size:100%;margin-block-start:auto;min-block-size:48px}
+.choice-image-error{font-size:13px;color:var(--hint);overflow-wrap:anywhere}
+@media(max-width:359px){.choice-tiles{grid-template-columns:minmax(0,1fr)}}
+.card-image-viewer{position:fixed;inset:0;inline-size:100%;max-inline-size:none;block-size:100%;max-block-size:none;margin:0;padding:0;border:0;background:#111;color:#fff;overflow:hidden}
+.card-image-viewer[open]{display:flex;flex-direction:column}.card-image-viewer::backdrop{background:#111}
+.card-image-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:calc(12px + env(safe-area-inset-top)) 16px 12px;flex-shrink:0}
+.card-image-label{min-inline-size:0;overflow-wrap:anywhere}.card-image-close{min-inline-size:48px;min-block-size:48px;border:1px solid #aaa;border-radius:12px;background:#222;color:#fff;padding:10px;font:inherit;cursor:pointer}
+.card-image-stage{display:flex;align-items:center;justify-content:center;flex:1;min-block-size:0;overflow:hidden;touch-action:none;direction:ltr}
+.card-image-stage img{display:block;max-inline-size:100%;max-block-size:100%;object-fit:contain;user-select:none;-webkit-user-select:none;transform-origin:center}
+.card-image-hint{text-align:center;font-size:13px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));margin:0;color:#ddd}
 .path{font:500 13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;text-align:end;unicode-bidi:isolate}
 .saybox{margin-block-start:12px}.saybox .askrow{margin-block-start:8px}
 .wait{margin-block-end:8px;padding:10px 14px;border-radius:18px;border-end-end-radius:6px;background:var(--blue-soft);border:1px dashed var(--line)}
@@ -949,18 +1062,70 @@ border:1px solid var(--edge);box-shadow:var(--shadow-lg);-webkit-backdrop-filter
 .usage-summary>.compact-toggle>.compact-figures{gap:4px;max-inline-size:78%;font-size:11px}
 .usage-summary .compact-figure{padding-inline:5px}
 /* Owner ledger checklist: independent of the surrounding collapsible sections. */
-.requests{min-inline-size:0;max-inline-size:100%;margin-block:16px}
-.requests-filter{display:flex;flex-wrap:wrap;gap:6px;margin-block:10px;min-inline-size:0}
-.requests-filter .btn{min-inline-size:0;max-inline-size:100%;min-block-size:48px}
-.requests-filter .btn[aria-pressed="true"]{border-color:var(--yes);font-weight:800}
-.requests h3{overflow-wrap:anywhere;margin-block:16px 8px}
+.topics{min-inline-size:0;margin-block:12px 20px}
+.topic-cards{display:grid;gap:10px;min-inline-size:0}
+.topic-card{display:block;inline-size:100%;min-inline-size:0;text-align:start;color:var(--text);padding:14px;border:1px solid var(--edge);border-radius:16px;background:var(--card);cursor:pointer;font:inherit}
+.topic-card:focus-visible,.topic-close:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.topic-heading{display:flex;align-items:flex-start;gap:8px;justify-content:space-between;min-inline-size:0}
+.topic-title{font-size:16px;line-height:1.5;overflow-wrap:anywhere;min-inline-size:0}
+.topic-status{flex:none;max-inline-size:48%;white-space:normal;overflow-wrap:anywhere}
+.topic-status.owner,.topic-status.stuck{background:var(--warm);color:var(--warn-ink)}
+.topic-status.done{background:var(--blue-soft);color:var(--link)}
+.topic-project{display:block;color:var(--hint);font-size:12px;margin-block:4px 10px;overflow-wrap:anywhere}
+.topic-field{display:block;margin-block-start:8px;min-inline-size:0;overflow-wrap:anywhere;font-size:13px;line-height:1.6}
+.topic-field b{display:block;font-size:12px;color:var(--hint)}
+.topic-card .topic-copy{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
+.topic-copy{display:block;white-space:pre-wrap;overflow-wrap:anywhere}
+.topic-prs{display:flex;flex-wrap:wrap;gap:6px;margin-block-start:10px;font-size:12px;overflow-wrap:anywhere}
+.topic-prs span{unicode-bidi:isolate}
+.topic-sheet{box-sizing:border-box;inline-size:calc(100% - 24px);max-inline-size:600px;max-block-size:85dvh;margin-block:auto 12px;margin-inline:auto;padding:18px;border:1px solid var(--edge);border-radius:22px;background:var(--card);color:var(--text);overflow:auto;overscroll-behavior:contain}
+.topic-sheet::backdrop{background:rgba(0,0,0,.45)}
+.topic-sheet h2{margin:0;font-size:19px;overflow-wrap:anywhere;min-inline-size:0}
+.topic-close{min-inline-size:64px;min-block-size:44px;flex:none}
+.topic-timeline{padding-inline-start:22px;padding-inline-end:0;line-height:1.7;overflow-wrap:anywhere}
+.topic-timeline li{padding-block:8px;border-block-end:1px solid var(--edge)}
+.topic-timeline time{display:block;font-size:12px;color:var(--hint)}
+/* The rail scrolls inside the section, never across the phone viewport. */
+.requests{min-inline-size:0;max-inline-size:100%;margin-block:12px 20px}
+.requests-filter{display:flex;flex-wrap:nowrap;gap:6px;margin-block:8px 12px;padding-block:3px 7px;padding-inline:2px;min-inline-size:0;max-inline-size:100%;overflow:auto;overscroll-behavior-inline:contain;scroll-snap-type:inline proximity;scrollbar-width:thin}
+.requests-filter .btn{display:inline-flex;align-items:center;gap:7px;flex:none;min-inline-size:0;max-inline-size:85%;min-block-size:44px;padding-block:7px;padding-inline:12px;border-radius:99px;scroll-snap-align:start;white-space:nowrap;font-size:13px}
+.requests-filter .btn[aria-pressed="true"]{background:var(--text);color:var(--bg);border-color:var(--text);font-weight:800}
+.requests-pill-name{overflow:hidden;text-overflow:ellipsis;min-inline-size:0}
+.requests-count{flex:none;font-variant-numeric:tabular-nums;opacity:.75}
+.requests h3{font-size:14px;overflow-wrap:anywhere;margin-block:0}
+.requests-needs{border:1px solid var(--edge);border-inline-start:3px solid var(--warn-ink);border-radius:16px;background:var(--card);margin-block-end:14px;overflow:hidden}
+.requests-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-block:6px;padding-inline:12px;min-inline-size:0}
+.requests-head .link-btn,.requests-more{min-block-size:44px;font-size:13px}
+.requests-head h3{display:flex;align-items:center;gap:7px;min-inline-size:0}
+.request-project{min-inline-size:0;max-inline-size:100%}
+.request-project>.compact-toggle{min-block-size:60px}
+.request-project>.compact-toggle>.compact-title{min-inline-size:0;font-size:14px}
+.request-project .compact-figures{flex:none;flex-direction:column;align-items:flex-end;gap:2px;font-size:12px;max-inline-size:55%}
+.requests-owner-count{color:var(--warn-ink)}
 .requests-list{list-style:none;margin:0;padding:0;min-inline-size:0}
-.request-row{display:flex;align-items:flex-start;gap:10px;padding-block:12px;padding-inline:14px;min-inline-size:0;border-block-end:1px solid var(--line)}
-.request-row>.body{min-inline-size:0;flex:1}.request-row>.lead{flex:none}
-.request-row .nm,.request-row li,.request-row summary{overflow-wrap:anywhere;min-inline-size:0}
-.request-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-inline-size:100%;color:var(--hint);margin-block:6px}
-.request-steps{margin-block-start:8px;min-inline-size:0}.request-steps summary{min-block-size:44px;cursor:pointer}
-.request-steps ol{padding-inline-start:24px;padding-inline-end:8px;font-size:14px;line-height:1.7}
+.request-project .requests-list{border:1px solid var(--edge);border-radius:12px;background:var(--card);overflow:hidden}
+.request-row{min-inline-size:0;border-block-end:1px solid var(--line)}
+.request-row:last-child{border-block-end:0}
+.request-toggle{display:flex;align-items:flex-start;gap:9px;inline-size:100%;min-inline-size:0;min-block-size:44px;border:0;background:transparent;color:var(--text);text-align:start;cursor:pointer;padding-block:11px;padding-inline:12px}
+.request-toggle:focus-visible,.requests-more:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.request-toggle>.body{min-inline-size:0;flex:1}.request-toggle>.lead{flex:none;color:var(--hint);padding-block-start:2px}
+.request-toggle>.lead svg{inline-size:16px;block-size:16px}
+.request-row .nm{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;font-size:14px;font-weight:650;line-height:1.5;overflow-wrap:anywhere;white-space:pre-line;min-inline-size:0}
+.request-row.open .nm{display:block;-webkit-line-clamp:unset;line-clamp:unset;overflow:visible}
+.request-row .mt{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;margin-block-start:5px;color:var(--hint);font-size:11.5px;line-height:1.5}
+.request-row .chip{border-radius:6px;background:var(--soft);padding-block:2px;padding-inline:6px;white-space:nowrap}
+.request-row .chip.hot{background:var(--warm);color:var(--warn-ink)}
+.request-age{white-space:nowrap;font-variant-numeric:tabular-nums}
+.request-context{display:block;font-size:11px;color:var(--hint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-block-end:3px}
+.request-details{padding-block:0 12px;padding-inline:37px 12px;min-inline-size:0}
+.request-note{color:var(--hint);font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;margin-block:0 8px}
+.request-steps{min-inline-size:0;font-size:12px}
+.request-steps ol{margin-block:5px 0;padding-inline-start:20px;padding-inline-end:0;font-size:13px;line-height:1.7;overflow-wrap:anywhere}
+.requests-more{inline-size:100%;border:0;border-block-start:1px solid var(--line);background:var(--blue-soft);color:var(--link);font-weight:700;cursor:pointer;border-end-start-radius:12px;border-end-end-radius:12px}
+.request-project .requests-more{margin-block-start:6px;border-radius:12px}
+.request-actions{display:flex;flex-wrap:wrap;gap:6px;padding:6px 12px 12px;padding-inline-start:52px}
+.request-actions .btn{min-block-size:44px;flex:1 1 auto;white-space:normal;overflow-wrap:anywhere}
+
 .rem-actions{display:flex;flex-wrap:wrap;gap:4px;flex:none;max-inline-size:48px}
 .rem-actions .rdone{margin-inline-start:0}
 </style>
@@ -1019,8 +1184,9 @@ function icon(name){var s=document.createElementNS(NS,"svg");s.setAttribute("vie
 function svgAdd(host,tag,attrs){var n=document.createElementNS(NS,tag);Object.keys(attrs).forEach(function(k){n.setAttribute(k,attrs[k]);});host.appendChild(n);return n;}
 function haptic(kind,v){try{var h=wa&&wa.HapticFeedback;if(!h)return;if(kind==="tap")h.impactOccurred("light");
  else if(kind==="sel")h.selectionChanged();else h.notificationOccurred(v);}catch(e){}}
-function ago(sec){if(sec==null)return "–";if(sec<45)return S.now;var m=Math.round(sec/60);if(m<60)return rtf.format(-m,"minute");
- var h=Math.round(sec/3600);if(h<36)return rtf.format(-h,"hour");return rtf.format(-Math.round(sec/86400),"day");}
+function ago(sec){if(sec==null)return "–";if(sec<45)return S.now;var m=Math.round(sec/60),h=Math.round(sec/3600);
+ var t=m<60?rtf.format(-m,"minute"):h<36?rtf.format(-h,"hour"):rtf.format(-Math.round(sec/86400),"day");
+ return t.replace(/\s*\(\d+\)/,"");}  // Hebrew ICU appends a "(1)" disambiguator to singular units
 function until(v){if(!v)return "";var t=typeof v==="number"?v*1000:Date.parse(v);if(!t||isNaN(t))return "";
  var s=(t-Date.now())/1000;if(s<60)return rtf.format(1,"minute");var m=Math.round(s/60);if(m<90)return rtf.format(m,"minute");
  var h=Math.round(s/3600);if(h<36)return rtf.format(h,"hour");return rtf.format(Math.round(s/86400),"day");}
@@ -1129,7 +1295,7 @@ function source(key,parts,host){
  else if(tr){var n=el("div","tr");n.appendChild(el("span","dotpulse"));n.appendChild(el("span",null,S.translating));host.appendChild(n);}
 }
 function he(x,f){return x[f+"_he"];}
-function shown(x,f){var h=x[f+"_he"];return typeof h==="string"&&h?h:x[f];}
+function shown(x,f){var h=x[f+"_he"];if(Array.isArray(h)&&Array.isArray(x[f]))return x[f].map(function(v,i){return typeof h[i]==="string"&&h[i]?h[i]:v;});return typeof h==="string"&&h?h:x[f];}
 // --- small parts ----------------------------------------------------------------------------------------
 function sec(title,n,cls){var h=el("div","sec"+(cls?" "+cls:""));h.appendChild(el("h2",null,title));
  if(n!=null)h.appendChild(el("span","n",nf.format(n)));app.appendChild(h);return h;}
@@ -1226,6 +1392,8 @@ function decision(d,showTopic){
  c.appendChild(says("q"+d.id,d.title,he(d,"title"),"q"));
  if(d.detail)c.appendChild(says("d"+d.id,d.detail,he(d,"detail"),"detail"));
  source("s"+d.id,[[d.title,he(d,"title")],[d.detail,he(d,"detail")]],c);
+ // A Claude Code permission request: its exact text, as is (textContent, never translated, left to right).
+ if(typeof d.request==="string"&&d.request){var rq=el("pre","pq-request",d.request);rq.dir="ltr";c.appendChild(rq);}
  var ta=el("textarea");ta.maxLength=300;ta.rows=2;ta.placeholder=S.notePh;ta.value=notes[d.id]||"";var fitNote=tune(ta,true);
  ta.addEventListener("input",function(){notes[d.id]=ta.value;syncClose();});
  var nt=el("button","note-t");nt.type="button";nt.appendChild(icon("pencil"));nt.appendChild(el("span",null,S.addNote));
@@ -1237,6 +1405,7 @@ function decision(d,showTopic){
  yes.appendChild(icon("check"));yes.appendChild(el("span",null,shown(d,"yes")));
  no.type=yes.type="button";
  [[yes,"yes"],[no,"no"]].forEach(function(p){p[0].addEventListener("click",function(){answer(c,d,p[1],[no,yes],ta);});r.appendChild(p[0]);});
+ if(d.decline_only===true)yes.disabled=true;  // a request the phone cannot show exactly is approved at the computer
  c.appendChild(r);c.appendChild(el("div","safe",S.tapNote));return enter(c,"d"+d.id);}
 function isNew(x){return !!last&&(last.now-x.age)*1000>seenAt;}
 function markSeen(){seenAt=Date.now();try{localStorage.setItem("ctb-panel-read",String(seenAt));}catch(e){}
@@ -1304,6 +1473,13 @@ function sendCard(c,box,body,label,btns,chosen,ta){
    if(r.status===404){haptic("n","warning");settle(S.cardGone,false);return;}
    undo(r.status===403?S.reopen:r.status===503?S.busy:S.failed);})
   .catch(function(){undo(S.failed);});}
+var cardTextOpen={};
+function cardText(c,field){
+ var box=el("div",null),key=c.id+":"+field,button=el("button","card-copy-toggle"),text=el("span","ac-d card-copy-preview",shown(c,field));
+ button.type="button";button.dir="auto";text.dir="auto";button.appendChild(text);box.appendChild(button);
+ function draw(){var open=!!cardTextOpen[key];button.className="card-copy-toggle"+(open?" expanded":"");
+  button.setAttribute("aria-expanded",String(open));button.title=open?S.cardTextLess:S.cardTextMore;}
+ button.addEventListener("click",function(){cardTextOpen[key]=!cardTextOpen[key];draw();haptic("sel");});draw();return box;}
 function progressBody(c,box){
  var steps=Array.isArray(c.steps)?c.steps:[],at=typeof c.at==="number"?c.at:0;
  var pct=typeof c.percent==="number"?c.percent:steps.length?at/steps.length*100:null;
@@ -1312,36 +1488,92 @@ function progressBody(c,box){
   anim("c"+c.id,pct,function(v){fill.style.inlineSize=Math.max(2,Math.min(100,v))+"%";});}
  if(steps.length){var tr=el("ol","track");tr.style.gridTemplateColumns="repeat("+steps.length+",minmax(0,1fr))";
   steps.forEach(function(s,i){var li=el("li",i<at?"done":i===at?"cur":"");var dot=el("span","sd");if(i<at)dot.appendChild(icon("check"));li.appendChild(dot);
-   var lb=el("span","sl",s);lb.dir="auto";li.appendChild(lb);tr.appendChild(li);});box.appendChild(tr);}
+   var lb=el("span","sl",shown(c,"steps")[i]);lb.dir="auto";li.appendChild(lb);tr.appendChild(li);});box.appendChild(tr);}
  // Labels and agent text stay on separate lines, each with its own direction.
  if(c.activity){box.appendChild(el("div","ac-status",S.cardWorking));
-  box.appendChild(says("activity"+c.id,c.activity,he(c,"activity"),"ac-d"));
-  box.appendChild(el("div","ac-status",S.cardActivityUpdated.replace("{0}",nf.format(c.activity_age))));}
+  box.appendChild(cardText(c,"activity"));
+  box.appendChild(el("div","ac-status",S.cardUpdated+" "+ago(c.activity_age)));}
  else if(c.live){box.appendChild(el("div","ac-status",S.cardNow));
-  box.appendChild(says("live"+c.id,c.live,he(c,"live"),"ac-d"));
+  box.appendChild(cardText(c,"live"));
   var age=typeof c.live_age==="number"?c.live_age:Math.max(0,((last&&last.now)||Date.now()/1000)-c.live_at);
-  box.appendChild(el("div","ac-status",S.cardLiveUpdated.replace("{0}",nf.format(Math.floor(age/60)))));}
+  box.appendChild(el("div","ac-status",S.cardUpdated+" "+ago(age)));}
  if(c.task){box.appendChild(el("div","ac-status",S.cardTask));
-  box.appendChild(says("task"+c.id,c.task,he(c,"task"),"ac-d"));}
+  box.appendChild(cardText(c,"task"));}
  if(c.automatic)box.appendChild(el("div","ac-status",S.cardAuto));
  if(c.bg)box.appendChild(el("div","ac-status",nf.format(c.bg)+" "+plural(c.bg,S.bg1,S.bg)));}
 function choiceBody(c,box){
+ if(Array.isArray(c.images)&&c.images.length===c.options.length&&c.images.every(function(id){return /^[0-9a-f]{32}$/.test(id);})){
+  choiceTiles(c,box);return;}
  var opts=Array.isArray(c.options)?c.options:[],long=opts.some(function(o){return String(o).length>14;});
  var g=el("div","opts"+(long?"":opts.length===3||opts.length>4?" c3":" c2"));
- opts.forEach(function(o,i){var b=el("button","copt");b.type="button";var sp=el("span",null,o);sp.dir="auto";b.appendChild(sp);
-  b.addEventListener("click",function(){sendCard(c,box,{id:c.id,pick:i},o,Array.prototype.slice.call(g.children),b,null);});g.appendChild(b);});
+ opts.forEach(function(o,i){var label=shown(c,"options")[i],b=el("button","copt");b.type="button";var sp=el("span",null,label);sp.dir="auto";b.appendChild(sp);
+  b.addEventListener("click",function(){sendCard(c,box,{id:c.id,pick:i},label,Array.prototype.slice.call(g.children),b,null);});g.appendChild(b);});
  box.appendChild(g);}
+var cardImageTokens={},cardImageViewer=null;
+function cardImageUrl(id){var cached=cardImageTokens[id];
+ if(cached&&cached.expires>Date.now()/1000+30)return Promise.resolve(cached.url);
+ if(cached&&cached.pending)return cached.pending;
+ var entry={};cardImageTokens[id]=entry;
+ entry.pending=post("/api/card-media-token",{id:id}).then(function(r){if(!r.ok)throw new Error(r.status===403?S.reopen:S.cardImageError);return r.json();})
+ .then(function(j){entry.url="/card-media/"+id+"?auth="+encodeURIComponent(j.token);entry.expires=j.expires;delete entry.pending;return entry.url;})
+ .catch(function(e){if(cardImageTokens[id]===entry)delete cardImageTokens[id];throw e;});return entry.pending;}
+function choiceTiles(c,box){var g=el("div","choice-tiles"),answers=[];
+ c.options.forEach(function(o,i){var label=shown(c,"options")[i],tile=el("div","choice-tile"),preview=el("button","choice-preview");
+  preview.type="button";preview.disabled=true;preview.setAttribute("aria-label",S.cardEnlarge+": "+label);
+  var img=el("img");img.alt=label;img.decoding="async";img.loading="lazy";img.draggable=false;preview.appendChild(img);tile.appendChild(preview);
+  var title=el("div","choice-label",label);title.dir="auto";tile.appendChild(title);
+  var error=el("div","choice-image-error");error.hidden=true;error.setAttribute("role","status");tile.appendChild(error);
+  function failed(msg){error.textContent=msg;error.hidden=false;preview.disabled=true;}
+  img.addEventListener("load",function(){preview.disabled=false;error.hidden=true;});img.addEventListener("error",function(){failed(S.cardImageError);});
+  cardImageUrl(c.images[i]).then(function(url){img.src=url;}).catch(function(e){failed(e.message);});
+  preview.addEventListener("click",function(){cardImageUrl(c.images[i]).then(function(url){openCardImage(url,label,preview);}).catch(function(e){failed(e.message);});});
+  var choose=el("button","copt",S.cardChoose);choose.type="button";choose.setAttribute("aria-label",S.cardChoose+": "+label);answers.push(choose);
+  choose.addEventListener("click",function(){sendCard(c,box,{id:c.id,pick:i},label,answers,choose,null);});tile.appendChild(choose);g.appendChild(tile);
+ });box.appendChild(g);}
+function openCardImage(url,label,opener){
+ if(!cardImageViewer){
+  var dialog=el("dialog","card-image-viewer"),bar=el("div","card-image-bar"),title=el("b","card-image-label"),close=el("button","card-image-close",S.cardImageClose);
+  title.id="card-image-title";title.dir="auto";dialog.setAttribute("aria-labelledby",title.id);close.type="button";bar.appendChild(title);bar.appendChild(close);dialog.appendChild(bar);
+  var stage=el("div","card-image-stage"),img=el("img");img.draggable=false;stage.appendChild(img);dialog.appendChild(stage);dialog.appendChild(el("p","card-image-hint",S.cardImageHint));document.body.appendChild(dialog);
+  var scale=1,x=0,y=0,points={},start=null,returnTo=null,oldOverflow="";
+  function draw(){var w=stage.clientWidth,h=stage.clientHeight;
+   x=Math.max(-Math.max(0,(img.clientWidth*scale-w)/2),Math.min(Math.max(0,(img.clientWidth*scale-w)/2),x));
+   y=Math.max(-Math.max(0,(img.clientHeight*scale-h)/2),Math.min(Math.max(0,(img.clientHeight*scale-h)/2),y));
+   img.style.transform="translate("+x+"px,"+y+"px) scale("+scale+")";}
+  function reset(){scale=1;x=0;y=0;points={};start=null;draw();}
+  var setOpen=bindBackLayer("card-image",dialog,false,function(on){
+   if(on){if(!dialog.open){oldOverflow=document.body.style.overflow;document.body.style.overflow="hidden";dialog.showModal();close.focus();}}
+   else if(dialog.open){dialog.close();document.body.style.overflow=oldOverflow;reset();if(returnTo&&returnTo.isConnected)returnTo.focus();}});
+  close.addEventListener("click",function(){setOpen(false);});dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);});
+  function baseline(){var a=Object.keys(points).map(function(k){return points[k];});
+   start=a.length?{s:scale,x:x,y:y,cx:a.reduce(function(t,p){return t+p.x;},0)/a.length,cy:a.reduce(function(t,p){return t+p.y;},0)/a.length,
+    d:a.length>1?Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y):0}:null;}
+  stage.addEventListener("pointerdown",function(e){if(e.pointerType==="mouse"&&e.button!==0)return;
+   points[e.pointerId]={x:e.clientX,y:e.clientY};stage.setPointerCapture(e.pointerId);baseline();});
+  stage.addEventListener("pointermove",function(e){if(!points[e.pointerId]||!start)return;e.preventDefault();points[e.pointerId]={x:e.clientX,y:e.clientY};
+   var a=Object.keys(points).map(function(k){return points[k];}),cx=a.reduce(function(t,p){return t+p.x;},0)/a.length,cy=a.reduce(function(t,p){return t+p.y;},0)/a.length;
+   if(a.length>1&&start.d)scale=Math.max(1,Math.min(6,start.s*Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y)/start.d));
+   if(scale>1){x=start.x+cx-start.cx;y=start.y+cy-start.cy;}else{x=0;y=0;}draw();});
+  function end(e){delete points[e.pointerId];baseline();}
+  stage.addEventListener("pointerup",end);stage.addEventListener("pointercancel",end);stage.addEventListener("lostpointercapture",end);
+  stage.addEventListener("dblclick",function(){scale=scale===1?2:1;x=0;y=0;draw();});
+  stage.addEventListener("wheel",function(e){e.preventDefault();scale=Math.max(1,Math.min(6,scale*(e.deltaY<0?1.15:1/1.15)));draw();},{passive:false});
+  window.addEventListener("resize",draw);
+  cardImageViewer={show:function(u,l,button){returnTo=button;title.textContent=l;img.alt=l;img.src=u;reset();setOpen(true);}};
+ }
+ cardImageViewer.show(url,label,opener);
+}
 function askBody(c,box){
  var f=composer("c"+c.id,300,S.answerPh,function(t,done){done(false);sendCard(c,box,{id:c.id,text:t},t,[f.sb],null,f.ta);});
  box.appendChild(f.row);}
 function linkBody(c,box){
  var u=typeof c.url==="string"?c.url:"";if(!/^https:\/\//i.test(u))return;
  var row=el("div","lk"),ic=el("div","lk-i");ic.appendChild(icon("link"));row.appendChild(ic);
- var t=el("div","lk-t"),lb=el("b",null,c.label||hostOf(u));lb.dir="auto";t.appendChild(lb);var h=el("small",null,hostOf(u));h.dir="ltr";t.appendChild(h);row.appendChild(t);
+ var t=el("div","lk-t"),lb=el("b",null,shown(c,"label")||hostOf(u));lb.dir="auto";t.appendChild(lb);var h=el("small",null,hostOf(u));h.dir="ltr";t.appendChild(h);row.appendChild(t);
  var b=el("button","btn sm go",S.openLink);b.type="button";b.addEventListener("click",function(){haptic("tap");openSafe(u);});row.appendChild(b);box.appendChild(row);}
 function numbersBody(c,box){
  var g=el("div","figs");(Array.isArray(c.figures)?c.figures:[]).slice(0,3).forEach(function(f){var x=el("div","fig");
-  var v=el("b",null,f.value);v.dir="auto";x.appendChild(v);var l=el("span",null,f.label);l.dir="auto";x.appendChild(l);g.appendChild(x);});box.appendChild(g);}
+  var v=el("b",null,shown(f,"value"));v.dir="auto";x.appendChild(v);var l=el("span",null,shown(f,"label"));l.dir="auto";x.appendChild(l);g.appendChild(x);});box.appendChild(g);}
 var BODIES={progress:progressBody,choice:choiceBody,ask:askBody,link:linkBody,numbers:numbersBody};
 // the session's own short id: a topic's name is the agent's to choose, this tag and the robot's colours are not
 function sidTag(sid){var t=el("span","sid","#"+String(sid||"").slice(0,4));t.dir="ltr";t.title=S.sidHint;return t;}
@@ -1400,8 +1632,8 @@ function allCards(d,here){
  Object.keys(cardDone).forEach(function(id){var c=cardDone[id].c;if(!ids[id]&&(!here||c.here))list.push(c);});return list;}
 function oldCards(d,here){return allCards(d,here).filter(function(c){return ASKS[c.kind]&&!c.ended&&c.old&&!cardDone[c.id];});}  // an answered card leaves the group (and its count)
 function cardSections(d,here){
- var cs=allCards(d,here),asks=cs.filter(function(c){return ASKS[c.kind]&&!c.ended&&!c.old;}).sort(function(a,b){return a.age-b.age;}),shows=cs.filter(function(c){return !ASKS[c.kind]&&!c.ended&&!c.auto_closed;});
- var old=cs.filter(function(c){return c.ended||c.auto_closed;}),waitN=asks.filter(function(c){return !cardDone[c.id];}).length;
+ var cs=allCards(d,here),asks=cs.filter(function(c){return ASKS[c.kind]&&!c.ended&&!c.old;}).sort(function(a,b){return a.age-b.age;}),shows=cs.filter(function(c){return !ASKS[c.kind]&&!c.ended&&!c.auto_closed&&!(c.finished&&c.old);});
+ var old=cs.filter(function(c){return c.ended||c.auto_closed||c.finished&&c.old;}),waitN=asks.filter(function(c){return !cardDone[c.id];}).length;
  var asking={};asks.forEach(function(c){asking[sesKey(c)]=1;});  // a session that asks shows once, its updates with it
  var withAsk=shows.filter(function(c){return asking[sesKey(c)];});shows=shows.filter(function(c){return !asking[sesKey(c)];});
  if(asks.length){var ah=sec(S.cardsAsk,waitN||null,waitN?"hot":"");if(asks.some(isNew)){var mr=el("button","link-btn end",S.markRead);mr.type="button";mr.addEventListener("click",markSeen);ah.appendChild(mr);}cardGroups(asks.concat(withAsk),app,here);}
@@ -1595,7 +1827,7 @@ function sessionRow(s,d,lead){
  opened["s"+s.id]=det.open;
  var r=el("summary","row");r.appendChild(robot(s.id,s.state,false));var b=el("div","body");
  var n=el("div","nm",shown(s,"name"));n.dir="auto";b.appendChild(n);
- if(lead==="now"&&s.now)b.appendChild(line("act","bolt",s.now));
+ if(lead==="now"&&s.now)b.appendChild(line("act","bolt",shown(s,"now")));
  else if(lead!=="none"&&s.summary)b.appendChild(line("act sum","chat",shown(s,"summary")));
  var mt=el("div","mt");
  sessionMeta(s,d).forEach(function(x){var a=Array.isArray(x),c=el("span","chip"+(a&&x[1]?" "+x[1]:""));
@@ -1607,7 +1839,7 @@ function sessionRow(s,d,lead){
 function sessionCard(s,d){
  var c=el("div","card"),h=el("div","s-head");h.appendChild(robot(s.id,s.state,false));
  var n=el("div","nm",shown(s,"name"));n.dir="auto";h.appendChild(n);h.appendChild(el("span","pill "+s.state,S[s.state]||s.state));c.appendChild(h);
- if(s.now)c.appendChild(line("act","bolt",s.now));details(s,d,c);return c;}
+ if(s.now)c.appendChild(line("act","bolt",shown(s,"now")));details(s,d,c);return c;}
 function item(ic,lead,x,f,meta,cls,key){
  var li=el("div","row"+(cls?" "+cls:""));var l=el("div","lead"+(lead?" "+lead:""));l.appendChild(icon(ic));li.appendChild(l);
  var b=el("div","body");var n=el("div","nm",shown(x,f));n.dir="auto";b.appendChild(n);
@@ -1689,34 +1921,141 @@ function digestCard(){
  var ch=el("div","chips");digest.items.forEach(function(it){var t=el("span","c");t.appendChild(el("b",null,nf.format(it[0])));
   t.appendChild(document.createTextNode(plural(it[0],it[1],it[2])));ch.appendChild(t);});c.appendChild(ch);app.appendChild(enter(c,"digest"));}
 // --- "For me": what needs the owner first, then what the agents show, then who works ------------------------
-var requestProject="";
-function requestRow(r){
- var li=el("li","request-row"),done=r.status==="done",lead=el("span","lead");lead.appendChild(icon(done?"check":"box"));li.appendChild(lead);
- var b=el("div","body"),title=el("div","nm",shown(r,"title"));title.dir="auto";b.appendChild(title);
- var meta=el("div","mt");meta.appendChild(el("span","chip"+(r.wait==="owner"&&!done?" hot":""),done?S.requestsDone:r.wait==="owner"?S.requestsYou:S.requestsTeam));
- meta.appendChild(el("span",null,ago(r.age)));b.appendChild(meta);
- if(r.note){var note=el("div","request-note",shown(r,"note"));note.dir="auto";note.title=shown(r,"note");b.appendChild(note);}
- if(r.steps&&r.steps.length){var det=fold("request:"+r.project+":"+r.id,S.requestsSteps,r.steps.length,"request-steps"),steps=el("ol");
-  r.steps.forEach(function(s){var step=el("li",null,shown(s,"text"));step.dir="auto";steps.appendChild(step);});det.appendChild(steps);b.appendChild(det);}
- li.appendChild(b);return li;}
-function renderRequests(d){
- var rows=d.requests||[],projects=[];rows.forEach(function(r){if(projects.indexOf(r.project)<0)projects.push(r.project);});
- if(requestProject&&projects.indexOf(requestProject)<0)requestProject="";
- sec(S.requestsTitle,rows.filter(function(r){return r.status!=="done";}).length);
+var topicLimit=8,topicViewer=null;
+function topicText(t,field){return LANG==="he"?shown(t,field):t[field];}
+function topicField(host,label,text,cls){var field=el("span","topic-field"+(cls?" "+cls:""));
+ field.appendChild(el("b",null,label));var copy=el("span","topic-copy",text);copy.dir="auto";field.appendChild(copy);host.appendChild(field);}
+function topicPRs(host,t){if(!(t.prs||[]).length)return;var prs=el("span","topic-prs");prs.setAttribute("aria-label",S.topicPRs);
+ t.prs.forEach(function(pr){var ref=el("span",null,"#"+pr.number+(S["topicPR_"+pr.state]?" · "+S["topicPR_"+pr.state]:""));ref.dir="auto";
+  if(!pr.state)ref.title=S.topicPRUnknown;prs.appendChild(ref);});host.appendChild(prs);}
+function topicCard(t){var card=el("button","topic-card"),head=el("span","topic-heading"),title=el("b","topic-title",topicText(t,"title"));
+ card.type="button";card.setAttribute("aria-haspopup","dialog");card.setAttribute("data-topic-key",JSON.stringify(t.key));title.dir="auto";head.appendChild(title);
+ head.appendChild(el("span","chip topic-status "+t.state,S["topic_"+t.state]));card.appendChild(head);
+ var project=el("span","topic-project",t.project);project.dir="auto";card.appendChild(project);
+ topicField(card,S.topicDecision,topicText(t,"decision")||S.topicNoDecision,"topic-decision");
+ topicField(card,t.next&&!t.next_explicit?S.topicLatest:S.topicNext,topicText(t,"next")||S.topicNoNext,"topic-next");topicPRs(card,t);
+ card.addEventListener("click",function(){openTopicDetails(t,card);});return card;}
+function openTopicDetails(t,opener){
+ if(topicViewer){topicViewer.close();topicViewer=null;}
+ var dialog=el("dialog","topic-sheet"),head=el("div","topic-heading"),title=el("h2",null,topicText(t,"title")),close=el("button","btn topic-close",S.topicClose);
+ dialog.dir=document.documentElement.dir;title.id="topic-detail-title";title.dir="auto";dialog.setAttribute("aria-labelledby",title.id);
+ close.type="button";head.appendChild(title);head.appendChild(close);dialog.appendChild(head);
+ dialog.appendChild(el("span","chip topic-status "+t.state,S["topic_"+t.state]));
+ topicField(dialog,S.topicDecision,topicText(t,"decision")||S.topicNoDecision);
+ topicField(dialog,t.next&&!t.next_explicit?S.topicLatest:S.topicNext,topicText(t,"next")||S.topicNoNext);topicPRs(dialog,t);
+ dialog.appendChild(el("h3",null,S.topicTimeline));var timeline=el("ol","topic-timeline");
+ (t.notes||[]).forEach(function(note){var li=el("li"),date=note.at?new Date(note.at*1000):null;if(date&&Number.isFinite(date.getTime())){
+   var at=el("time",null,new Intl.DateTimeFormat(LANG,{dateStyle:"medium",timeStyle:"short"}).format(date));at.dateTime=date.toISOString();li.appendChild(at);}
+  var text=el("span","topic-copy",topicText(note,"text"));text.dir="auto";li.appendChild(text);timeline.appendChild(li);});
+ if(!timeline.children.length)dialog.appendChild(el("p",null,S.topicNoNotes));else dialog.appendChild(timeline);
+ document.body.appendChild(dialog);var oldOverflow=document.body.style.overflow;
+ var setOpen=bindBackLayer("topic-details",dialog,false,function(on){
+  if(on){if(!dialog.open){document.body.style.overflow="hidden";dialog.showModal();close.focus();}}
+  else{if(dialog.open)dialog.close();document.body.style.overflow=oldOverflow;
+   var returnTo=opener&&opener.isConnected?opener:Array.from(document.querySelectorAll(".topic-card")).find(function(card){return card.getAttribute("data-topic-key")===JSON.stringify(t.key);});
+   if(returnTo)returnTo.focus();}});
+ // Close/escape/back share one path; a refreshed home cannot remove the live sheet.
+ topicViewer={close:function(){setOpen(false);dialog.remove();}};
+ close.addEventListener("click",function(){setOpen(false);});
+ dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);});setOpen(true);}
+function renderTopics(d){var rows=d.topic_cards||[],active=rows.filter(function(t){return t.state!=="done";}),done=rows.filter(function(t){return t.state==="done";});
+ sec(S.topicsTitle,active.length);var host=el("section","topics");host.setAttribute("aria-label",S.topicsTitle);
+ var list=el("div","topic-cards");active.slice(0,topicLimit).forEach(function(t){list.appendChild(topicCard(t));});host.appendChild(list);
+ if(active.length>topicLimit){var more=el("button","btn requests-more topics-more",S.more);more.type="button";
+  more.addEventListener("click",function(){var start=topicLimit;topicLimit+=8;active.slice(start,topicLimit).forEach(function(t){list.appendChild(topicCard(t));});
+   if(active.length<=topicLimit)more.remove();var first=list.children[start];if(first)first.focus();});host.appendChild(more);}
+ if(done.length){var completed=fold("topics-done",S.topicsDone,done.length,"topics-done"),body=el("div","topic-cards");
+  done.forEach(function(t){body.appendChild(topicCard(t));});completed.body.appendChild(body);host.appendChild(completed);}
+ if(!rows.length)host.appendChild(el("div","safe",S.topicsEmpty));app.appendChild(host);return host;}
+var requestProject="",requestOwnerOnly=false,requestLimits=Object.create(null);
+function requestText(key,n){return S[key].replace("{n}",nf.format(n));}
+function requestAction(r,action,buttons){
+ if(buttons.some(function(b){return b.disabled;}))return;
+ buttons.forEach(function(b){b.disabled=true;});
+ return post("/api/request",{project:r.project,id:r.id,action:action})
+ .then(function(res){if(res.status===409)return res.json().then(function(j){throw j.error==="already closed"?"already closed":409;});
+  if(!res.ok)throw res.status;toast(S.requestSaved);load();})
+ .catch(function(st){buttons.forEach(function(b){b.disabled=false;});
+  toast(st==="already closed"?S.requestClosed:st===403?S.reopen:st===503?S.busy:S.failed,true);
+  if(st==="already closed")load();});}
+function requestRow(r,context){
+ var li=el("li","request-row"),done=r.status==="done",button=el("button","request-toggle"),lead=el("span","lead");
+ button.type="button";lead.appendChild(icon(done?"check":"box"));button.appendChild(lead);
+ var b=el("span","body");if(context){var project=el("span","request-context",r.project);project.dir="auto";b.appendChild(project);}
+ var title=el("span","nm",shown(r,"title"));title.dir="auto";b.appendChild(title);
+ var meta=el("span","mt");meta.appendChild(el("span","chip"+(r.wait==="owner"&&!done?" hot":""),done?S.requestsDone:r.wait==="owner"?S.requestsYou:S.requestsTeam));
+ meta.appendChild(el("span","request-age",ago(r.age)));b.appendChild(meta);button.appendChild(b);li.appendChild(button);
+ var details=el("div","request-details"),key="request-row:"+JSON.stringify([r.project,r.id,!!context]),id="request-"+(++compactSerial);
+ details.id=id;button.setAttribute("aria-controls",id);
+ if(shown(r,"note")){var note=el("div","request-note",shown(r,"note"));note.dir="auto";details.appendChild(note);}
+ if(r.steps&&r.steps.length){var steps=el("div","request-steps"),list=el("ol");steps.appendChild(el("b",null,S.requestsSteps));
+  r.steps.forEach(function(s){var step=el("li",null,shown(s,"text"));step.dir="auto";list.appendChild(step);});steps.appendChild(list);details.appendChild(steps);}
+ li.appendChild(details);
+ if(!done){var actions=el("div","request-actions"),buttons=[],armed="",until=0,timer;
+  var choices=[["done",S.requestDone],["drop",S.requestDrop],["push",S.requestPush]];
+  function reset(){clearTimeout(timer);armed="";until=0;buttons.forEach(function(b,i){b.textContent=choices[i][1];});}
+  choices.forEach(function(pair){var a=el("button","btn sm",pair[1]);a.type="button";
+   a.addEventListener("click",function(){if(a.disabled)return;
+    if(armed===pair[0]&&Date.now()<until){reset();requestAction(r,pair[0],buttons);return;}
+    reset();armed=pair[0];until=Date.now()+4000;a.textContent=S.requestConfirm;timer=setTimeout(reset,4000);
+   });buttons.push(a);actions.appendChild(a);});li.appendChild(actions);}
+ function draw(on){opened[key]=on;li.className="request-row"+(on?" open":"");details.hidden=!on;button.setAttribute("aria-expanded",String(!!on));}
+ var setOpen=bindBackLayer(key,li,!!opened[key],draw);draw(!!opened[key]);
+ button.addEventListener("click",function(){setOpen(!opened[key]);haptic("sel");});return li;}
+function requestList(rows,key){
+ var box=el("div"),list=el("ul","requests-list"),limit=requestLimits[key]||5;box.appendChild(list);
+ rows.slice(0,limit).forEach(function(r){list.appendChild(requestRow(r));});
+ if(rows.length>limit){var more=el("button","requests-more",requestText("requestsMore",rows.length-limit));more.type="button";
+  more.addEventListener("click",function(){var first;
+   rows.slice(limit).forEach(function(r){var row=requestRow(r);if(!first)first=row;list.appendChild(row);});
+   requestLimits[key]=rows.length;more.remove();if(first)first.querySelector("button").focus({preventScroll:true});haptic("sel");});box.appendChild(more);}
+ return box;}
+function renderRequests(d,replace){
+ var allRows=d.requests||[],older=allRows.filter(function(r){return r.older;}),rows=allRows.filter(function(r){return !r.older;}),projects=[];allRows.forEach(function(r){if(projects.indexOf(r.project)<0)projects.push(r.project);});
+ var open=rows.filter(function(r){return r.status!=="done";}),owner=open.filter(function(r){return r.wait==="owner";});
+ var groups=projects.map(function(p){var mine=rows.filter(function(r){return r.project===p;}),active=mine.filter(function(r){return r.status!=="done";});
+  active.sort(function(a,b){return (a.wait!=="owner")-(b.wait!=="owner");});
+  return {name:p,totalOpen:allRows.filter(function(r){return r.project===p&&r.status!=="done";}),rows:mine,open:active,owner:active.filter(function(r){return r.wait==="owner";})};
+ }).sort(function(a,b){return Number(!!b.owner.length)-Number(!!a.owner.length)||b.open.length-a.open.length||a.name.localeCompare(b.name);});
+ if(requestProject&&!groups.some(function(g){return g.name===requestProject&&g.totalOpen.length;}))requestProject="";
+ if(!replace)sec(S.requestsTitle,open.length);
  var host=el("section","requests");host.setAttribute("aria-label",S.requestsTitle);
  var filters=el("div","requests-filter");filters.setAttribute("role","group");filters.setAttribute("aria-label",S.requestsProject);
- [""].concat(projects).forEach(function(p){var button=el("button","btn sm",p||S.requestsAll);button.type="button";button.setAttribute("aria-pressed",String(requestProject===p));
-  button.addEventListener("click",function(){requestProject=p;render(last,true);});filters.appendChild(button);});host.appendChild(filters);
- var visible=rows.filter(function(r){return !requestProject||r.project===requestProject;});
- if(!visible.length)host.appendChild(el("div","safe",S.requestsEmpty));
- projects.filter(function(p){return !requestProject||p===requestProject;}).forEach(function(p){
-  var group=el("div","request-project"),heading=el("h3",null,p);heading.dir="auto";group.appendChild(heading);
-  var mine=visible.filter(function(r){return r.project===p;}),list=el("ul","card requests-list");
-  mine.filter(function(r){return r.status!=="done";}).sort(function(a,b){return (a.wait!=="owner")-(b.wait!=="owner");}).forEach(function(r){list.appendChild(requestRow(r));});
-  if(list.childNodes.length)group.appendChild(list);
-  var done=mine.filter(function(r){return r.status==="done";});if(done.length){var det=fold("requests-done:"+p,S.requestsDone,done.length),completed=el("ul","card requests-list");
-   done.forEach(function(r){completed.appendChild(requestRow(r));});det.appendChild(completed);group.appendChild(det);}
-  host.appendChild(group);});app.appendChild(host);}
+ function select(p,onlyOwner){var offset=filters.scrollLeft;requestProject=p;requestOwnerOnly=onlyOwner;haptic("sel");
+  var next=renderRequests(last||d,host);next.querySelector(".requests-filter").scrollLeft=offset;
+  retireMissingBackLayers();adoptBackLayers();
+  var focus=next.querySelector('.requests-back')||next.querySelector('[aria-pressed="true"]');if(focus)focus.focus({preventScroll:true});}
+ [{name:"",totalOpen:allRows.filter(function(r){return r.status!=="done";})}].concat(groups.filter(function(g){return g.totalOpen.length;})).forEach(function(g){
+  var button=el("button","btn sm"),name=el("span","requests-pill-name",g.name||S.requestsAll);name.dir="auto";button.type="button";
+  button.appendChild(name);button.appendChild(el("span","requests-count",nf.format(g.totalOpen.length)));
+  button.setAttribute("aria-pressed",String(requestProject===g.name&&!requestOwnerOnly));
+  button.addEventListener("click",function(){select(g.name,false);});filters.appendChild(button);});host.appendChild(filters);
+ if(!allRows.some(function(r){return r.status!=="done";}))host.appendChild(el("div","safe",S.requestsEmpty));
+ if(!requestProject&&owner.length&&!requestOwnerOnly){
+  var needs=el("div","requests-needs"),head=el("div","requests-head"),heading=el("h3",null,S.requestsNeedsYou);
+  heading.appendChild(el("span","requests-count",nf.format(owner.length)));head.appendChild(heading);
+  var all=el("button","link-btn",requestText("requestsShowAll",owner.length));all.type="button";all.addEventListener("click",function(){select("",true);});head.appendChild(all);needs.appendChild(head);
+  var shortlist=el("ul","requests-list");owner.slice(0,3).forEach(function(r){shortlist.appendChild(requestRow(r,true));});needs.appendChild(shortlist);host.appendChild(needs);}
+ if(requestOwnerOnly){var head=el("div","requests-head");head.appendChild(el("h3",null,requestText("requestsOwnerCount",owner.length)));
+  var back=el("button","link-btn requests-back",S.requestsBackAll);back.type="button";back.addEventListener("click",function(){select("",false);});head.appendChild(back);host.appendChild(head);
+  if(!owner.length&&open.length)host.appendChild(el("div","safe",S.requestsOwnerEmpty));}
+ groups.filter(function(g){return (!requestProject||g.name===requestProject)&&(!requestOwnerOnly||g.owner.length);}).forEach(function(g){
+  var stats=el("span","compact-figures");stats.appendChild(el("span",null,requestText("requestsOpenCount",g.open.length)));
+  if(g.owner.length)stats.appendChild(el("span","requests-owner-count",requestText("requestsOwnerCount",g.owner.length)));
+  var body=el("div"),active=requestOwnerOnly?g.owner:g.open;
+  if(active.length)body.appendChild(requestList(active,JSON.stringify([g.name,requestOwnerOnly])));
+  var done=g.rows.filter(function(r){return r.status==="done";});if(done.length&&!requestOwnerOnly){var det=fold("requests-done:"+g.name,S.requestsDone,done.length),completed=el("ul","requests-list");
+   done.forEach(function(r){completed.appendChild(requestRow(r));});det.body.appendChild(completed);body.appendChild(det);}
+  var group;
+  if(requestProject){group=el("div","request-project");var h=el("div","requests-head"),name=el("h3",null,g.name);name.dir="auto";h.appendChild(name);h.appendChild(stats);group.appendChild(h);group.appendChild(body);}
+  else group=compactBlock("requests-project:"+g.name,g.name,stats,body,"request-project",requestOwnerOnly);
+  host.appendChild(group);});
+ older=older.filter(function(r){return (!requestProject||r.project===requestProject)&&(!requestOwnerOnly||r.wait==="owner");});
+ if(older.length){var oldBody=el("div"),oldList=el("ul","requests-list");older.forEach(function(r){oldList.appendChild(requestRow(r,true));});oldBody.appendChild(oldList);
+  var old=compactBlock("requests-older",S.requestsOlder,"("+nf.format(older.length)+")",oldBody,"requests-older");
+  var review=el("button","btn requests-old-review",S.requestsReviewOld);review.type="button";review.addEventListener("click",function(){
+   if(old.querySelector("button").getAttribute("aria-expanded")!=="true")old.querySelector("button").click();old.querySelector("button").focus({preventScroll:true});});host.appendChild(review);host.appendChild(old);}
+ if(replace)replace.replaceWith(host);else app.appendChild(host);return host;}
 function macCard(m){
  var c=el("div","card mac"),h=el("div","s-head");h.appendChild(el("b",null,S.macTitle));c.appendChild(h);
  function statusText(prefix,status){var suffix={ok:"Ok",warn:"Warn",critical:"Critical"}[status];return suffix?S[prefix+suffix]:S.macUnavailable;}
@@ -1742,11 +2081,12 @@ function renderAll(d){
  var tl=el("div","tiles");tl.appendChild(tile(waitingCount(d),S.nWaiting,"hot"));
  tl.appendChild(tile(by.working.length,S.nWorking,"go"));tl.appendChild(tile(by.recent.length,S.nRecent));app.appendChild(enter(tl,"tiles"));
  digestCard();
- renderRequests(d);
  if(open.length||answeredIds(true).length){var h=sec(S.waiting,open.length||null,open.length?"hot":"");
   if(open.some(isNew)||(d.cards||[]).some(function(c){return ASKS[c.kind]&&!c.ended&&!c.old&&isNew(c);})){var mk=el("button","link-btn end",S.markRead);mk.type="button";mk.addEventListener("click",markSeen);h.appendChild(mk);}}
  decisions(dl,true);
+ renderTopics(d);
  cardSections(d,false);
+ renderRequests(d);
  var rs=d.reminders||[],fresh=rs.filter(function(r){return !r.old;}),aged=rs.filter(function(r){return r.old;});
  if(fresh.length){sec(S.reminders,fresh.length);var c=el("div","card group");
   fresh.slice(0,3).forEach(function(r,k){c.appendChild(remRow(r,k));});app.appendChild(c);
@@ -1763,7 +2103,7 @@ function renderAll(d){
  if(!by.working.length)app.appendChild(empty("cpu",S.none,S.noneHint));
  else{var g=el("div","card group");by.working.slice(0,4).forEach(function(s){var r=el("div","row tap");r.appendChild(robot(s.id,s.state,true));
    var b=el("div","body"),n=el("div","nm",shown(s,"name"));n.dir="auto";b.appendChild(n);
-   if(s.now)b.appendChild(line("act","bolt",s.now));if(s.usage)b.appendChild(el("div","safe",usageLine(s.usage.today)));r.appendChild(b);r.appendChild(el("span","when",ago(s.age)));r.appendChild(icon("chev"));
+   if(s.now)b.appendChild(line("act","bolt",shown(s,"now")));if(s.usage)b.appendChild(el("div","safe",usageLine(s.usage.today)));r.appendChild(b);r.appendChild(el("span","when",ago(s.age)));r.appendChild(icon("chev"));
    r.addEventListener("click",function(){opened["s"+s.id]=true;switchTo("agents");});g.appendChild(r);});app.appendChild(g);}
  var all=el("button","link-btn all");all.type="button";all.appendChild(el("span",null,S.allAgents));all.appendChild(icon("chev"));
  all.addEventListener("click",function(){switchTo("agents");});app.appendChild(all);
@@ -1894,10 +2234,10 @@ function askBox(b){var c=el("div","askbox"+(opened.ask?" open":""));c.setAttribu
  inp.addEventListener("keydown",function(e){if(e.key==="Enter"){e.preventDefault();ask();}});go.addEventListener("click",ask);
  f.appendChild(icon("chat"));f.appendChild(inp);f.appendChild(go);c.appendChild(f);c.appendChild(soon);return c;}
 function renderBrief(d){var b=d.brief;briefSeen=d.now;
- renderRequests(d);
  renderBriefReminders(d);
  app.appendChild(enter(briefHead(b,d),"b-hd"));app.appendChild(enter(sinceStrip(b),"b-since"));
- app.appendChild(enter(waitBox(b,d),"b-wait"));app.appendChild(enter(linesBox(b),"b-lines"));
+ app.appendChild(enter(waitBox(b,d),"b-wait"));renderTopics(d);app.appendChild(enter(linesBox(b),"b-lines"));
+ renderRequests(d);
  app.appendChild(enter(noticedBox(b),"b-noticed"));app.appendChild(enter(teamsRow(b),"b-teams"));app.appendChild(askBox(b));}
 // the "since you last looked" marker moves only when the owner leaves the page, so the strip stays put while he reads
 function markBrief(){var at=briefSeen;if(!at||!wa||!wa.initData)return;briefSeen=0;
@@ -1969,6 +2309,7 @@ function renderAgents(d){
   if(d.room&&d.room.enabled&&(d.room.room||d.radio.on)){sec(S.room);app.appendChild(roomCard(d));}
   if(d.settings&&"radio_every_reply" in d.settings){var rc=el("div","card group");rc.appendChild(switchRow("radio_every_reply",d));if("radio_board" in d.settings)rc.appendChild(switchRow("radio_board",d));
    if("radio_room" in d.settings)rc.appendChild(switchRow("radio_room",d));app.appendChild(rc);}}
+ if(d.radio&&d.podcast){sec(S.podcast);app.appendChild(podcastCard(d.podcast,d.radio));}
  if(d.youtube){sec(S.ytTitle);app.appendChild(youtubeCard(d.youtube));}
 }
 // --- the YouTube staff radio: connect, switch, projects, two-tap start, stop, disconnect -----------------------
@@ -2004,7 +2345,7 @@ function youtubeCard(y){
  if(y.pending)c.appendChild(el("div","safe",S.ytWait));
  else if(y.result==="youtube_reconnect_client"||y.result==="youtube_reconnect")c.appendChild(el("div","err",S.ytReconnect));
  else if(y.result==="youtube_disconnected_revoke_failed")c.appendChild(el("div","safe",S.ytRevokeFailed));
- else if(y.failed)c.appendChild(el("div","err",S.ytOpFailed));
+ else if(y.failed){var reasons=({"youtube_rules_invalid":S.ytErr_youtube_rules_invalid,"youtube_disabled":S.ytErr_youtube_disabled,"youtube_not_connected":S.ytErr_youtube_not_connected,"youtube_not_enabled":S.ytErr_youtube_not_enabled,"youtube_api_failed":S.ytErr_youtube_api_failed,"youtube_job_failed":S.ytErr_youtube_job_failed,"youtube_busy":S.ytErr_youtube_busy,"youtube_channel_changed":S.ytErr_youtube_channel_changed,"youtube_confirm_missing":S.ytErr_youtube_confirm_missing,"youtube_macos_only":S.ytErr_youtube_macos_only,"youtube_stop_first":S.ytErr_youtube_stop_first,"youtube_no_client":S.ytErr_youtube_no_client,"youtube_connect_failed":S.ytErr_youtube_connect_failed,"youtube_connect_timeout":S.ytErr_youtube_connect_timeout,"youtube_scope_missing":S.ytErr_youtube_scope_missing,"youtube_no_channel":S.ytErr_youtube_no_channel,"youtube_secret_store_failed":S.ytErr_youtube_secret_store_failed,"youtube_connect_stale":S.ytErr_youtube_connect_stale});c.appendChild(el("div","err",Object.prototype.hasOwnProperty.call(reasons,y.result)?reasons[y.result]:S.ytOpFailed));}
  var row=el("div","btns");
  if(!y.connected){
   if(!y.bridge_off){var cn=el("button","btn sm pri",S.ytConnect);cn.type="button";
@@ -2055,7 +2396,46 @@ function radioPlayerDraw(){
   // play() stays in the tap handler for iPhone's user-gesture requirement.
   var p=radioAudio.play();if(p)p.catch(function(){radioWanted=false;radioMessage=S.radioPlayerError;radioPlayerDraw();});
  });row.appendChild(button);box.appendChild(row);
- if(radioMessage)box.appendChild(el("div","safe",radioMessage));radioPlayerSchedule();}
+ if(radioInfo&&radioInfo.listen_link){var ls=el("button","btn sm",S.listenSafari);ls.type="button";ls.setAttribute("data-listen-safari","");
+  ls.addEventListener("click",function(){listenSafari(ls);});box.appendChild(ls);}
+ if(radioMessage)box.appendChild(el("div","safe",radioMessage));if(typeof v2RadioArtwork==="function")v2RadioArtwork();radioPlayerSchedule();}
+// Listen in Safari (listen_link.py): the bridge makes a private link; Safari, not this Mini App, plays it, so the
+// audio goes on in the background and on the lock screen. The page must open as a web page, never as Instant View.
+function listenSafari(btn){
+ if(btn.disabled)return;btn.disabled=true;haptic("tap");
+ post("/api/listen-link",{action:"create"}).then(function(r){if(!r.ok)throw r.status;return r.json();}).then(function(j){
+  var base=(typeof j.base==="string"&&/^https:\/\//i.test(j.base))?j.base.replace(/\/+$/,""):location.origin;
+  if(typeof j.path!=="string"||!/^\/listen\/[A-Za-z0-9_-]{43}$/.test(j.path)||!/^https:\/\//i.test(base))throw 0;
+  wa.openLink(base+j.path,{try_instant_view:false});
+ }).catch(function(st){if(st===403)authFailed();toast(st===403?S.reopen:S.listenFailed,true);})
+ .then(function(){btn.disabled=false;});}
+// One tap in Settings closes every listening link (the bridge keeps only their hashes).
+function listenRevokeRow(d){
+ var l=d&&d.listen_link;if(!l||!l.active)return null;
+ var c=el("div","card"),h=el("div","s-head"),nb=el("div","nm");nb.appendChild(el("div",null,S.listenRevoke));
+ var hint=el("div","safe",S.listenRevokeHint);hint.style.margin="0";nb.appendChild(hint);h.appendChild(nb);
+ var b=el("button","btn sm",S.listenRevoke);b.type="button";b.setAttribute("data-listen-revoke","");
+ b.addEventListener("click",function(){if(b.disabled)return;b.disabled=true;haptic("tap");
+  post("/api/listen-link",{action:"revoke"}).then(function(r){if(!r.ok)throw r.status;return r.json();}).then(function(){
+   haptic("n","success");toast(S.listenRevoked);l.active=0;render(last,true);
+  }).catch(function(st){b.disabled=false;toast(st===403?S.reopen:S.listenFailed,true);});});
+ h.appendChild(b);c.appendChild(h);return c;}
+// The paired widget devices (device_tokens.py): one tap revokes one; the bridge keeps only their hashes.
+function devicesRow(d){
+ var list=d&&d.widget_devices;if(!list||!list.length)return null;
+ var c=el("div","card"),h=el("div","s-head"),nb=el("div","nm");nb.appendChild(el("div",null,S.devicesTitle));
+ var hint=el("div","safe",S.devicesHint);hint.style.margin="0";nb.appendChild(hint);h.appendChild(nb);c.appendChild(h);
+ var fmt=new Intl.DateTimeFormat(LANG,{dateStyle:"medium"});
+ list.forEach(function(dev){
+  var r=el("div","row"),body=el("div","body");body.appendChild(el("div","nm",String(dev.label||"")));
+  body.appendChild(el("div","mt",S.devicesAdded+" "+fmt.format(new Date((dev.created||0)*1000))));r.appendChild(body);
+  var b=el("button","btn sm",S.devicesRevoke);b.type="button";b.setAttribute("data-device-revoke",String(dev.id||""));
+  b.addEventListener("click",function(){if(b.disabled)return;b.disabled=true;haptic("tap");
+   post("/api/devices",{action:"revoke",id:String(dev.id||"")}).then(function(x){if(!x.ok&&x.status!==404)throw x.status;return x.json();}).then(function(j){
+    haptic("n","success");toast(S.devicesRevoked);d.widget_devices=(j&&j.devices)||list.filter(function(o){return o.id!==dev.id;});render(last,true);
+   }).catch(function(st){b.disabled=false;if(st===403)authFailed();toast(st===403?S.reopen:S.devicesFailed,true);});});
+  r.appendChild(b);c.appendChild(r);});
+ return c;}
 function radioPlayerSchedule(){
  clearTimeout(radioRenewTimer);
  if(radioAudio&&!radioAudio.paused&&radioSourceExpiry)radioRenewTimer=setTimeout(radioPlayerRefresh,
@@ -2088,8 +2468,16 @@ function radioCard(r){
  var c=el("div","card"),h=el("div","s-head"),l=el("div","lead"+(r.on?" ok":""));l.appendChild(icon("mic"));h.appendChild(l);
  var nb=el("div","nm");nb.appendChild(el("div",null,S.radio));var hint=el("div","safe",S.radioHint);hint.style.margin="0";nb.appendChild(hint);h.appendChild(nb);
  h.appendChild(el("span","pill"+(r.on?" on":""),r.on?S.radioOn:S.radioOff));c.appendChild(h);
- if(typeof r.tts_minutes_today==="number"&&r.tts_daily_minutes){var nf=new Intl.NumberFormat(LANG,{maximumFractionDigits:1});
-  c.appendChild(el("div","safe",S.radioMinutes+": "+nf.format(r.tts_minutes_today)+" "+S.radioOf+" "+nf.format(r.tts_daily_minutes)));}
+ var voiceCap=r.listening_detection?r.tts_listening_minutes:r.tts_daily_minutes;
+ if(r.tts_minutes_today===null)c.appendChild(el("div","safe",S.radioBudgetUnavailable));
+ else if(typeof r.tts_minutes_today==="number"&&typeof voiceCap==="number"&&typeof r.tts_effective_minutes==="number"){var nf=new Intl.NumberFormat(LANG,{maximumFractionDigits:1});
+  c.appendChild(el("div","safe",S.radioMinutes+": "+nf.format(r.tts_minutes_today)+" · "+S.radioConfiguredCap+": "+nf.format(voiceCap)+" · "+S.radioActiveCap+": "+nf.format(r.tts_effective_minutes)));}
+ var listenerHint=!r.on?S.radioOff:r.listening?S.radioListening:!r.listening_detection?S.radioDetectionOff:r.listening_source==="unknown"?S.radioListenerUnknown:S.radioNotListening;
+ if(r.on&&r.listening){var listenerSources=[];if((r.listening_source||"").indexOf("player")>=0)listenerSources.push(S.radioListenerPlayer);
+  if((r.listening_source||"").indexOf("call")>=0)listenerSources.push(S.radioListenerCall);listenerHint+=" · "+listenerSources.join(" · ");}
+ c.appendChild(el("div","safe",listenerHint));
+ if(r.on){c.appendChild(el("div","safe",r.group_live===false?S.radioModePrivate:S.radioModeGroup));
+  if(typeof r.group_wanted==="boolean"&&r.group_wanted!==(r.group_live!==false))c.appendChild(el("div","safe",S.radioModeNext));}
  var b=el("button","btn sm"+(r.on?"":" pri"),r.on?S.radioStop:S.radioStart);b.type="button";
  if(busy){b.disabled=true;c.appendChild(el("div","safe",S.radioWait));}
  else if(r.failed)c.appendChild(el("div","err",S.failed));
@@ -2108,6 +2496,56 @@ function radioCard(r){
     .then(function(){sb.disabled=false;});});
   f.body.appendChild(ta);var sr=el("div","btns");sr.appendChild(sb);f.body.appendChild(sr);c.appendChild(f);}
  return c;}
+// --- the podcast queue (radio_podcast.py): what is on the air, transport, the queue, add by feed or link ------
+var podUi={feed:"",eps:null,loading:false,link:"",busy:false};
+function podPost(body){return post("/api/podcast",body).then(function(r){return r.json().catch(function(){return {};}).then(function(j){
+ if(!r.ok)throw {status:r.status,error:j.error};return j;});});}
+var PODERR={bad:S.podErr_bad,url:S.podErr_url,fetch:S.podErr_fetch,feed:S.podErr_feed,too_big:S.podErr_too_big,unknown:S.podErr_unknown,
+ full:S.podErr_full,dup:S.podErr_dup,unsuitable:S.podErr_unsuitable,explicit:S.podErr_explicit,rules:S.podErr_rules,notext:S.podErr_notext,decode:S.podErr_decode};
+function podFail(e){haptic("n","error");toast(e&&e.status===403?S.reopen:(e&&PODERR[e.error])||S.failed,true);}
+function podClock(n){n=Math.max(0,Math.floor(n||0));var s=n%60;return nf.format(Math.floor(n/60))+":"+(s<10?"0":"")+nf.format(s);}
+function podDone(j){if(last&&j.podcast)last.podcast=j.podcast;podUi.busy=false;render(last,false);}
+function podDo(body,after){if(podUi.busy)return;podUi.busy=true;haptic("tap");
+ podPost(body).then(function(j){haptic("n","success");if(after)after(j);podDone(j);}).catch(function(e){podUi.busy=false;podFail(e);render(last,false);});}
+function podcastCard(p,r){
+ var c=el("div","card pod"),now=p.now,live=now&&(now.state==="playing"||now.state==="paused"||now.state==="downloading");
+ var nm=el("div","podnow");
+ if(live&&now.state==="downloading"){nm.textContent=S.podLoading;}
+ else if(live){var t=el("span",null,now.title||"");t.dir="auto";nm.appendChild(t);}
+ else if(now&&now.state==="error"){nm.textContent=PODERR[now.error]||S.failed;}
+ else nm.textContent=(p.queue.length&&!r.on)?S.podRadioOff:S.podIdle;
+ c.appendChild(nm);
+ if(live&&now.state!=="downloading"){var sub=[];if(now.feed)sub.push(now.feed);
+  sub.push(podClock(now.position)+(now.total?" / "+podClock(now.total):""));c.appendChild(el("div","podsub",sub.join(" · ")));}
+ var row=el("div","btns"),go=!!(live||p.queue.length);
+ function tb(label,body,pri){var b=el("button","btn sm"+(pri?" pri":""),label);b.type="button";b.disabled=!go||podUi.busy;
+  b.addEventListener("click",function(){podDo(body);});row.appendChild(b);}
+ if(p.paused)tb(S.podPlay,{action:"control",op:"play"},true);else tb(S.podPause,{action:"control",op:"pause"});
+ tb(S.podSkip,{action:"control",op:"skip"});tb(S.podStop,{action:"control",op:"stop"});c.appendChild(row);
+ if(p.queue.length){c.appendChild(el("div","safe",S.podQueue+" · "+nf.format(p.queue.length)));
+  p.queue.forEach(function(q){var pr=el("div","podrow"),t=el("span",null,q.title||"");t.dir="auto";pr.appendChild(t);
+   var rb=el("button","btn sm",S.podRemove);rb.type="button";rb.disabled=podUi.busy;
+   rb.addEventListener("click",function(){podDo({action:"remove",id:q.id});});pr.appendChild(rb);c.appendChild(pr);});}
+ var f=fold("podadd",S.podAdd);
+ if((p.feeds||[]).length){
+  if(podUi.eps===null&&!podUi.loading){f.body.appendChild(el("div","safe",S.podFeeds));var sg=el("div","seg");
+   p.feeds.forEach(function(name){var b=el("button","btn sm",name);b.type="button";b.dir="auto";
+    b.addEventListener("click",function(){podUi.feed=name;podUi.loading=true;haptic("tap");render(last,false);
+     podPost({action:"episodes",feed:name}).then(function(j){podUi.eps=j.episodes||[];podUi.loading=false;render(last,false);})
+      .catch(function(e){podUi.loading=false;podUi.eps=null;podFail(e);render(last,false);});});sg.appendChild(b);});f.body.appendChild(sg);}
+  else if(podUi.loading){f.body.appendChild(el("div","safe",S.podFetching));}
+  else{var back=el("button","btn sm",S.podBack);back.type="button";
+   back.addEventListener("click",function(){podUi.eps=null;render(last,false);});f.body.appendChild(back);
+   if(!podUi.eps.length)f.body.appendChild(el("div","safe",S.podNoEpisodes));
+   var list=el("div","podeps");podUi.eps.forEach(function(e){var b=el("button","btn",""),t=el("span",null,e.title);t.dir="auto";
+    b.appendChild(t);if(e.seconds)b.appendChild(el("span","podsub","· "+podClock(e.seconds)));b.type="button";b.disabled=podUi.busy;
+    b.addEventListener("click",function(){podDo({action:"add",feed:podUi.feed,episode:e.id},function(){toast(S.podAdded);podUi.eps=null;});});
+    list.appendChild(b);});f.body.appendChild(list);}}
+ var lr=el("div","podlink"),inp=el("input");inp.type="url";inp.dir="ltr";inp.maxLength=1000;inp.placeholder=S.podLinkPh;inp.value=podUi.link;
+ inp.setAttribute("aria-label",S.podLinkPh);inp.addEventListener("input",function(){podUi.link=inp.value;});
+ var ab=el("button","btn sm pri",S.podLinkBtn);ab.type="button";ab.disabled=podUi.busy;
+ ab.addEventListener("click",function(){var v=inp.value.trim();if(!v)return;podDo({action:"add",link:v},function(){toast(S.podAdded);podUi.link="";});});
+ lr.appendChild(inp);lr.appendChild(ab);f.body.appendChild(lr);c.appendChild(f);return c;}
 // --- the brainstorming room (radio_room.py): open, follow, pause, sum up, send a task on ----------------------
 var roomPick=null, roomForm={topic:"",project:"",minutes:10}, roomBusy=false;
 function roomPost(body,btn,after){if(roomBusy)return;roomBusy=true;haptic("tap");if(btn)btn.disabled=true;
@@ -2230,13 +2668,24 @@ function switchRow(k,d){var st=d.settings||{};var on=!!st[k];var r=el("div","row
  sw.setAttribute("aria-label",S["set_"+k]);sw.appendChild(el("i"));
  sw.addEventListener("click",function(){sw.disabled=true;sw.className="sw"+(on?"":" on");setSetting(k,!on,d);});r.appendChild(sw);return r;}
 var ACTIVITY=["quiet","normal","full"];
+function v2ModeRow(d){var mode=(d.settings||{}).ui_v2||"off",row=el("div","row col v2-mode-row"),text=el("div","body");text.appendChild(el("div","nm",V2.settings.title));text.appendChild(el("div","mt",V2.settings.hint));var buttons=el("div","seg");
+ ["off","preview","on"].forEach(function(value){var b=el("button","opt"+(mode===value?" on":""),V2.settings[value]);b.type="button";b.setAttribute("aria-pressed",String(mode===value));b.setAttribute("data-v2-mode",value);
+  b.addEventListener("click",function(){Array.prototype.forEach.call(buttons.children,function(x){x.disabled=true;});post("/api/setting",{name:"ui_v2",value:value}).then(function(r){if(!r.ok)throw r.status;return r.json();}).then(function(){load();}).catch(function(){toast(S.failed,true);render(last,true);});});buttons.appendChild(b);});text.appendChild(buttons);row.appendChild(text);return row;
+}
 function settingsBox(d){
  var st=d.settings||{},c=el("div","card group");
+ c.appendChild(v2ModeRow(d));
  if("activity" in st){var ar=el("div","row col"),ab=el("div","body");ab.appendChild(el("div","nm",S.set_activity));
   ab.appendChild(el("div","mt",S.hint_activity));var ag=el("div","seg three");
   ACTIVITY.forEach(function(v){var on=st.activity===v;var o=el("button","opt"+(on?" on":""),S["act_"+v]);o.type="button";
    o.addEventListener("click",function(){if(on)return;o.disabled=true;setSetting("activity",v,d);});ag.appendChild(o);});
   ab.appendChild(ag);ar.appendChild(ab);c.appendChild(ar);}
+ if("voice_digest" in st){var dr=el("div","row col"),db=el("div","body");db.appendChild(el("div","nm",S.set_voice_digest));
+  db.appendChild(el("div","mt",S.hint_voice_digest));var dg=el("div","seg");
+  ["off","important","hourly","every_3_hours"].forEach(function(v){var on=st.voice_digest===v;
+   var o=el("button","opt"+(on?" on":""),S["digest_"+v]);o.type="button";o.setAttribute("aria-pressed",on?"true":"false");
+   o.addEventListener("click",function(){if(on)return;o.disabled=true;setSetting("voice_digest",v,d);});dg.appendChild(o);});
+  db.appendChild(dg);dr.appendChild(db);c.appendChild(dr);}
  var switches=el("div"),keys=SWITCHES.filter(function(k){return k in st;});
  keys.forEach(function(k){switches.appendChild(switchRow(k,d));});
  if(keys.length>4)c.appendChild(compactBlock("settings-options",S.compactSettings,nf.format(keys.filter(function(k){return st[k];}).length)+" / "+nf.format(keys.length)+" "+S.compactEnabled,switches));else c.appendChild(switches);
@@ -2245,15 +2694,37 @@ function settingsBox(d){
   COMPACT.forEach(function(v){var on=st.auto_compact===v;var o=el("button","opt"+(on?" on":""),v?cf.format(v*1000):S.off);o.type="button";
    o.addEventListener("click",function(){if(on)return;o.disabled=true;setSetting("auto_compact",v,d);});g.appendChild(o);});
   b.appendChild(g);r.appendChild(b);c.appendChild(r);}
+ if("cold_compact" in st){var cr=el("div","row col"),cb=el("div","body");cb.appendChild(el("div","nm",S.set_cold_compact));cb.appendChild(el("div","mt",S.hint_cold_compact));
+  var cg=el("div","seg");["on","off"].forEach(function(v){var ctl=el("button","opt"+(st.cold_compact===v?" on":""),v==="on"?S.coldOn:S.off);ctl.type="button";
+   ctl.addEventListener("click",function(){ctl.disabled=true;setSetting("cold_compact",v,d);});cg.appendChild(ctl);});cb.appendChild(cg);cr.appendChild(cb);c.appendChild(cr);}
  return c;}
 function renderSettings(d){
  if(d.default_model)app.appendChild(enter(modelCard(d.default_model),"set-m"));
  if(d.settings){sec(S.bridge);app.appendChild(enter(settingsBox(d),"set-b"));}
+ var lr=listenRevokeRow(d);if(lr)app.appendChild(enter(lr,"set-l"));
+ var dr=devicesRow(d);if(dr)app.appendChild(enter(dr,"set-w"));
 }
 // --- cockpit apps: a private tool's own page in a sandboxed frame (cockpit_apps.py) ----------------------------
-// The frame has an opaque origin: it gets the owner's initData only when it asks, and calls its API through this
-// page (same origin, the usual header), so the server never answers a cross-origin request.
-var appFrames={}, appUi={}, backWait={}, helloAt={}, APP_NAME=/^[a-z0-9-]{1,24}$/, APP_BODY=16384, APP_BADGE_MAX=999, BACK_WAIT=1200, HELLO_SAME_PAGE=2000;
+// The full Telegram login stays here. Frames get only a short-lived capability for their own app;
+// the parent renews it and proxies their API calls with that same scoped capability.
+var appFrames=Object.create(null), appAuth=Object.create(null), appUi={}, backWait={}, helloAt={}, APP_NAME=/^[a-z0-9-]{1,24}$/, APP_BODY=16384, APP_BADGE_MAX=999, BACK_WAIT=1200, HELLO_SAME_PAGE=2000;
+function forgetAppAuth(name){var a=appAuth[name];if(a)clearTimeout(a.timer);delete appAuth[name];}
+function appAuthError(e){if(e.status===403){authFailed();fail(S.reopen);}}
+function getAppAuth(name,renew){
+ var a=appAuth[name]||(appAuth[name]={});
+ if(a.pending)return a.pending;
+ if(!renew&&a.token&&a.expires*1000>Date.now()+5000)return Promise.resolve(a);
+ a.pending=fetch("/api/app-token",{method:"POST",headers:{"X-Telegram-Init-Data":wa.initData,"Content-Type":"application/json"},body:JSON.stringify({app:name})})
+  .then(function(r){if(r.status!==200){var e=new Error("app auth");e.status=r.status;throw e;}return r.json();})
+  .then(function(j){if(appAuth[name]!==a)throw new Error("retired app");
+   if(typeof j.token!=="string"||!j.token||typeof j.expires!=="number"||!isFinite(j.expires)||j.expires*1000<=Date.now())throw new Error("app auth");
+   a.token=j.token;a.expires=j.expires;clearTimeout(a.timer);
+   a.timer=setTimeout(function renew(){getAppAuth(name,true).then(function(v){toApp(name,{cockpit:"auth",token:v.token,expires:v.expires});},function(e){
+    appAuthError(e);if(appAuth[name]===a)a.timer=setTimeout(renew,5000);});},
+    Math.max(1000,(a.expires*1000-Date.now())*0.8));
+   return a;})
+  .then(function(v){a.pending=null;return v;},function(e){a.pending=null;throw e;});
+ return a.pending;}
 // What a frame may ask of the shell besides its API: fold the header and tabs (focus), take over the native back
 // button (back; the app confirms each forwarded back with back_done), show a count on its tab (badge) and open this
 // topic's chat (open_chat). Each message has a fixed shape: exactly its known fields, anything else is rejected, so
@@ -2276,13 +2747,28 @@ function appTitle(a){return LANG==="he"&&a.title_he?a.title_he:a.title;}
 function appTabs(d){return appsOf(d).map(function(a){return ["app:"+a.name,appTitle(a),a.icon];});}
 function showApp(d){
  var box=document.getElementById("apps"),name=appOf(view),a=appNamed(d,name);
- Object.keys(appFrames).forEach(function(k){if(!appNamed(d,k)){box.removeChild(appFrames[k]);delete appFrames[k];delete appUi[k];delete layoutSent[k];}else appFrames[k].hidden=k!==name;});
- box.hidden=!a;if(!a||!wa||!wa.initData)return;
+ Object.keys(appFrames).forEach(function(k){if(!appNamed(d,k)){if(appFrames[k].parentNode===box)box.removeChild(appFrames[k]);forgetAppAuth(k);delete appFrames[k];delete appUi[k];delete layoutSent[k];}else appFrames[k].hidden=k!==name;});
+ box.hidden=!a;if(appErr)appErr.hidden=!a||appErr.getAttribute("data-app")!==name;if(!a||!wa||!wa.initData)return;
  box.setAttribute("aria-label",S.appFrame);
  if(!appFrames[name]){var f=document.createElement("iframe");f.className="appframe";
   f.setAttribute("sandbox","allow-scripts allow-forms");f.setAttribute("referrerpolicy","no-referrer");f.setAttribute("allow","fullscreen; autoplay");
   f.title=appTitle(a);f.addEventListener("load",function(){frameLoaded(name);});
-  f.src="/app/"+name+"/?auth="+encodeURIComponent(wa.initData);appFrames[name]=f;box.appendChild(f);}}
+  appFrames[name]=f;
+  getAppAuth(name).then(function(a){if(appFrames[name]!==f)return;
+   clearAppErr(name);f.appTokenExpires=a.expires;f.src="/app/"+name+"/?auth="+encodeURIComponent(a.token);f.hidden=appOf(view)!==name;box.appendChild(f);},function(e){
+   if(appFrames[name]===f){delete appFrames[name];forgetAppAuth(name);appFailed(name,a,e);}appAuthError(e);});}}
+// A token that cannot be minted must not leave an empty, silent tab: show the offline state with a retry.
+// (A 403 is handled by authFailed: "reopen"). The next state poll retries by itself as well.
+var appErr=null;
+function clearAppErr(name){if(appErr&&appErr.getAttribute("data-app")===name){if(appErr.parentNode)appErr.parentNode.removeChild(appErr);appErr=null;}}
+function appFailed(name,a,e){
+ if(e&&e.status===403)return;
+ if(appErr&&appErr.getAttribute("data-app")===name){appErr.hidden=appOf(view)!==name;return;}
+ clearAppErr(appErr&&appErr.getAttribute("data-app"));
+ var c=empty("chat",S.offline,"",false),b=el("button","btn sm pri",S.retry);b.type="button";
+ c.className+=" apperr";c.setAttribute("data-app",name);c.setAttribute("role","alert");
+ b.addEventListener("click",function(){if(last)showApp(last);});c.appendChild(b);
+ c.hidden=appOf(view)!==name;appErr=c;document.getElementById("apps").appendChild(c);}
 function frameName(win){var n=null;Object.keys(appFrames).forEach(function(k){if(appFrames[k].contentWindow===win)n=k;});return n;}
 // The bottom safe-area inset an app must keep clear: only in focus mode, where the frame reaches the screen's edge
 // (otherwise the page's own bottom padding already does).
@@ -2316,8 +2802,14 @@ function appBackLayer(name,on){if(!on){retireBack(view+"|app-back:"+name);return
  if(value)return;toApp(name,{cockpit:"back"});
  backWait[name]=setTimeout(function(){delete backWait[name];leaveApp(name);},BACK_WAIT);});change(on);}
 function freshFrame(name){resetApp(name,true);if(last)tabs(last);applyChrome();}
-function frameLoaded(name){if(Date.now()-(helloAt[name]||0)<HELLO_SAME_PAGE)return;freshFrame(name);}  // a hello just before is this same page's
-function authFailed(){radioPlayerStop();Object.keys(appFrames).forEach(function(k){resetApp(k,false);});
+function frameLoaded(name){var f=appFrames[name];
+ // A user reload/navigation can reuse the frame's original, expired URL. Retry with the parent's current token
+ // only after that navigation; routine token refresh never reloads an app or discards its unsaved state.
+ if(f&&f.appTokenExpires&&f.appTokenExpires*1000<=Date.now()){
+  getAppAuth(name).then(function(a){if(appFrames[name]!==f)return;
+   f.appTokenExpires=a.expires;f.src="/app/"+name+"/?auth="+encodeURIComponent(a.token);},appAuthError);return;}
+ if(Date.now()-(helloAt[name]||0)<HELLO_SAME_PAGE)return;freshFrame(name);}  // a hello just before is this same page's
+function authFailed(){radioPlayerStop();Object.keys(appAuth).forEach(forgetAppAuth);Object.keys(appFrames).forEach(function(k){resetApp(k,false);});
  backEntries.forEach(function(e){e.active=false;});trimBack();
  document.getElementById("apps").hidden=true;view=home();applyChrome();}
 function onAppMessage(e){
@@ -2325,8 +2817,9 @@ function onAppMessage(e){
  var name=frameName(e.source),m=e.data,w=e.source;
  if(!name||e.origin!=="null"||!m||typeof m!=="object"||!wa||!wa.initData)return;
  if(m.cockpit==="hello"){helloAt[name]=Date.now();freshFrame(name);var l=appLayout(name);  // a hello starts the page afresh
-  w.postMessage({cockpit:"hello",initData:wa.initData,lang:LANG,dir:RTL?"rtl":"ltr",
-  theme:document.documentElement.getAttribute("data-theme")||"",focus:l.focus,inset:l.inset},"*");return;}
+  getAppAuth(name).then(function(a){if(frameName(w)!==name)return;
+   w.postMessage({cockpit:"hello",token:a.token,expires:a.expires,lang:LANG,dir:RTL?"rtl":"ltr",
+   theme:document.documentElement.getAttribute("data-theme")||"",focus:l.focus,inset:l.inset},"*");},appAuthError);return;}
  if(m.cockpit!=="api"){
   var c=appCmd(m);if(!c)return;
   // a count on its tab is useful while another tab shows, so a badge is taken from any of our app frames
@@ -2342,14 +2835,14 @@ function onAppMessage(e){
  var reply=function(st,data){try{w.postMessage({cockpit:"api",id:m.id,status:st,data:data},"*");}catch(x){}};
  var body=null;try{body=JSON.stringify(m.body==null?{}:m.body);}catch(x){}
  if(!body||body.charAt(0)!=="{"||body.length>APP_BODY){reply(400,null);return;}
- fetch("/app/"+name+"/api",{method:"POST",headers:{"X-Telegram-Init-Data":wa.initData,"Content-Type":"application/json"},body:body})
+ getAppAuth(name).then(function(a){return fetch("/app/"+name+"/api",{method:"POST",headers:{"X-Cockpit-App-Token":a.token,"Content-Type":"application/json"},body:body});})
   .then(function(r){if(r.status===403){reply(403,null);authFailed();fail(S.reopen);return;}
-   return r.json().then(function(j){reply(r.status,j);},function(){reply(r.status,null);});},function(){reply(0,null);});
+   return r.json().then(function(j){reply(r.status,j);},function(){reply(r.status,null);});},function(e){reply(e.status||0,null);appAuthError(e);});
 }
 window.addEventListener("message",onAppMessage);
 window.addEventListener("resize",pushLayout);
 // --- tabs and the page around them -----------------------------------------------------------------------------
-function home(){return last&&last.topic?"here":"me";}
+function home(){return v2Enabled(last)?"me":last&&last.topic?"here":"me";}
 function switchTo(v,remember){if(backPending&&remember!==false&&!backReplay)return;
  if(view===v)return;var previous=view;if(moreOpen)setMore(false);
  var oldApp=appOf(previous);if(oldApp){retireBack(previous+"|app-back:"+oldApp);
@@ -2373,6 +2866,7 @@ function setMore(on){var sh=document.getElementById("more-tabs");
 document.addEventListener("click",function(e){var sh=document.getElementById("more-tabs"),m=document.querySelector(".tab-more");
  if(sh&&!sh.hidden&&!sh.contains(e.target)&&!(m&&m.contains(e.target)))setMore(false);});
 function tabs(d){
+ if(v2Enabled(d)){v2Tabs(d);return;}
  var box=document.getElementById("tabs");box.textContent="";
  document.getElementById("sub").textContent=d.topic?shown(d.topic,"name"):"";
  if(view==="all")view="me";
@@ -2427,16 +2921,20 @@ function status(kind){var st=document.getElementById("st");st.textContent="";
  else if(kind==="off")st.appendChild(el("span",null,S.offline));
  else if(last)st.appendChild(el("span",null,S.updated+" "+new Date(last.now*1000).toLocaleTimeString(LANG,{hour:"2-digit",minute:"2-digit"})));}
 function hookHealthCard(d){
- var h=d.hook_health;if(!h||h.ok&&!h.restored&&view!=="settings"&&!h.reload)return;
- var c=el("section","card");c.appendChild(el("h2",null,S.hooksTitle));
+ // Only a broken or just-restored connection is shown on every tab; the reload tool and its outcome live in Settings,
+ // as one short line of counts (never a row per session).
+ var h=d.hook_health;if(!h||h.ok&&!h.restored&&view!=="settings")return;
+ var c=el("section","card hook-health");c.setAttribute("data-k","hook-health");c.appendChild(el("h2",null,S.hooksTitle));
  c.appendChild(el("p",null,!h.ok?S.hooksBroken:h.restored?S.hooksRestored:S.hooksHint));
  var job=h.reload||{};
  if(job.running)c.appendChild(el("p",null,S.hooksRunning));
  else if(job.error)c.appendChild(el("p",null,S.hooksReloadFailed));
  else if(h.reload){
-  c.appendChild(el("p",null,S.hooksReloaded+": "+(job.reloaded||[]).length+" · "+S.hooksSkipped+": "+(job.skipped||[]).length));
-  (job.reloaded||[]).forEach(function(id){var r=el("div");r.appendChild(el("bdi",null,id.slice(0,8)));r.appendChild(document.createTextNode(" — "+S.hooksReloaded));c.appendChild(r);});
-  (job.skipped||[]).forEach(function(x){var r=el("div");r.appendChild(el("bdi",null,x.session.slice(0,8)));r.appendChild(document.createTextNode(" — "+(S["reload_"+x.reason]||S.reload_unknown)));c.appendChild(r);});
+  var n={r:(job.reloaded||[]).length,c:0,w:0,o:0};
+  (job.skipped||[]).forEach(function(x){if(x.reason==="current"||x.reason==="not_live")n.c++;else if(x.reason==="busy"||x.reason==="background")n.w++;else n.o++;});
+  var parts=[];[[n.r,S.hooksNReloaded],[n.c,S.hooksNCurrent],[n.w,S.hooksNBusy],[n.o,S.hooksNOther]].forEach(function(p){
+   if(p[0])parts.push(p[1].replace("#",nf.format(p[0])));});
+  c.appendChild(el("p","mt hook-sum",parts.join(" · ")||S.hooksNone));
  }
  var b=el("button","btn sm pri",h.ok?S.hooksReload:S.hooksRestore);b.type="button";b.disabled=!!job.running;
  b.addEventListener("click",function(){b.disabled=true;haptic("tap");post(h.ok?"/api/sessions-reload":"/api/hooks-restore",{}).then(function(r){
@@ -2444,9 +2942,18 @@ function hookHealthCard(d){
  }).catch(function(e){toast(e===403?S.reopen:S.failed,true);b.disabled=false;});});
  c.appendChild(b);app.appendChild(c);
 }
+// open team items nobody moved for hours (idle_lines.py): a count and up to five rows; nothing when none
+function idleLines(d){var x=d.idle_lines;if(!x||!x.count||!(x.items||[]).length)return;
+ sec(S.idleTitle,x.count,"hot");var g=el("div","card group idle-lines");g.setAttribute("data-k","idle");
+ x.items.forEach(function(r){var m=[iso(r.project),"#"+r.id,S.idleHours.replace("#",nf.format(r.hours))];
+  if(r.no_lead)m.push(S.idleNoLead);else if(r.nudged)m.push(S.idleNudged);
+  g.appendChild(item("clock","warm",r,"title",m,"idle-line","idle-"+r.project+"-"+r.id));});
+ if(x.count>x.items.length)g.appendChild(el("div","mt idle-more",S.idleMore.replace("#",nf.format(x.count-x.items.length))));
+ app.appendChild(enter(g,"idle-lines"));}
 function render(d,force){
  var ae=document.activeElement;if(!force&&ae&&ae.tagName==="TEXTAREA")return;
  var y=window.scrollY;last=d;stagger=0;app.textContent="";
+ v2Prepare(d);
  if(targetClosed){
   document.getElementById("radio-player").hidden=true;
   document.getElementById("tabs").textContent="";document.getElementById("apps").hidden=true;
@@ -2455,9 +2962,13 @@ function render(d,force){
  }
  tabs(d);
  radioPlayerDraw();
- hookHealthCard(d);
- if(view==="here")renderHere(d);else if(view==="agents")renderAgents(d);else if(view==="settings")renderSettings(d);
- else if(!appOf(view)){if(d.brief)renderBrief(d);else renderAll(d);}
+ if(!v2Enabled(d))hookHealthCard(d);
+ if(view==="here")renderHere(d);else if(v2Enabled(d)&&view==="agents")v2Projects(d);else if(view==="agents")renderAgents(d);
+ else if(v2Enabled(d)&&view==="settings")v2Settings(d);else if(view==="settings")renderSettings(d);
+ else if(v2Enabled(d)&&(view==="tools"||appOf(view)))v2Tools(d);
+ else if(v2Enabled(d)&&view==="me")v2Now(d);
+ else if(!appOf(view)){idleLines(d);if(d.brief)renderBrief(d);else renderAll(d);}
+ if(v2Enabled(d)&&view!=="settings")hookHealthCard(d);
  if(view!=="settings"&&!appOf(view))deliveryReceipts(d,view==="here");
  showApp(d);
  document.getElementById("foot").textContent="";applyChrome();
@@ -2473,16 +2984,27 @@ function load(){
  var rf=document.getElementById("rf");rf.className="icon-btn spin";
  fetch("/api/state",{method:"POST",headers:{"X-Telegram-Init-Data":wa.initData},body:"{}"})
   .then(function(r){if(r.status===403)throw 403;if(!r.ok)throw 0;return r.json();})
-  .then(function(d){if(targetPending){if(questionAvailable(d,target))view="all";else{targetClosed=true;targetPending=false;}}
+  .then(function(d){try{if(targetPending){if(questionAvailable(d,target))view="all";else{targetClosed=true;targetPending=false;}}
    var ids=(d.decisions||[]).filter(function(x){return !x.stale&&!x.old;}).map(function(x){return x.id;}).concat((d.cards||[]).filter(function(x){return ASKS[x.kind]&&!x.ended&&!x.old;}).map(function(x){return x.id;}));
-   if(priorWaiting&&!targetClosed){var fresh=ids.filter(function(id){return priorWaiting.indexOf(id)<0;});if(fresh.length){target=fresh[0];targetPending=true;view="all";}}priorWaiting=ids;
+   // A rollback keeps the current v2 tab even if this response also brings a new question.
+   if(priorWaiting&&!targetClosed&&!v2Enabled(d)&&!v2Enabled(last)){var fresh=ids.filter(function(id){return priorWaiting.indexOf(id)<0;});if(fresh.length){target=fresh[0];targetPending=true;view="all";}}priorWaiting=ids;
    try{if(window.parent!==window)window.parent.postMessage({cockpit:"badge",n:waitingCount(d)},"*");}catch(e){}
    makeDigest(d);render(d,false);radioPlayerRefresh();status("");
    clearTimeout(followTimer);
-   if(d.pending&&followups<10){followups++;followTimer=setTimeout(load,2500);}})
-  .catch(function(e){if(e===403){authFailed();fail(S.reopen);status("");}else if(last){status("off");}else{fail(S.denied,true);status("");}})
+   if(d.pending&&followups<10){followups++;followTimer=setTimeout(load,2500);}}catch(err){renderFailed(err);}})
+  // A refused login asks to reopen; a reply that never arrived (a cut connection, a server error) is not "no access".
+  .catch(function(e){if(e===403){authFailed();fail(S.reopen);status("");}else if(last){status("off");}else{fail(S.offline,true);status("");}})
   .then(function(){loading=false;rf.className="icon-btn";if(reloadPending){reloadPending=false;load();}});
 }
+// The state arrived but could not be drawn: say so (never "no access"), and report the error's type and the place in
+// the page that threw it, once per distinct error. No message, no data.
+var renderReported={};
+function errorAt(err){var s=String((err&&err.stack)||""),m=/^\s*at (?:([\w$.]+) \()?[^\n]*?:(\d+):(\d+)\)?\s*$/m.exec(s)||/^([\w$.]*)@[^\n]*?:(\d+):(\d+)\s*$/m.exec(s);
+ return m?(m[1]||"").slice(0,60)+":"+m[2]+":"+m[3]:"";}
+function renderFailed(err){fail(S.renderFailed,true);status("");
+ var name=String((err&&err.name)||"Error").replace(/[^A-Za-z0-9]/g,"").slice(0,40)||"Error",at=errorAt(err),k=name+" "+at;
+ if(renderReported[k])return;renderReported[k]=true;
+ try{post("/api/client-error",{name:/^[A-Za-z]/.test(name)?name:"Error",at:at}).catch(function(){});}catch(e){}}
 // --- Telegram look, native buttons, refresh button and pull to refresh ----------------------------------------
 var BG={light:"#eef3fb",dark:"#0a1120"};
 function theme(){var sch="light";
@@ -2523,6 +3045,34 @@ load();schedule();
 """
 
 
+# Inline in the existing nonce-bearing blocks: no new script origin, stylesheet
+# origin, inline handler, HTML injection, or weaker Content Security Policy.
+_V2_ROOT = Path(__file__).parent
+V2_STRINGS = json.loads((_V2_ROOT / "cockpit_v2_strings.json").read_text(encoding="utf-8"))
+PAGE = PAGE.replace("</style>", (_V2_ROOT / "cockpit_v2.css").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_knowledge.css").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_addons.css").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_schedule.css").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_family.css").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_workmap.css").read_text(encoding="utf-8") + "\n</style>", 1)
+_V2_JS = (_V2_ROOT / "cockpit_v2.js").read_text(encoding="utf-8").replace(
+    "__V2_STRINGS__", json.dumps(V2_STRINGS, ensure_ascii=False))
+# The v2 copy table is a top-level var: it goes with the page's other vars, never between two functions, so a function
+# sliced out of the page (the node harnesses do that) stays self-contained.
+_V2_VAR = next(line for line in _V2_JS.split("\n") if line.startswith("var V2_COPY="))
+_PF_VAR = 'var pf=new Intl.NumberFormat(LANG,{style:"percent",maximumFractionDigits:0});\n'
+assert _PF_VAR in PAGE
+PAGE = PAGE.replace(_PF_VAR, _PF_VAR + _V2_VAR + "\n", 1)
+PAGE = PAGE.replace("\nfunction render(d,force){", "\n" + _V2_JS.replace(_V2_VAR + "\n", "", 1) + "\n"
+                    + (_V2_ROOT / "cockpit_v2_screens.js").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_app_request.js").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_knowledge.js").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_addons.js").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_schedule.js").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_family.js").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_v2_workmap.js").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_mac_tools.js").read_text(encoding="utf-8") + "\nfunction render(d,force){", 1)
+
 _ICONS_AT = PAGE.index("var ICONS={")
 ICON_NAMES = frozenset(re.findall(r'([a-z]+):"M', PAGE[_ICONS_AT:PAGE.index("};", _ICONS_AT)]))  # what an app may use
 
@@ -2539,3 +3089,13 @@ def csp(nonce: str, frame_ancestors: str) -> str:
     return ("default-src 'none'; script-src https://telegram.org/js/telegram-web-app.js 'nonce-%s'; style-src 'nonce-%s'; "
             "connect-src 'self'; media-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; "
             "frame-ancestors %s" % (nonce, nonce, frame_ancestors))
+
+
+_IDLE_STRINGS = {  # the Cockpit's "Idle lines" block (idle_lines.py)
+    "he": {"idleTitle": "קווים בלי תנועה", "idleHours": "# שעות בלי תנועה", "idleNudged": "הסשן המוביל קיבל תזכורת",
+           "idleNoLead": "אין סשן מוביל פעיל", "idleMore": "ועוד #"},
+    "en": {"idleTitle": "Idle lines", "idleHours": "No movement for #h", "idleNudged": "Lead session nudged",
+           "idleNoLead": "No lead session running", "idleMore": "and # more"},
+}
+for _lang, _pairs in _IDLE_STRINGS.items():
+    STRINGS[_lang].update(_pairs)

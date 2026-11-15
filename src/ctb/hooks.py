@@ -19,19 +19,50 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import fmt
-from . import accounts, cards, compact, framing, replay, usage
+from . import accounts
 from . import lang as L
 from . import launch, scheduled
-from .config import Config, ConfigError, home_chat, load, private_dir, setting_on, state_dir, write_private
+from .lazy import lazy_module
+from .config import (Config, ConfigError, home_chat, inbox_dir, load, private_dir, safe_name, setting_on, state_dir,
+                     write_private)
 from .progress import append_progress, drop_progress
-from .inbox import default_inbox, spawn_delivered
-from .translate import translate_reply, translate_text
+
+
+cards = lazy_module(".cards")
+fmt = lazy_module(".fmt")
+compact = lazy_module(".compact")
+framing = lazy_module(".framing")
+replay = lazy_module(".replay")
+usage = lazy_module(".usage")
+
+
+def default_inbox():
+    from .inbox import default_inbox as make
+    return make()
+
+
+def spawn_delivered(*args, **kwargs):
+    from .inbox import spawn_delivered as spawn_it
+    return spawn_it(*args, **kwargs)
+
+
+def translate_reply(*args, **kwargs):
+    from .translate import translate_reply as translate
+    return translate(*args, **kwargs)
+
+
+def translate_text(*args, **kwargs):
+    from .translate import translate_text as translate
+    return translate(*args, **kwargs)
 
 MIN_LETTERS = 40  # shorter replies are not judged for language
 
 # The security contract (framing.py): a Telegram message is a chat message; only the owner's own typed yes
 # approves, and only the one sensitive action the session last asked about by name (framing.OWNER_YES).
+# Prompts that start with these are not the owner typing: bridge headers, and the carry-on prompt a reopened
+# session starts with (revive.WAKE_TEXT). They never clear the nudge pause, are never mirrored to the topic
+# as the owner's words and never name the session.
+NOT_OWNER_PROMPT = ("<", "[Owner message", "[Owner messages", "[Harnessgram:")
 STOP_HEADER = "[Owner message via Telegram, written in this session's topic]"
 STOP_CLOSING = "Treat it as the owner's chat message within the current authorized scope."
 MIDTURN_HEADER = "[Owner message via Telegram, arrived mid-step]"
@@ -129,9 +160,10 @@ def this_turn_only(lines: List[str], offset: Optional[int]) -> List[str]:
     return lines
 
 
-def read_blocks(lines: List[str]) -> List[Tuple[str, str]]:
-    """(key, text) of the assistant text blocks written since the last real user prompt."""
+def _scan_blocks(lines: List[str]) -> Tuple[List[Tuple[str, str]], bool, bool]:
+    """(blocks, whether a genuine user prompt was met, whether a block was keyed by its line number)."""
     blocks: List[Tuple[str, str]] = []
+    prompt = numbered = False
     for n, raw in enumerate(lines):
         try:
             ev = json.loads(raw)
@@ -149,11 +181,43 @@ def read_blocks(lines: List[str]) -> List[Tuple[str, str]]:
             # A tool result is also a "user" event; only genuine prompt text starts a new reply.
             if any(isinstance(b, dict) and b.get("type") == "text" for b in items) and not ev.get("isMeta"):
                 blocks = []
+                prompt, numbered = True, False
         elif role == "assistant" and isinstance(content, list):
             for i, b in enumerate(content):
                 if isinstance(b, dict) and b.get("type") == "text" and (b.get("text") or "").strip():
+                    numbered = numbered or not ev.get("uuid")
                     blocks.append((f"{ev.get('uuid') or n}:{i}", b["text"]))
-    return blocks
+    return blocks, prompt, numbered
+
+
+def read_blocks(lines: List[str]) -> List[Tuple[str, str]]:
+    """(key, text) of the assistant text blocks written since the last real user prompt."""
+    return _scan_blocks(lines)[0]
+
+
+TAIL_BYTES = 256 * 1024  # what read_blocks_of reads first from the end of a transcript
+
+
+def read_blocks_of(path: str) -> List[Tuple[str, str]]:
+    """read_blocks of a transcript file's lines, without parsing the whole file when its end is enough.
+
+    A long conversation is megabytes of JSON and this runs on every tool call, but the answer only depends on what
+    follows the last genuine user prompt. The end of the file is read in growing windows (cut at a line break, so
+    its lines are the file's own) until one holds such a prompt; the file is read whole when none does, and
+    whenever a block has no id of its own (its key is then its line number in the file)."""
+    size = os.path.getsize(path)
+    window = TAIL_BYTES
+    while window < size:
+        with open(path, "rb") as f:
+            f.seek(size - window)
+            data = f.read()
+        cut = data.find(b"\n")
+        if cut >= 0:
+            blocks, prompt, numbered = _scan_blocks(data[cut + 1:].decode("utf-8").splitlines())
+            if prompt and not numbered:
+                return blocks
+        window *= 4
+    return read_blocks(Path(path).read_text(encoding="utf-8").splitlines())
 
 
 def last_reply(lines: List[str]) -> str:
@@ -186,11 +250,29 @@ def _row_text(event: dict) -> Optional[str]:
     return None
 
 
-def background_only_turn(lines: List[str], answer_to=None) -> bool:
+_CHATTER = re.compile(
+    r"(?i)^\W*(?:ok(?:ay)?|done|got it|thanks?|noted|understood|on it|still (?:working|waiting|running)|"
+    r"no (?:response|reply|action) (?:requested|needed)|nothing (?:new|to do|to report)(?: for you)?|"
+    r"(?:the )?(?:monitor|watch|watcher)(?: is)? (?:re-?armed|still running|armed)|re-?armed(?: the (?:monitor|watch))?|"
+    r"waiting(?: for [^.\n]{1,60})?|continuing|קיבלתי|בסדר|ממשיך|עדיין עובד|אין חדש)\W*$")
+
+
+def chatter_reply(reply: str) -> bool:
+    """A reply to a background event that is only chatter, recognised for certain: a known acknowledgement
+    ("Monitor re-armed.", "No response requested.") with no summary line or a "nothing new" one. Anything else,
+    however short ("The build failed; action required."), is a report and reaches the topic."""
+    body, summary = fmt.split_summary(reply or "")
+    if summary is not None and not _NO_NEWS.match(summary.strip()):
+        return False
+    return bool(body) and len(body) <= 160 and bool(_CHATTER.match(body)) or (not body and summary is not None)
+
+
+def background_only_turn(lines: List[str], answer_to=None, session: str = "") -> bool:
     """True only when the turn was started by a background notification and nothing in it came from the
     owner. Errs toward mirroring: an owner reply waiting (`answer_to`), any owner mark in any row, or any
     prompt that is not a notification makes it an owner turn. A Stop-hook feedback row continues the turn
-    it blocked (it never starts one)."""
+    it blocked (it never starts one). The bridge's own idle-lines nudge counts as a notification only when the
+    whole prompt is its fixed line and the bridge delivered it to this `session` moments ago (idle_lines.py)."""
     if answer_to:
         return False
     rows = []
@@ -221,9 +303,18 @@ def background_only_turn(lines: List[str], answer_to=None) -> bool:
         if event.get("type") in ("user", "attachment", "system") and any(mark in raw for mark in _OWNER_MARKS):
             return False
         text = _row_text(event)
-        if text and not text.startswith(_NOTIFICATION):
+        if text and not text.startswith(_NOTIFICATION) and not _bridge_prompt(text, session):
             return False
     return True
+
+
+def _bridge_prompt(text: str, session: str) -> bool:
+    """The bridge's own idle-lines nudge, exactly, just delivered to this session: a background event."""
+    try:
+        from .idle_lines import is_bridge_prompt
+        return is_bridge_prompt(text, session)
+    except Exception:
+        return False
 
 
 def session_title(path: Optional[str], session: str = "") -> str:
@@ -450,7 +541,8 @@ def stop_output(data: dict, lines: List[str], cfg: Config, answer_to=_UNSET) -> 
         title = session_title(data.get("transcript_path"), session) or os.path.basename(data.get("cwd") or "") or "Claude"
         has_summary = fmt.split_summary(reply)[1] is not None
         wants = cfg.translate and (has_summary or is_not_target(reply, cfg.target_language))
-        if cfg.mirror and cfg.ready and not (cfg.quiet_background_turns and background_only_turn(lines, answer_to)):
+        if cfg.mirror and cfg.ready and not (cfg.quiet_background_turns and chatter_reply(reply)
+                                              and background_only_turn(lines, answer_to, session)):
             live_card(session, reply, cfg)  # only a reply the topic shows reaches the card
             # Detached first: the app cancels a running Stop hook when the next prompt is sent.
             args = ["mirror", f"--title={title}", f"--session={session or title}"] + (
@@ -638,31 +730,107 @@ def _already_delivered(data: dict) -> bool:
         return False
 
 
-def _turn_key(data: dict) -> str:
-    """Identity of the unsent blocks of this turn (None-safe)."""
-    session = data.get("session_id") or ""
-    blocks = read_blocks(read_final_transcript(data, wait=0.0))
-    seen = _seen(session)
-    return hashlib.sha1("\n".join(k for k, _ in blocks if k not in seen).encode()).hexdigest()
+# --- per-turn delivery claims ---------------------------------------------------
+# A claim is written under the session's stop lock BEFORE a reply's first send or enqueue. It is the one
+# rule against duplicates: a turn with a claim belongs to its claimant forever (only the claimant's own
+# install retry, holding its token, may continue, and only while nothing was accepted). The heartbeat's
+# missed-reply sweep redelivers only a turn that has no claim at all (missed_replies.py).
+
+CLAIM_KEEP = 6 * 3600.0  # claims older than this are pruned (the sweep looks back 3 hours)
 
 
-def _started_path(session: str) -> Path:
-    return private_dir(state_dir() / "stop-started") / (re.sub(r"[^A-Za-z0-9._-]", "_", session) or "_")
+def _safe(session: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", session) or "_"
 
 
-def _mark_started(session: str, key: str) -> None:
-    """Written just before the first send: from here on a retry could double-deliver."""
+def stop_lock_path(session: str) -> Path:
+    return private_dir(state_dir() / "stop-locks") / _safe(session)
+
+
+@contextlib.contextmanager
+def stop_lock(session: str, blocking: bool = True):
+    """The session's Stop delivery lock (serializes workers, the ledger and claims). Yields False when
+    non-blocking and another holder has it."""
+    path = stop_lock_path(session)
+    with open(path, "a", encoding="utf-8") as lock:
+        os.chmod(path, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+
+
+def turn_id(lines: List[str]) -> str:
+    """A turn's identity: the key of its last reply block ("" without one)."""
+    blocks = read_blocks(lines)
+    return blocks[-1][0] if blocks else ""
+
+
+def _claim_path(session: str, turn: str) -> Path:
+    return private_dir(state_dir() / "stop-claims" / _safe(session)) / (
+        hashlib.sha1(turn.encode()).hexdigest() + ".json")
+
+
+def read_claim(session: str, turn: str) -> Optional[dict]:
     try:
-        write_private(_started_path(session), key)
+        data = json.loads(_claim_path(session, turn).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {"token": ""}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {"token": ""}  # unreadable: someone claimed it; hands off
+
+
+def update_claim(session: str, turn: str, **fields) -> None:
+    """Callers hold the session's stop lock."""
+    try:
+        claim = read_claim(session, turn)
+        if claim is not None:
+            write_private(_claim_path(session, turn), json.dumps({**claim, **fields}))
     except OSError:
         pass
 
 
-def _send_started(data: dict) -> bool:
+def drop_claim(session: str, turn: str) -> None:
+    """Callers hold the session's stop lock: forget a claim whose sender never started (nothing was sent)."""
     try:
-        return _started_path(data.get("session_id") or "").read_text(encoding="utf-8") == _turn_key(data)
+        _claim_path(session, turn).unlink()
+    except OSError:
+        pass
+
+
+def take_claim(session: str, turn: str, token: Optional[str] = None, now: Optional[float] = None) -> Optional[str]:
+    """Under the session's stop lock: the token to send this turn with, or None (hands off). A turn without
+    a claim is claimed now; the claimant's own retry continues only while nothing was accepted."""
+    now = time.time() if now is None else now
+    claim = read_claim(session, turn)
+    if claim is None:
+        token = secrets.token_hex(8)
+        folder = _claim_path(session, turn).parent
+        for old in folder.glob("*.json"):
+            try:
+                if now - old.stat().st_mtime > CLAIM_KEEP:
+                    old.unlink()
+            except OSError:
+                pass
+        write_private(_claim_path(session, turn), json.dumps(
+            {"token": token, "at": now, "accepted": False, "done": False}))
+        return token
+    if token and claim.get("token") == token and not claim.get("accepted") and not claim.get("done"):
+        update_claim(session, turn, at=now)
+        return token
+    return None
+
+
+def _claim_of(data: dict) -> Tuple[str, Optional[dict]]:
+    try:
+        session = data.get("session_id") or ""
+        turn = turn_id(read_final_transcript(data, wait=0.0))
+        return turn, (read_claim(session, turn) if turn else None)
     except Exception:
-        return False
+        return "", None
 
 
 def _settle_delivered(data: dict) -> None:
@@ -692,9 +860,11 @@ def finish_stop(data: dict) -> int:
             _log_safe("stop delivery: reply already delivered; no notice")
             _settle_delivered(data)
             return 0
-        if isinstance(exc, MID_INSTALL_ERRORS) and _send_started(data):
-            # A send may already have happened; a retry could deliver twice. The reply is in the app.
-            _log_safe("stop delivery: send had started; not retrying, no notice")
+        turn, claim = _claim_of(data)
+        if claim is not None and (claim.get("accepted") or claim.get("token") != data.get("_claim")):
+            # A part may already be out (or another sender owns the turn): a retry could deliver twice.
+            # The claim stays open, so the sweep posts one "may be incomplete" notice later.
+            _log_safe("stop delivery: send had started; not retrying")
             return 1
         if isinstance(exc, MID_INSTALL_ERRORS) and not attempt:
             try:
@@ -709,7 +879,22 @@ def finish_stop(data: dict) -> int:
                          "Reply delivery failed; the reply is available in the app.", exc)
         except Exception:
             _log_safe("stop delivery alert failed")
+        if claim is not None:
+            try:
+                with stop_lock(data.get("session_id") or ""):
+                    update_claim(data.get("session_id") or "", turn, done=True)  # the owner was told
+            except OSError:
+                pass
         return 1
+
+
+def _claimed(data: dict, session: str, lines: List[str]) -> bool:
+    """Under the stop lock: take (or continue, with this worker's own token) the claim on this turn."""
+    turn = turn_id(lines)
+    token = take_claim(session, turn, data.get("_claim")) if turn else None
+    if token:
+        data["_claim"] = token  # an install retry of this worker carries it (finish_stop)
+    return token is not None
 
 
 def _finish_stop(data: dict) -> int:
@@ -723,11 +908,8 @@ def _finish_stop(data: dict) -> int:
         return 0
     # A session can stop again before an earlier worker has finished translating.
     # Serialize delivery and the dedupe ledger across those workers.
-    lock_path = private_dir(state_dir() / "stop-locks") / (re.sub(r"[^A-Za-z0-9._-]", "_", session) or "_")
     spoken = None
-    with _worker_gate(), open(lock_path, "a", encoding="utf-8") as lock:
-        os.chmod(lock_path, 0o600)
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _worker_gate(), stop_lock(session):
         lines = read_final_transcript(data, wait=8.0)
         run_send_progress(cfg, session, fast=True)
         blocks = read_blocks(lines)
@@ -741,23 +923,30 @@ def _finish_stop(data: dict) -> int:
         mirror_files(data, lines)
         compact_checked = False
         # A turn that ended on the plan-limit text is never quiet: its offer to move or continue follows the reply.
-        quiet = (cfg.quiet_background_turns and not limit_turn
-                 and background_only_turn(lines, data.get("_answer_to")))
+        quiet = (cfg.quiet_background_turns and not limit_turn and chatter_reply(reply)
+                 and background_only_turn(lines, data.get("_answer_to"), session))
         if quiet and reply and cfg.mirror:  # a reply to a background event only: kept out of the topic
             _mark(session, [k for k, _ in unseen])
             if data.get("transcript_path"):  # a monitor-heavy session still compacts past the threshold
                 from .compact import auto_compact_after_reply
                 auto_compact_after_reply(session, data["transcript_path"])
                 compact_checked = True
+        elif reply and cfg.mirror and not _claimed(data, session, lines):
+            _log_safe("stop delivery: another sender owns this turn; not sent again")
         elif reply and cfg.mirror:
+            turn = turn_id(lines)
             wants = cfg.translate and (fmt.split_summary(reply)[1] is not None or
                                       is_not_target(reply, cfg.target_language))
             title = session_title(data.get("transcript_path"), session) or os.path.basename(data.get("cwd") or "") or "Claude"
-            _mark_started(session, hashlib.sha1("\n".join(k for k, _ in unseen).encode()).hexdigest())
             live_card(session, reply, cfg)  # only a reply the topic shows reaches the card
+            # The claim (taken above, before any send) records the first accepted or queued part: from then
+            # on even this worker's own install retry stays off (an import once failed before any send, and a
+            # "started" mark written up front had skipped the retry).
             code = mirror.run_reply(cfg, title, session or title, reply, wants,
                                     data.get("transcript_path") or "" if cfg.context_footer else "",
-                                    answer_to=data.get("_answer_to"))
+                                    answer_to=data.get("_answer_to"),
+                                    on_accept=lambda: update_claim(session, turn, accepted=True))
+            update_claim(session, turn, done=True)  # delivered, queued, or the owner was alerted
             if code:
                 mirror.alert(cfg, session, "Reply delivery failed; the reply is available in the app.", mirror.last_reply_failure())
             else:
@@ -846,33 +1035,64 @@ def _idle_after_failure(cfg: Config, session: str) -> None:
 
 # --- UserPromptSubmit --------------------------------------------------------
 
-BOARD_HINT = ('Pin board: `ctb board add "<title>" [<url>]` pins a link, `ctb board check "<text>"` adds a checklist '
+TOOLS_HINT = ('Pin board: `ctb board add "<title>" [<url>]` pins a link, `ctb board check "<text>"` adds a checklist '
               'item and `ctb board remind "<text>" [--due "<text>"]` posts something waiting on the owner to this '
               "topic's board (`ctb board done <n>` ticks or clears one). Use it sparingly, only for things the owner "
               "will want to open or act on again. For a yes/no question the owner can tap in the control panel: "
-              '`ctb decide ask "<question>" [--detail "<text>"]`. Live cards in the control panel: '
+              '`ctb decide ask "<question>" [--detail "<text>"]` (add `--routine` only when a yes or no approves '
+              'nothing sensitive, so the owner may also answer it from a phone widget). Live cards in the control panel: '
               '`ctb card progress "<title>" --step "<name>" ... --at <done> --percent <n>` (update it with '
-              '`--id <id>`), `ctb card choice "<question>" --option "<a>" --option "<b>"`, `ctb card ask '
+              '`--id <id>`), `ctb card choice "<question>" --option "<a>" --option "<b>"` (when the options are visual, designs, screenshots or '
+              'pictures, attach one `--image <png|jpg|webp path>` per option, in option order, so the owner sees them '
+              'on the card instead of choosing blind; a session that cannot attach files sends the pictures as one '
+              'message right before the card and names each option in its caption), `ctb card ask '
               '"<question>"`, `ctb card link "<title>" <https-url>`, `ctb card numbers "<title>" --figure '
               '"<label>=<value>"`; `ctb card close <id>` removes one. Close a question when the owner answers it in the topic. An answer in the control panel is the owner\'s '
               'own word and approves exactly what its question names, so a question about a sensitive action must '
-              'name that one action precisely. Context: at a natural break, when the old details are no longer '
-              'needed, `ctb compact --note "<what must be kept>"` asks the bridge to compact this session once '
-              'the turn ends; save anything important (ledger, issue, file) first.')
+              'name that one action precisely.')
+COMPACT_HINT = ('Context: at a natural break, when the old details are no longer '
+                'needed, `ctb compact --note "<what must be kept>"` asks the bridge to compact this session once '
+                'the turn ends; save anything important (ledger, issue, file) first.')
+BOARD_HINT = TOOLS_HINT + " " + COMPACT_HINT
 
 
-def board_hint(n: int, cfg: Config) -> Optional[str]:
+def _addon_store() -> dict:
+    """The add-on switch file, read once per hook call and handed to each _addon_on of that call."""
+    try:
+        from . import addons
+        return addons.read_store()
+    except Exception:
+        return {}
+
+
+def _addon_on(cfg, key: str, default: bool = True, store: Optional[dict] = None) -> bool:
+    """One add-on switch (addons.py); its default when the registry cannot be read or even imported."""
+    try:
+        from . import addons
+        return addons.enabled(cfg, key, store=store)
+    except Exception:
+        return default
+
+
+def board_hint(n: int, cfg: Config, store: Optional[dict] = None) -> Optional[str]:
     """The board reminder, on a session's first prompt and then with every topic check; only where a board
     can exist (a topic in a forum group)."""
     from .pins import SUPERGROUP_PREFIX
     if (n == 1 or n % 8 == 0) and str(home_chat(cfg)).startswith(SUPERGROUP_PREFIX):
         from .bank import hint as bank_hint
         saved = bank_hint()
-        return BOARD_HINT + (" " + saved if saved else "")
+        parts = []
+        if _addon_on(cfg, "cockpit_hint", store=store):
+            parts.append(TOOLS_HINT)
+        if _addon_on(cfg, "compact_helper", store=store):
+            parts.append(COMPACT_HINT)
+        if saved:
+            parts.append(saved)
+        return " ".join(parts) or None
     return None
 
 
-def topic_check_hint(session: str, cfg: Config) -> Optional[str]:
+def topic_check_hint(session: str, cfg: Config, store: Optional[dict] = None) -> Optional[str]:
     """Every 8th prompt in a session, remind the model to check if the topic name still fits; the pin
     board reminder rides along (and also opens the session)."""
     if not session:
@@ -885,7 +1105,7 @@ def topic_check_hint(session: str, cfg: Config) -> Optional[str]:
     except Exception:
         n = 1
     write_private(count_file, str(n))
-    board = board_hint(n, cfg)
+    board = board_hint(n, cfg, store)
     if n % 8 != 0 or getattr(cfg, "auto_topic_names", False) or not getattr(cfg, "topic_check_reminders", False):
         return board  # with auto-naming the bridge keeps the name current; a session rename would lock it
     from .topics import TopicMap, session_name, session_override_name
@@ -905,7 +1125,7 @@ def topic_check_hint(session: str, cfg: Config) -> Optional[str]:
             + (" " + board if board else ""))
 
 
-def prompt_output(data: dict, cfg: Config) -> Optional[dict]:
+def prompt_output(data: dict, cfg: Config, store: Optional[dict] = None) -> Optional[dict]:
     s = L.strings("en")
     parts = []
     if cfg.translate:
@@ -913,7 +1133,9 @@ def prompt_output(data: dict, cfg: Config) -> Optional[dict]:
                                                     target=L.lang_name(cfg.target_language)))
     elif cfg.enforce_language:
         parts.append(s["reminder_enforce"].format(target=L.lang_name(cfg.target_language)))
-    if cfg.extra_reminder:
+    if store is None:
+        store = _addon_store()
+    if cfg.extra_reminder and _addon_on(cfg, "rules_reminder", store=store):
         parts.append(cfg.extra_reminder)
     deadline = hook_deadline()
     if data.get("session_id"):
@@ -922,7 +1144,7 @@ def prompt_output(data: dict, cfg: Config) -> Optional[dict]:
         except OSError:
             pass  # a stuck lock: the old target expires by itself (ten minutes)
     if data.get("session_id") and not is_loop_prompt(data.get("prompt", "")):
-        hint = topic_check_hint(data["session_id"], cfg)
+        hint = topic_check_hint(data["session_id"], cfg, store)
         if hint:
             parts.append(hint)
     msgs = telegram_messages(data.get("session_id") or "", data=data, via="prompt", until=deadline) if cfg.ready else []
@@ -1022,10 +1244,17 @@ def hook_prompt(stdin_text: str) -> int:
             print(json.dumps({"decision": "block", "reason": EMPTY_WAKE}))
             return 0
         if isinstance(session, str):
+            if (session and not data.get("agent_id") and isinstance(prompt, str) and prompt.strip()
+                    and not is_wake_prompt(prompt) and not is_loop_prompt(prompt)
+                    and not prompt.lstrip().startswith(NOT_OWNER_PROMPT)):
+                from .inbox import clear_nudge_pause, was_typed
+                if not was_typed(prompt):
+                    clear_nudge_pause(session)
             main_turn_active(session)
             _clear_ask(session)  # a new owner prompt means no question is pending any more
             _direct(data)
         if (isinstance(session, str) and session and isinstance(prompt, str) and prompt.strip()
+                and not prompt.lstrip().startswith(NOT_OWNER_PROMPT)
                 and isinstance(cwd, str) and cwd and not session_name(session)):
             save_session_name(session, name_for_task(cwd, prompt, _project_label(cwd)))
         cfg = load_config()
@@ -1035,7 +1264,7 @@ def hook_prompt(stdin_text: str) -> int:
             except Exception:
                 pass
             if (isinstance(prompt, str) and prompt.strip()
-                    and not prompt.lstrip().startswith(("<", "[Owner message", "[Owner messages"))
+                    and not prompt.lstrip().startswith(NOT_OWNER_PROMPT)
                     and not is_loop_prompt(prompt)):
                 from .inbox import was_typed
                 if not was_typed(prompt):
@@ -1052,15 +1281,23 @@ def hook_prompt(stdin_text: str) -> int:
                 turn_started(sid, background=background_soon(path) if check else 0)
         except Exception:
             pass
-        out = prompt_output(data, cfg)
+        store = _addon_store()  # one read of the add-on switches for this whole hook call
+        out = prompt_output(data, cfg, store)
         try:
             if not data.get("agent_id") and cfg.ready:
-                out = with_reminder(out, progress_nudge(session), "UserPromptSubmit")
+                out = with_reminder(out, progress_nudge(session, store=store), "UserPromptSubmit")
+        except Exception:
+            pass
+        try:  # owner rules or skills changed since this session loaded them: one line, once per change
+            if not data.get("agent_id") and cfg.ready and isinstance(session, str) and session:
+                from . import recall
+                out = with_reminder(out, recall.prompt_notice(session), "UserPromptSubmit")
         except Exception:
             pass
         try:
-            from .title_sync import with_title
-            out = with_title(out, data)  # the topic's name becomes the session's title too
+            if _addon_on(cfg, "title_sync", store=store):
+                from .title_sync import with_title
+                out = with_title(out, data)  # the topic's name becomes the session's title too
         except Exception:
             pass  # a title is never worth the prompt's own context
     except Exception:
@@ -1133,11 +1370,12 @@ def typing(session: str, cfg: Config) -> None:
     spawn(["typing", f"--session={session}"])
 
 
-def periodic_reminder(session: str, transcript: str, cfg: Config, now: Optional[float] = None) -> str:
+def periodic_reminder(session: str, transcript: str, cfg: Config, now: Optional[float] = None,
+                      store: Optional[dict] = None) -> str:
     """The `periodic_reminder` sentence, at most once per `periodic_reminder_minutes` per session and
     only once the transcript is long (`periodic_reminder_min_kb`). "" when off, too soon or too short."""
     text = getattr(cfg, "periodic_reminder", "")
-    if not text or not session or not transcript:
+    if not text or not session or not transcript or not _addon_on(cfg, "rules_reminder", store=store):
         return ""
     now = time.time() if now is None else now
     mark = state_dir() / "reminder" / (re.sub(r"[^A-Za-z0-9._-]", "_", session) or "_")
@@ -1160,7 +1398,6 @@ def periodic_reminder(session: str, transcript: str, cfg: Config, now: Optional[
 PROGRESS_AFTER = 3 * 60     # a turn this long counts as a long task
 PROGRESS_TOOLS = 25         # so does a turn with this many tool calls
 PROGRESS_EVERY = 10 * 60    # at most one "show a progress card" reminder per session this often
-PROGRESS_STALE = cards.PROGRESS_STALE_AFTER    # a progress card not touched this long while the session works gets a nudge to update it
 PROGRESS_NUDGE = ('The owner follows this work on a phone and this session is on a long task with no progress '
                   'card of its own. Show one now: `ctb card progress "<short title>" --step "<name>" --step "<name>" '
                   "... --at <finished steps> --percent <n>` (3 to 6 short steps, in the owner's language), then keep "
@@ -1289,10 +1526,10 @@ def long_task(state: dict, now: float, tools: int = 0, background: bool = False)
             or tools >= PROGRESS_TOOLS)
 
 
-def progress_nudge(session: str, now: Optional[float] = None) -> str:
+def progress_nudge(session: str, now: Optional[float] = None, store: Optional[dict] = None) -> str:
     """_progress_nudge under the session's turn lock, so a reminder is claimed once however many hooks of the
     session run at the same time. "" when another hook holds the lock (it decides for both)."""
-    if not session:
+    if not session or not _addon_on(None, "progress_reminder", store=store):
         return ""
     try:
         with _turn_locked(session):
@@ -1307,7 +1544,6 @@ def _progress_nudge(session: str, now: Optional[float] = None) -> str:
     PROGRESS_STALE). The bridge's automatic card does not count as the session's own. "" when it is too soon,
     when the owner chose the quiet activity level, or when the card is fresh. One small read per tool call
     until the turn is long."""
-    from . import cards
     from .config import activity_level
     now = time.time() if now is None else now
     mark = _turn_mark(session)
@@ -1425,15 +1661,18 @@ def hook_post(stdin_text: str) -> int:
         # reminder are for the main conversation, so they wait for its next step (one
         # reached a writer agent). Only a lone owner stop word is delivered to an agent too, so it halts.
         main = not data.get("agent_id")
+        store = _addon_store() if main else {}  # one read of the add-on switches for this hook call
         try:
-            reminder = periodic_reminder(session, data.get("transcript_path") or "", cfg) if main else ""
+            reminder = periodic_reminder(session, data.get("transcript_path") or "", cfg, store=store) if main else ""
         except Exception:
             reminder = ""
-        out = post_output(data, cfg, stop_only=not main) if default_inbox().pending(session) else None
+        # Inbox.pending is this one stat; asking it here would load the whole inbox module for every tool call.
+        queued = (inbox_dir() / (safe_name(session) + ".jsonl")).exists()
+        out = post_output(data, cfg, stop_only=not main) if queued else None
         try:
             if main:
                 tool_called(session, launches_background(data))
-            nudge = progress_nudge(session) if main and cfg.ready else ""
+            nudge = progress_nudge(session, store=store) if main and cfg.ready else ""
         except Exception:
             nudge = ""
         reminder = "\n\n".join(x for x in (reminder, nudge) if x)
@@ -1644,13 +1883,20 @@ def load_config() -> Config:
 
 # -- usage and quota helpers shared with the other modules --------------------
 
-claude_account = usage.claude_account
-claude_usage_file = usage.claude_usage_file
-claude_five_hour = usage.claude_five_hour
-quota_lines = usage.quota_lines
-quota_rows = usage.quota_rows
-context_footer = usage.context_footer
-unmix = fmt.unmix
-wrap_reset = fmt.wrap_reset
-from .translate import job_hebrew, mostly_english_label  # noqa: E402
+_LAZY_NAMES = {"PROGRESS_STALE": "cards", "claude_account": "usage", "claude_usage_file": "usage", "claude_five_hour": "usage", "quota_lines": "usage",
+               "quota_rows": "usage", "context_footer": "usage", "unmix": "fmt", "wrap_reset": "fmt"}
+
+
+def __getattr__(name: str):
+    """The names other modules and the tests take from here, resolved on first use (see _Lazy)."""
+    if name in _LAZY_NAMES:
+        # PROGRESS_STALE: a progress card not touched this long while the session works gets a nudge to update it
+        value = getattr(globals()[_LAZY_NAMES[name]], "PROGRESS_STALE_AFTER" if name == "PROGRESS_STALE" else name)
+    elif name in ("job_hebrew", "mostly_english_label"):
+        from . import translate
+        value = getattr(translate, name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
 

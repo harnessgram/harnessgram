@@ -41,6 +41,18 @@ ask({cockpit: "hello"});
 </script>"""
 
 
+def app_token_reply(route, status=200):
+    """Answer POST /api/app-token the way the real server does ({"token", "expires"}), or with `status` as a failure.
+    Every mocked-route browser test that shows an app tab must serve it, or the frame never gets a src."""
+    import time
+    if status != 200:
+        route.fulfill(status=status, content_type="application/json", body=json.dumps({"error": "unavailable"}))
+        return
+    route.fulfill(content_type="application/json", headers={"Cache-Control": "no-store"},
+                  body=json.dumps({"token": "app1.sample.1.%d.%s" % (time.time() + 600, "0" * 64),
+                                   "expires": int(time.time()) + 600}))
+
+
 def prepare_env():
     """The test run swaps HOME for a private folder, so point Playwright at the account's own browser cache."""
     if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
@@ -72,7 +84,11 @@ def open_panel(browser, srv, init, lang="en", width=390, height=844, scheme="lig
 
 def app_frame(page, name="sample"):
     page.wait_for_selector("iframe.appframe")
-    for fr in page.frames:
-        if fr.url.startswith("http://127.0.0.1") and ("/app/%s/" % name) in fr.url:
-            return fr
+    # The frame is attached once its scoped token arrives, and its URL is only set when the navigation commits:
+    # poll for it instead of reading page.frames once (a loaded machine made the single read flaky).
+    for _ in range(100):
+        for fr in page.frames:
+            if fr.url.startswith("http://127.0.0.1") and ("/app/%s/" % name) in fr.url:
+                return fr
+        page.wait_for_timeout(100)
     raise AssertionError("the app frame did not load")

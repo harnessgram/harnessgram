@@ -454,6 +454,7 @@ textarea.field{min-block-size:84px}
 .err-h small{display:block;font-size:13px;color:var(--hint)}
 .why-box{margin-block-start:12px;padding:10px 12px;border-radius:12px;background:var(--soft);font-size:14px;line-height:1.5}
 .why-box b{font-weight:750}
+.err-code{display:block;margin-block-start:8px;color:var(--muted,#6b7280);font-size:12px;font-variant-numeric:tabular-nums}
 .sk{background:linear-gradient(90deg,var(--soft) 0 40%,color-mix(in srgb,var(--soft) 40%,transparent) 50%,var(--soft) 60%) 0 0/300% 100%;border-radius:10px;animation:sh 1.4s linear infinite}
 @keyframes sh{to{background-position:-300% 0}}
 .sk.l{block-size:14px;margin-block:8px}.sk.l.s{inline-size:55%}.sk.l.m{inline-size:75%}

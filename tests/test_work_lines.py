@@ -24,7 +24,7 @@ def test_the_ledger_folder_gives_checked_rows(tmp_path):
     rows = W.LedgerProvider(folder=tmp_path).items(0)
     assert [r["id"] for r in rows] == ["1", "2", "6"]
     assert rows[0] == {"line": "studio", "name": "Studio", "id": "1", "text": "Build the filters board", "status": "open",
-                       "wait": "", "updated": 100.0, "note": "b"}
+                       "wait": "", "updated": 100.0, "note": "b", "impact": ""}
     assert rows[1]["wait"] == "owner" and rows[1]["updated"] == 50.0
     assert len(rows[2]["text"]) == W.TEXT_CHARS and rows[2]["text"].endswith("…")
 

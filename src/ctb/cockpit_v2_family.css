@@ -1,0 +1,74 @@
+/* The family board: today's block inside "My schedule", the board sheet and the A4 print view. Logical properties only. */
+.cockpit-v2 .fb-block{margin-block-start:var(--v2-section);padding-block-start:var(--v2-gap);border-block-start:1px solid var(--v2-line);min-inline-size:0}
+.cockpit-v2 .fb-head{display:flex;align-items:center;justify-content:space-between;gap:var(--v2-gap-sm);margin-block-end:var(--v2-gap-sm)}
+.cockpit-v2 .fb-title{display:flex;align-items:center;gap:7px;min-inline-size:0;margin:0;font-size:18px;font-weight:850;line-height:1.3}
+.cockpit-v2 .fb-title svg{flex:none;inline-size:22px;block-size:22px;color:var(--v2-blue)}
+.cockpit-v2 .fb-title span{overflow-wrap:anywhere}
+.cockpit-v2 .fb-open{flex:none;min-block-size:44px;padding-inline:14px;border-radius:var(--v2-pill)}
+.cockpit-v2 .fb-group{margin-block-end:var(--v2-gap-sm)}
+.cockpit-v2 .fb-sub{margin:0 0 6px;font-size:14px;font-weight:800;color:var(--v2-muted);overflow-wrap:anywhere}
+.cockpit-v2 .fb-rows{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--v2-gap-sm)}
+.cockpit-v2 .fb-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:var(--v2-gap-sm);min-block-size:48px;padding-block:6px;padding-inline:var(--v2-pad-sm);border-radius:var(--v2-small);background:var(--v2-soft)}
+.cockpit-v2 .fb-row.plain{grid-template-columns:minmax(0,1fr) auto}
+.cockpit-v2 .fb-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;min-inline-size:0;overflow-wrap:anywhere;font-size:16px;line-height:1.35;text-align:start}
+.cockpit-v2 .fb-row.done .fb-text{text-decoration:line-through;color:var(--v2-muted)}
+.cockpit-v2 .fb-check,.cockpit-v2 .fb-edit{inline-size:44px;block-size:44px;display:grid;place-items:center;border:1px solid var(--v2-line);border-radius:50%;background:var(--v2-glass);color:var(--v2-blue);padding:0}
+.cockpit-v2 .fb-check.on{background:var(--v2-success);color:var(--v2-green)}
+.cockpit-v2 .fb-check:disabled{opacity:.5}
+.cockpit-v2 .fb-edit{border-color:transparent;background:transparent;color:var(--v2-muted)}
+.cockpit-v2 .fb-check svg,.cockpit-v2 .fb-edit svg{inline-size:22px;block-size:22px}
+.cockpit-v2 .fb-empty,.cockpit-v2 .fb-note{margin:0}
+.cockpit-v2 .fb-retry{min-block-size:44px;margin-block-start:var(--v2-gap-sm)}
+.cockpit-v2 .fb-sheet{color:var(--v2-ink);padding:var(--v2-pad)}
+:root.cockpit-v2[data-theme="dark"] .fb-sheet{background:var(--v2-page)}
+.cockpit-v2 .fb-hint{margin-block:8px 0;color:var(--v2-muted);font-size:15px}
+.cockpit-v2 .fb-tools{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--v2-gap-sm);margin-block-start:var(--v2-gap-sm)}
+.cockpit-v2 .fb-print,.cockpit-v2 .fb-page{min-block-size:44px;display:inline-flex;align-items:center;gap:6px}
+.cockpit-v2 .fb-print svg,.cockpit-v2 .fb-page svg{inline-size:18px;block-size:18px}
+.cockpit-v2 .fb-tabs{display:flex;gap:6px;margin-block:var(--v2-gap-sm)}
+.cockpit-v2 .fb-tab{flex:1 1 0;min-inline-size:0;min-block-size:44px;padding-inline:6px;border:1px solid var(--v2-line);border-radius:var(--v2-pill);background:var(--v2-soft);color:var(--v2-ink);font:inherit;font-weight:700;overflow-wrap:anywhere}
+.cockpit-v2 .fb-tab.on,.cockpit-v2 .fb-daytab.on{background:var(--v2-blue);border-color:var(--v2-blue-deep);color:#fff}
+.cockpit-v2 .fb-daytabs{display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:6px;margin-block-end:var(--v2-gap-sm)}
+.cockpit-v2 .fb-daytab{min-inline-size:0;min-block-size:44px;padding-inline:6px;border:1px solid var(--v2-line);border-radius:var(--v2-pill);background:var(--v2-soft);color:var(--v2-ink);font:inherit;font-weight:700;overflow-wrap:anywhere}
+.cockpit-v2 .fb-daytab.today:not(.on){border-color:var(--v2-blue)}
+.cockpit-v2 .fb-day:not(.on){display:none}
+.cockpit-v2 .fb-dayname{display:flex;align-items:baseline;gap:8px;margin:0 0 8px;font-size:17px;font-weight:850}
+.cockpit-v2 .fb-today{font-size:12px;font-weight:700;color:var(--v2-blue)}
+.cockpit-v2 .fb-add,.cockpit-v2 .fb-clear{min-block-size:44px;display:inline-flex;align-items:center;gap:6px;margin-block-start:var(--v2-gap-sm)}
+.cockpit-v2 .fb-add svg{inline-size:18px;block-size:18px}
+.cockpit-v2 .fb-bar{display:flex;flex-wrap:wrap;gap:var(--v2-gap-sm)}
+.cockpit-v2 .fb-undo{display:flex;flex-wrap:wrap;align-items:center;gap:var(--v2-gap-sm);margin-block-start:var(--v2-gap-sm);padding:var(--v2-pad-sm);border-radius:var(--v2-small);background:var(--v2-soft)}
+.cockpit-v2 .fb-undo[hidden]{display:none}
+.cockpit-v2 .fb-undo-text{flex:1 1 140px;min-inline-size:0;overflow-wrap:anywhere}
+.cockpit-v2 .fb-undo-btn{min-block-size:44px}
+.cockpit-v2 .fb-editor{margin-block-start:var(--v2-gap-sm)}
+.cockpit-v2 .fb-edit-title{margin:12px 0 0;font-size:16px}
+.cockpit-v2 .fb-field{inline-size:100%;box-sizing:border-box;min-block-size:60px;margin-block-start:8px}
+.cockpit-v2 .fb-actions{display:flex;flex-wrap:wrap;gap:10px;margin-block-start:10px}
+.cockpit-v2 .fb-save,.cockpit-v2 .fb-cancel,.cockpit-v2 .fb-delete{min-block-size:44px;display:inline-flex;align-items:center;gap:6px}
+.cockpit-v2 .fb-out{margin-block-start:8px;color:var(--v2-no-ink);font-size:14px;overflow-wrap:anywhere}
+:root.cockpit-v2[data-theme="dark"] .fb-tab.on,:root.cockpit-v2[data-theme="dark"] .fb-daytab.on{color:#fff}
+@media(min-width:700px){
+ .cockpit-v2 .fb-sheet{max-inline-size:min(980px,calc(100% - 48px))}
+ .cockpit-v2 .fb-daytabs{display:none}
+ .cockpit-v2 .fb-days{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:var(--v2-gap)}
+ .cockpit-v2 .fb-day:not(.on){display:block}
+ .cockpit-v2 .fb-day{padding:var(--v2-pad-sm);border:1px solid var(--v2-line);border-radius:var(--v2-small);min-inline-size:0}
+}
+/* print: one A4 page in Hebrew, no images; everything else on the page is hidden */
+.cockpit-v2 .fbp-page{display:none}
+@media print{
+ @page{size:A4;margin:10mm}
+ .cockpit-v2 body.fb-printing>*:not(#fb-print){display:none!important}
+ .cockpit-v2 body.fb-printing{background:#fff;color:#000;padding-inline:0;max-inline-size:none}
+ .cockpit-v2 body.fb-printing .fbp-page{display:block;color:#000;background:#fff;font-size:10.5pt;line-height:1.25}
+ .fbp-head{text-align:center;margin-block-end:6mm}
+ .fbp-head h1{margin:0;font-size:20pt}.fbp-head p{margin:2mm 0 0;font-size:10pt}
+ .fbp-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4mm;margin-block-end:4mm}
+ .fbp-low{grid-template-columns:repeat(2,minmax(0,1fr));break-before:page}
+ .fbp-box{border:1px solid #000;border-radius:2mm;padding:3mm;break-inside:avoid;min-inline-size:0}
+ .fbp-h{margin:0 0 2mm;font-size:12pt;border-block-end:1px solid #000;padding-block-end:1mm}
+ .fbp-rows{list-style:none;margin:0;padding:0}
+ .fbp-row{display:flex;gap:2mm;align-items:flex-start;margin-block-end:1.5mm;overflow-wrap:anywhere}
+ .fbp-mark{flex:none;inline-size:3.5mm;block-size:3.5mm;border:1px solid #000;margin-block-start:.5mm}
+}

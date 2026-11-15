@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Tuple
 from .compact import AUTO_COMPACT_STEPS, auto_compact_limit, set_auto_compact_limit
 from .config import (ACTIVITY_LEVELS, AGENT_NOTICES, STATUS_REPOST, activity_level, set_activity_level,
                      set_setting, setting_on)
+from . import cockpit_v2
 
 
 def _general_off() -> str:
@@ -80,12 +81,12 @@ def _away_set(on: bool) -> None:
     autopilot.set_away(on)
 
 
-def _config_get(name: str) -> bool:
+def _config_get(name: str) -> Any:
     from .config import load
     return getattr(load(), name)
 
 
-def _config_set(name: str, value: bool) -> None:
+def _config_set(name: str, value: Any) -> None:
     from .config import load, save_changes
     load()  # migrate before changing a value
     save_changes({}, {name: value})
@@ -103,11 +104,15 @@ def _brief_set(on: bool) -> None:
 
 # name: (reader, writer, allowed values); a bool setting allows (False, True)
 SETTINGS: Dict[str, Tuple[Callable[[], Any], Callable[[Any], None], tuple]] = {
+    "ui_v2": (cockpit_v2.mode, cockpit_v2.set_mode, cockpit_v2.MODES),
     **{name: (lambda n=name: _config_get(n), lambda value, n=name: _config_set(n, value), (False, True))
        for name in ("auto_account_switch", "quota_auto_continue", "session_auto_revive", "progress", "progress_details", "auto_topic_names")},
+    "voice_digest": (lambda: _config_get("voice_digest"), lambda v: _config_set("voice_digest", v),
+                     ("off", "important", "hourly", "every_3_hours")),
     "voice_confirm": (_voice_get, _voice_set, (False, True)),
     "delivery_end": (_delivery_get, _delivery_set, (False, True)),
     "auto_compact": (auto_compact_limit, set_auto_compact_limit, tuple(AUTO_COMPACT_STEPS)),
+    "cold_compact": (lambda: _config_get("cold_compact"), lambda v: _config_set("cold_compact", v), ("on", "off")),
     "away": (_away_get, _away_set, (False, True)),
     # how much of an agent's work its topic shows while it works (config.activity_level)
     "activity": (activity_level, set_activity_level, ACTIVITY_LEVELS),

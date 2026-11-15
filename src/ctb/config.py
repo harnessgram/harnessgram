@@ -12,7 +12,6 @@ import contextlib
 import fcntl
 import fnmatch
 import json
-import logging
 import math
 import os
 import re
@@ -23,7 +22,10 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from .telegram import DEFAULT_API, TOKEN_RE, download_limit, upload_limit, valid_api_base
+# The radio config key of the shared child-suitability file (read by other stations as a fallback).
+RADIO_SUITABILITY_KEY = "room_suitability_file"
+
+from .telegram_basics import DEFAULT_API, TOKEN_RE, download_limit, upload_limit, valid_api_base
 
 HOME = Path.home()
 
@@ -40,8 +42,19 @@ def state_dir() -> Path:
     return Path(os.environ.get("CTB_STATE_DIR") or HOME / ".local" / "state" / "claude-telegram-bridge")
 
 
+def inbox_dir() -> Path:
+    """Where each session's queue of owner messages is kept (inbox.Inbox; a queue exists only while it holds
+    messages)."""
+    return state_dir() / "inbox"
+
+
 def config_path() -> Path:
     return config_dir() / "config.json"
+
+
+def safe_name(value: str) -> str:
+    """A session id or file name part that cannot escape its directory."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value or "")[:120] or "_"
 
 
 def private_dir(path: Path) -> Path:
@@ -378,9 +391,47 @@ class Config:
     gemini_fallback_model: str = ""
     # Team radio (`ctb radio`): a narrated live stream in the home group. Off unless configured; see docs/radio.md.
     radio: dict = field(default_factory=dict)
+    # Podcast feeds the owner lets the radio play (radio_podcast.py, docs/radio.md): a list of
+    # {"name": "...", "url": "https://..."}. Empty: only single episode links can be queued.
+    radio_podcasts: list = field(default_factory=list)
+    # Deterministic batches of the radio's spoken replies, delivered as private voice notes.
+    voice_digest: str = "important"
+    # Local recurring Sabbath window; add dated holiday windows (see docs/radio.md).
+    voice_digest_quiet_windows: list = field(default_factory=lambda: [
+        {"start": "fri 12:00", "end": "sun 00:00"}])
     # The Cockpit's Morning Brief (brief.py, docs/panel.md): where its work lines come from ("ledger_dir" or
     # "ledger_command"; the radio's ledger_dir otherwise), "project_names", and an optional "events_file".
     brief: dict = field(default_factory=dict)
+    # The idle-line nudger (idle_lines.py): "on" (default true), "hours" (default 4) and "leads"
+    # ({"<ledger project>": "<session id>"}): only listed leads get the short nudge line; the Cockpit shows all.
+    idle_lines: dict = field(default_factory=dict)
+    # The per-project work map (work_map.py) and the morning briefing (briefing.py, docs/panel.md). "work_map":
+    # optional "ledger_dir" and "leads" ({"<project>": "<session id>"}); "briefing": "time" (HH:MM in `timezone`,
+    # default 07:00). Their on/off switches are the add-ons "work_map" and "morning_briefing" (addons.py).
+    work_map: dict = field(default_factory=dict)
+    briefing: dict = field(default_factory=dict)
+    # What the system knows (knowledge.py, docs/knowledge.md): where the agents' rules, memories, skills, tools
+    # and docs live, the overlay file for switched-off items and extra locked safety rules. Every key is optional.
+    knowledge: dict = field(default_factory=dict)
+    # Personal-assistant sessions (assistant.py, docs/panel.md): {"sessions": ["<session id or 8+ char prefix>"]}.
+    # They launch without sending tools: they prepare drafts and cards, the owner sends.
+    assistant: dict = field(default_factory=dict)
+    # The owner's "request an app" action (app_request.py): a command that takes one App Store link, id or app name as its
+    # last argument. Empty hides the action everywhere.
+    app_request_command: List[str] = field(default_factory=list)
+    # The owner's personal schedule (schedule.py, docs/panel.md): the time zone that "today", "tomorrow" and clock times
+    # mean, and optional read-only calendar sources (an https:// link to a private .ics feed or an absolute .ics path).
+    timezone: str = "Asia/Jerusalem"
+    schedule_sources: List[str] = field(default_factory=list)
+    # The family board's Shabbat window (shabbat_times.py, docs/panel.md): optional "latitude", "longitude",
+    # "candle_minutes" (18 to 40) and "nightfall_minutes" (20 to 90); empty means the Jerusalem area, 40 and 42.
+    family_shabbat: dict = field(default_factory=dict)
+    # The owner's Google Calendar, read only, behind a "Connect with Google" button (google_calendar.py): the Keychain
+    # items of a Web OAuth client and the calendars to read. Empty (default) hides the button.
+    google_calendar: dict = field(default_factory=dict)
+    # The owner's Mac maintenance tools (mac_tools.py, docs/panel.md): argv lists "clean_dry_run", "clean",
+    # "maintenance" and an optional "maintenance_log" path. Empty hides the Tools tile and its routes.
+    mac_tools: dict = field(default_factory=dict)
     # Optional trusted local Studio data adapter; empty keeps the built-in sample.
     studio_adapter: str = ""
     # Read-only media folder; empty uses the adapter's MEDIA_ROOT when provided.
@@ -400,6 +451,8 @@ class Config:
     # Hard daily budget of Gemini requests for topic names (every route attempt counts, failed ones too; shared by
     # the listener and the CLI). 0 = never ask Gemini; names then come from the first request only.
     topic_names_daily_calls: int = 150
+    # Days without any session activity before a topic is offered for closing in the Cockpit (topic_cleanup.py).
+    topic_cleanup_days: int = 14
     # Folder or repository name prefix -> project label for topic names ({"my-app": "My app"}). Empty = none.
     topic_project_names: dict = field(default_factory=dict)
     # Project label -> one line on what it is about, so a session started in the projects root is placed well.
@@ -417,11 +470,12 @@ class Config:
     # Large files (over the upload limit, 45 MB on the cloud server) are never uploaded: with this https base URL set they are placed in a
     # private share directory and only the link is sent. Empty (default) = the feature is off.
     share_base_url: str = ""
-    panel_base_url: str = ""  # the Cockpit's own public https origin (the YouTube sign-in returns there)
+    panel_base_url: str = ""  # the Cockpit's own public https origin (the YouTube and Google sign-ins return there)
     # A small "context size" line under the last message of each reply, with a /compact hint from
     # this many tokens up (0 = never hint).
     context_footer: bool = True
     context_hint_tokens: int = 400_000
+    cold_compact: str = "on"  # compact before an owner message after the one-hour API cache lifetime
     # Cache translations on disk (private folder) so the hook and the mirror translate a text once.
     translate_cache: bool = True
     # Live progress: edit one message with recent tool calls while working, delete when done.
@@ -440,6 +494,8 @@ class Config:
     extra_reminder: str = ""
     # Voice summary in car mode (read summary aloud with TTS)
     voice: bool = True
+    # A "listen" button under each final reply in a topic: a voice note of that one reply, on request
+    listen_button: bool = True
     # Folder where Claude Code projects live. The /new picker lists recent projects under it and new
     # sessions start here when no folder is known. Default: your home directory.
     projects_root: str = ""
@@ -547,12 +603,15 @@ def from_dict(raw: dict) -> Config:
     for key, value in raw.items():
         if key not in known:
             continue  # ignore unknown keys: newer config, older program
+        if key == "cold_compact" and value not in ("on", "off"):
+            raise ConfigError("cold_compact must be on or off")
         if key == "bot_token":
             value = str(value).strip()
             if value and not TOKEN_RE.match(value):  # never echo the value: it is a secret
                 raise ConfigError("bot_token has an invalid format (expected 123456:ABC...)")
         elif key in ("max_queue", "cleanup_days", "context_hint_tokens", "periodic_reminder_minutes",
-                     "periodic_reminder_min_kb", "pin_limit", "topic_names_daily_calls"):
+                     "periodic_reminder_min_kb", "pin_limit", "topic_names_daily_calls",
+                     "topic_cleanup_days"):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ConfigError(f"{key} must be a whole number, 0 or more")
         elif key == "owner_chat_id":
@@ -593,12 +652,58 @@ def from_dict(raw: dict) -> Config:
             if value and not value.startswith("https://"):
                 raise ConfigError("share_base_url must be an https:// URL (a share link must be secure)")
         elif key in ("engines", "stop_words", "bot_token_command", "gemini_token_command", "gemini_key_command",
-                     "codex_attached_sessions"):
+                     "codex_attached_sessions", "app_request_command"):
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise ConfigError(f"{key} must be a list of strings")
-        elif key in ("radio", "brief"):
+        elif key == "radio_podcasts":
+            ok = isinstance(value, list) and all(
+                isinstance(v, dict) and isinstance(v.get("name"), str) and v["name"].strip()
+                and isinstance(v.get("url"), str) and v["url"].startswith("https://") for v in value)
+            if not ok:
+                raise ConfigError('radio_podcasts must be a list of objects like {"name": "...", "url": "https://..."}')
+        elif key == "timezone":
+            from .schedule import valid_timezone
+            if not isinstance(value, str) or not valid_timezone(value):
+                raise ConfigError("timezone must be an IANA name such as Asia/Jerusalem")
+        elif key == "schedule_sources":
+            from .schedule import valid_sources
+            if not valid_sources(value):
+                raise ConfigError("schedule_sources must be a list of https:// links or absolute .ics paths")
+        elif key == "family_shabbat":
+            from .shabbat_times import valid_settings
+            if not valid_settings(value):
+                raise ConfigError("family_shabbat must hold latitude, longitude, candle_minutes (18-40) and nightfall_minutes (20-90)")
+        elif key == "google_calendar":
+            from .google_calendar import valid_section as valid_google
+            if not valid_google(value):
+                raise ConfigError('google_calendar must be {"client_id_keychain": [service, account], '
+                                  '"client_secret_keychain": [service, account], "calendars": ["primary"]}')
+        elif key == "voice_digest":
+            if not isinstance(value, str) or value not in ("off", "important", "hourly", "every_3_hours"):
+                raise ConfigError("voice_digest must be off, important, hourly or every_3_hours")
+        elif key == "voice_digest_quiet_windows":
+            from .voice_digest import valid_windows
+            if not valid_windows(value):
+                raise ConfigError("voice_digest_quiet_windows must contain valid start/end windows")
+        elif key in ("radio", "brief", "idle_lines", "work_map"):
             if not isinstance(value, dict):
                 raise ConfigError(f"{key} must be an object")
+        elif key == "briefing":
+            from .briefing import valid_section as valid_briefing
+            if not valid_briefing(value):
+                raise ConfigError('briefing must be an object like {"time": "07:00"}')
+        elif key == "knowledge":
+            from .knowledge import valid_section as valid_knowledge
+            if not valid_knowledge(value):
+                raise ConfigError("knowledge must be an object (see docs/knowledge.md)")
+        elif key == "mac_tools":
+            from .mac_tools import valid_section as valid_mac_tools
+            if not valid_mac_tools(value):
+                raise ConfigError('mac_tools must be an object of absolute-path argv lists: "clean_dry_run", "clean", "maintenance"')
+        elif key == "assistant":
+            from .assistant import valid_section
+            if not valid_section(value):
+                raise ConfigError('assistant must be an object like {"sessions": ["<session id>"]}')
         elif key in ("topic_project_names", "topic_project_about"):
             if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
                 raise ConfigError(f"{key} must be an object of strings")
@@ -706,6 +811,7 @@ def load(path: Optional[Path] = None) -> Config:
                 try:
                     save_raw(raw, path)
                 except OSError as exc:
+                    import logging
                     logging.getLogger(__name__).warning("Could not save migrated settings: %s", exc)
     cfg = from_dict(raw)
     from .i18n import set_lang

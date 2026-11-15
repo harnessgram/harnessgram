@@ -224,9 +224,9 @@ def test_the_token_goes_only_in_the_header(monkeypatch):
     assert seen["headers"]["Anthropic-beta"] == "oauth-2025-04-20"
 
 
-@pytest.mark.parametrize("expires", [(time.time() - 60) * 1000, None])
+@pytest.mark.parametrize("expires", ["expired", None])
 def test_a_401_with_an_expired_or_undated_token_is_not_signed_out(trio, monkeypatch, expires):
-    trio.expires["account2"] = expires
+    trio.expires["account2"] = (time.time() - 60) * 1000 if expires == "expired" else None
     monkeypatch.setattr(accounts, "auth_status", lambda n, timeout=30: {"email": "cli2@example.com", "loggedIn": True}
                         if n == "account2" else {})
     accounts.refresh_emails(now=NOW, only=["account2"])

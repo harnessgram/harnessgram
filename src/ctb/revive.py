@@ -27,6 +27,14 @@ FRESH = 15 * 60  # the record must have been written this soon before the boot (
 CRASH_MIN = 2  # a tmux crash closes them all at once; closing by hand goes one at a time
 CRASH_EVERY = 30 * 60  # at most one crash reopen this often: sessions that keep dying are not reopened forever
 CLOSED = "closed-sessions.json"  # sessions the owner closed (/exit, logout): never reopened as crash losses
+# Handed to each reopened session as the first prompt of the process the bridge starts (`claude --resume <id>
+# "<prompt>"`): reopening alone left ten sessions sitting at an empty prompt after the 15.11 reboot. Only that
+# process receives it, so nothing is typed into a pane and no other instance of the session can pick it up.
+WAKE_TEXT = ("[Harnessgram: The Mac restarted (or the terminal server crashed) and the bridge reopened this "
+             "session. If you were in the middle of a task, continue it now from where it stopped: check your "
+             "handoff file, the owner ledger and any agents or background jobs that died with the restart, and "
+             "restart what is needed. Do not redo finished steps. If nothing was in progress, do nothing and do "
+             "not reply.]")
 
 # Set once this boot's revive has finished (or was not needed): from then on an empty list is recorded
 # too, so sessions closed on purpose do not come back at the next boot.
@@ -190,10 +198,14 @@ def revive_after_boot(now: Optional[float] = None, resume: Optional[Callable[[st
 
 def reopen(todo: List[str], resume: Optional[Callable[[str], bool]] = None, gap: float = 5.0,
            sleep_fn: Optional[Callable[[float], None]] = None) -> List[str]:
-    """Reopen these sessions one by one, skipping open ones; returns those reopened."""
+    """Reopen these sessions one by one, skipping open ones; returns those reopened. The real reopen starts
+    each session with WAKE_TEXT as its first prompt; an injected `resume` (tests) gets none."""
     sleep_fn = sleep_fn or time.sleep
     if resume is None:
-        from .inbox import resume_session as resume
+        from .inbox import resume_session
+
+        def resume(sid: str) -> bool:
+            return resume_session(sid, first_prompt=WAKE_TEXT)  # the carry-on prompt starts with the process
     done: List[str] = []
     for round_ in range(3):  # right after boot tmux or the Keychain may not be ready yet
         windows = set(open_windows() or [])

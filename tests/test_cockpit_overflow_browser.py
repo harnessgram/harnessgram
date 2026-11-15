@@ -56,6 +56,8 @@ def test_phone_views_fit(browser, width, lang, scheme, edition):
             route.fulfill(content_type="application/javascript", body=(panel_browser.STUB % json.dumps("test")).replace('colorScheme: "light"', 'colorScheme: "' + scheme + '"'))
         elif url.endswith("/api/state"):
             route.fulfill(content_type="application/json", body=json.dumps(state))
+        elif url.endswith("/api/app-token"):
+            panel_browser.app_token_reply(route)
         elif "/app/" in url:
             route.fulfill(content_type="text/html", body="<!doctype html><title>App</title>")
         else:

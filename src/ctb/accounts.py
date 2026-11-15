@@ -22,8 +22,6 @@ import shlex
 import shutil
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -350,6 +348,8 @@ def valid_token(name: str, now: Optional[float] = None) -> Optional[str]:
 def _http_json(path: str, token: str, timeout: float = PROFILE_HTTP_TIMEOUT) -> Tuple[int, dict, float]:
     """GET an Anthropic OAuth endpoint. Returns (status, body, retry_after seconds); status 0 when the call
     itself failed (offline, timeout, bad answer). The token is only ever sent in the header."""
+    import urllib.error
+    import urllib.request
     req = urllib.request.Request(OAUTH_API + path, headers={
         "Authorization": "Bearer " + token, "anthropic-beta": OAUTH_BETA, "Accept": "application/json",
         "User-Agent": "harnessgram"})
@@ -1090,12 +1090,22 @@ def chrome_available() -> bool:
 
 def shell_command(session: Optional[str] = None, remember: bool = False, replace: bool = True) -> str:
     """The shell command that starts Claude Code on the session's account. With replace the shell
-    is replaced by Claude (exec)."""
+    is replaced by Claude (exec). An assistant session (assistant.py) starts inside the OS sandbox with no sending
+    tools, or not at all."""
+    from . import assistant
     name = account_for(session)
     if remember and session:
         record(session, name)
     folder = config_dir(name)
-    run = ("exec claude" if replace else "claude") + (" --chrome" if chrome_available() else "")
+    run = "exec claude" if replace else "claude"
+    if assistant.is_assistant(session):
+        why = assistant.preflight()
+        if why:  # the boundary cannot be set up: the session is not started at all
+            return assistant.refusal(why)
+        # ctb's own launcher sets the boundary up in the session's folder at the moment of launch, then execs claude
+        run = ("exec " if replace else "") + assistant.launch_command()
+    elif chrome_available():
+        run += " --chrome"
     if name == MAIN or folder is None:
         # Without extra accounts nothing is changed (a CLAUDE_CONFIG_DIR of the user's own stays);
         # with them, "main" must clear an account folder inherited from another session.

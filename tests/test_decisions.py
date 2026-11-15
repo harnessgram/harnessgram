@@ -94,7 +94,7 @@ def stored():
 def test_ask_stores_the_decision_and_posts_a_line_in_the_topic(rig, capsys):
     rec = ask(rig, detail="line one\n\n\n\nline two", yes="Ship it", no="Hold")
     assert set(rec) == {"id", "session", "chat", "thread", "title", "detail", "yes", "no", "created", "state",
-                        "choice", "note", "closed"}
+                        "choice", "note", "closed", "routine"}
     assert len(rec["id"]) == 16 and rec["state"] == "open" and rec["choice"] == ""
     assert (rec["session"], rec["chat"], rec["thread"]) == (ORBIT_S, ORBIT, THREAD)
     assert (rec["title"], rec["yes"], rec["no"]) == ("Ship the fix?", "Ship it", "Hold")
@@ -307,7 +307,8 @@ def test_state_lists_open_decisions_and_reminders_read_only(rig, server):
     [d] = body["decisions"]
     assert d == {"id": rec["id"], "title": "Ship?", "detail": "why", "yes": "Yes", "no": "No",
                  "topic": "Orbit: game", "age": d["age"], "here": False, "stale": d["stale"], "old": False,
-                 "url": "https://t.me/c/1111111111/5"}  # the topic's own t.me link: one tap opens it (2026-11-10)
+                 "url": "https://t.me/c/1111111111/5",  # the topic's own t.me link: one tap opens it (2026-11-10)
+                 "sensitive": True}  # not asked as routine: only the app (after Face ID) or here (sensitive_buttons.py)
     [r] = body["reminders"]
     assert (r["text"], r["due"], r["topic"]) == ("Approve the deck", "today", "Orbit: game")
     ours = json.dumps([body["decisions"], body["reminders"]])

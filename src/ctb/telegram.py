@@ -6,48 +6,25 @@ response body: only Telegram's own short `description` text.
 from __future__ import annotations
 
 import json
-import http.client
 import os
 import re
 import secrets
-import socket
 import stat
 import urllib.parse
 import time
-import urllib.error
-import urllib.request
 from typing import Optional
 
-DEFAULT_API = "https://api.telegram.org"
+from .lazy import lazy_module
+from .sensitive_buttons import mark as mark_sensitive
+from .telegram_basics import (CLOUD_UPLOAD_LIMIT, DEFAULT_API, DOWNLOAD_LIMIT, LOCAL_LIMIT, TOKEN_RE,  # noqa: F401
+                              download_limit, upload_limit, valid_api_base)
+
+socket = lazy_module("socket", None)  # imported when a request is made, not for every command that loads this file
 API = DEFAULT_API  # the base a Bot uses unless it was given its own (config api_base)
-DOWNLOAD_LIMIT = 20 * 1024 * 1024  # cloud Bot API getFile limit
-CLOUD_UPLOAD_LIMIT = 50 * 1024 * 1024  # cloud Bot API upload limit
-LOCAL_LIMIT = 2000 * 1024 * 1024  # a self-hosted `telegram-bot-api --local` server, both directions
 COPY_CHUNK = 1024 * 1024
 
 
-def download_limit(local: bool = False) -> int:
-    return LOCAL_LIMIT if local else DOWNLOAD_LIMIT
-
-
-def upload_limit(local: bool = False) -> int:
-    return LOCAL_LIMIT if local else CLOUD_UPLOAD_LIMIT
-
-
-def valid_api_base(url: str) -> bool:
-    """https anywhere, plain http only to this machine (the token is part of every URL)."""
-    try:
-        parts = urllib.parse.urlsplit(url)
-        host = parts.hostname
-        parts.port  # noqa: B018 - raises ValueError on a bad port
-    except ValueError:
-        return False
-    if not host or parts.username or parts.password or parts.query or parts.fragment or parts.path not in ("", "/"):
-        return False
-    return parts.scheme == "https" or (parts.scheme == "http" and host in ("localhost", "127.0.0.1", "::1"))
-
-
-def _connect(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **kwargs):
+def _connect(address, timeout=None, source_address=None, **kwargs):
     """Connect IPv4 first, with a short connect timeout and the original read timeout."""
     host, port = address
     connect_timeout = min(timeout, 4) if isinstance(timeout, (int, float)) else 4
@@ -72,39 +49,60 @@ def _connect(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=Non
     raise OSError("no addresses")
 
 
-class _HTTPConnection(http.client.HTTPConnection):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._create_connection = _connect
+def _build_openers() -> None:
+    """Create the HTTP classes and the two URL openers on first use. http.client and urllib.request cost tens of
+    milliseconds to import, and most commands (every hook among them) never reach Telegram, so nothing here
+    runs at import time."""
+    import http.client
+    import urllib.request
+
+    class _HTTPConnection(http.client.HTTPConnection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = _connect
+
+    class _HTTPSConnection(http.client.HTTPSConnection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = _connect
+
+    class _HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_HTTPConnection, req)
+
+    class _HTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            # No check_hostname here: Python 3.12 removed both HTTPSHandler._check_hostname and the
+            # keyword of HTTPSConnection (the context already carries the setting). Passing it made every
+            # HTTPS call fail with "network error" on 3.12 and newer.
+            return self.do_open(_HTTPSConnection, req, context=self._context)
+
+    made = {"_HTTPConnection": _HTTPConnection, "_HTTPSConnection": _HTTPSConnection, "_HTTPHandler": _HTTPHandler,
+            "_HTTPSHandler": _HTTPSHandler,
+            "_OPENER": urllib.request.build_opener(_HTTPHandler(), _HTTPSHandler()),
+            # A plain-http base is this machine's own server (see valid_api_base): never through a proxy,
+            # the bot token is part of every URL.
+            "_LOCAL_OPENER": urllib.request.build_opener(urllib.request.ProxyHandler({}), _HTTPHandler(), _HTTPSHandler())}
+    for name, value in made.items():
+        globals().setdefault(name, value)  # one a test already replaced stays
 
 
-class _HTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._create_connection = _connect
+_LAZY = ("_HTTPConnection", "_HTTPSConnection", "_HTTPHandler", "_HTTPSHandler", "_OPENER", "_LOCAL_OPENER")
 
 
-class _HTTPHandler(urllib.request.HTTPHandler):
-    def http_open(self, req):
-        return self.do_open(_HTTPConnection, req)
-
-
-class _HTTPSHandler(urllib.request.HTTPSHandler):
-    def https_open(self, req):
-        # No check_hostname here: Python 3.12 removed both HTTPSHandler._check_hostname and the
-        # keyword of HTTPSConnection (the context already carries the setting). Passing it made every
-        # HTTPS call fail with "network error" on 3.12 and newer.
-        return self.do_open(_HTTPSConnection, req, context=self._context)
-
-
-_OPENER = urllib.request.build_opener(_HTTPHandler(), _HTTPSHandler())
-# A plain-http base is this machine's own server (see valid_api_base): never through a proxy,
-# the bot token is part of every URL.
-_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _HTTPHandler(), _HTTPSHandler())
+def __getattr__(name: str):
+    """The classes and openers above, made when first asked for (see _build_openers)."""
+    if name in _LAZY:
+        _build_openers()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _opener_for(url: str):
-    return _LOCAL_OPENER if url.startswith("http://") else _OPENER
+    name = "_LOCAL_OPENER" if url.startswith("http://") else "_OPENER"
+    if name not in globals():
+        _build_openers()
+    return globals()[name]
 
 
 class TelegramError(Exception):
@@ -131,7 +129,6 @@ def _timed_out(exc: BaseException) -> bool:
     return isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(cause, (TimeoutError, socket.timeout))
 
 
-TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
 
 
 def full_width(params: Optional[dict]) -> Optional[dict]:
@@ -250,6 +247,8 @@ class Bot:
                 from . import policy
                 if not policy.on():
                     raise TelegramError("not sent: mirroring is off", 403)
+            import urllib.error
+            import urllib.request
             try:
                 req = urllib.request.Request(url, data=data, headers=headers)
                 with _opener_for(url).open(req, timeout=timeout) as r:
@@ -309,7 +308,8 @@ class Bot:
             raise
 
     def call(self, method: str, params: Optional[dict] = None, timeout: float = 15):
-        params = full_width(params)
+        # Every keyboard leaves with its sensitive acting buttons marked for the Harnessgram app (sensitive_buttons.py).
+        params = mark_sensitive(full_width(params))
         if self.local:
             reject_file_uris(params)
         if not self._token:

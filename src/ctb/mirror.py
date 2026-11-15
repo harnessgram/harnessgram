@@ -41,7 +41,7 @@ from .config import (STATUS_REPOST, Config, home_chat, locked_map, private_dir, 
                      write_private)
 from .creds import (PLACEHOLDER, for_outside, hide_links, hide_owner_links, hold_links, redact, redact_channel, restore_links,
                     scrub_placeholders)
-from . import menus
+from . import listen, menus
 from .i18n import t
 from .telegram import CLOUD_UPLOAD_LIMIT, LOCAL_LIMIT, Bot, TelegramError, read_regular_file
 from .projects import thread_key
@@ -159,6 +159,9 @@ RETRY_AFTER_CAP = 30.0  # seconds: never wait longer for a 429, whatever Telegra
 QUESTION_TAIL = 300  # a "?" this close to the reply's end gets yes/no buttons
 TRANSLATE_BUDGET = 12.0  # seconds a reply waits for its translation before the original goes out first
 TRANSLATE_TIMEOUT = 120.0  # seconds an instant reply waits for its translation before giving up on the edit
+# A queued part of an instant reply waits this long for its translation before the drain may send the original
+# (only reached when the replying process died: it releases or replaces the part itself before then).
+QUEUED_TRANSLATION_HOLD = TRANSLATE_TIMEOUT + 30.0
 EDIT_FLOOD_WAIT = 90.0  # seconds an instant reply's edits may wait for flood control in all, as Telegram asks
 SHORT_REPLY = 450  # a shorter reply gets a one-line footer instead of the full one
 SHARE_LIMIT = 2 * 1024 * 1024 * 1024
@@ -1052,6 +1055,9 @@ def record_outcome(ok: bool, now: Optional[float] = None) -> None:
 
 
 class Mirror:
+    _listen_token: Optional[str] = None  # the listen button of the reply being sent
+    _listen_sent = False  # the last part went out with the listen button as its only markup
+
     def __init__(self, cfg: Config, bot, topics: TopicMap, team_topics: Optional[TopicMap] = None):
         self.cfg, self.bot, self.topics, self.team_topics = cfg, bot, topics, team_topics
         self.rtl = L.is_rtl(cfg.target_language)
@@ -1068,6 +1074,21 @@ class Mirror:
         # instant reply can later be edited in place to its translation (see _send_instant).
         self._track: Optional[list] = None
         self._team_also = ""  # while an instant reply is edited: its original, for the team filter
+        # While an instant reply is laid out: the tag its queued parts carry, so its translation can replace
+        # them in the outbox before redelivery (see _settle_queued).
+        self._queue_tag: Optional[str] = None
+        self._queue_until: Optional[float] = None  # the earliest hold of those parts (wall clock)
+        # Called once, when the first part of this reply was accepted by Telegram or durably queued: from
+        # then on a retry of the whole reply could deliver it twice (the Stop worker's "send started" mark).
+        self.on_accept: Optional[Callable[[], None]] = None
+
+    def _accepted(self) -> None:
+        callback, self.on_accept = self.on_accept, None
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                log("delivery start mark failed")
 
     # -- low level ---------------------------------------------------------
 
@@ -1095,6 +1116,48 @@ class Mirror:
         return live_keyboard(footer, lang=self.cfg.ui_language,
                              thread=found.thread if found else None, session=session or None,
                              chat=found.chat if found and not found.home else None)
+
+    def _listen_late(self, where, thread, result, markup: dict) -> None:
+        """The first reply of a topic carries the fixed keyboard, which cannot share a message with an inline
+        button when it is sent: the button is added by an edit. Telegram may refuse that edit; then it is logged
+        and the button goes in a short follow-up message instead, so the reply is never left without it."""
+        mid = result.get("message_id") if isinstance(result, dict) else None
+        if type(mid) is not int:
+            return
+        try:
+            self.bot.call("editMessageReplyMarkup", {"chat_id": where, "message_id": mid, "reply_markup": markup})
+            self._listen_sent = True
+            return
+        except (TelegramError, OSError) as exc:
+            log(f"listen button edit refused ({getattr(exc, 'code', None)}); sending it in its own message")
+        self._listen_sent = False
+        try:
+            fields = {"chat_id": where, "text": "🔊", "disable_notification": True, "reply_markup": markup,
+                      "reply_parameters": {"message_id": mid, "allow_sending_without_reply": True}}
+            if thread:
+                fields["message_thread_id"] = thread
+            self.bot.call("sendMessage", fields)
+        except (TelegramError, OSError):
+            log("listen button follow-up not sent")
+
+    def _with_listen(self, kb: dict, session: str = "") -> dict:
+        """The keyboard of a final reply with the listen button row last (Hebrew replies only: the voice is
+        Hebrew). The button's id is filed with the reply's text by _index_reply."""
+        if (not getattr(self.cfg, "listen_button", True) or L.base(self.cfg.target_language) != "he" or not kb):
+            return kb
+        self._listen_token = listen.new_token()
+        early = (self._pending_index or {}).get("text") if session else ""
+        if early:  # a reply that is queued for redelivery is indexed later, by another Mirror: keep its text now
+            try:
+                listen.remember(self._listen_token, session, early)
+            except OSError:
+                log("listen text not saved")
+        lang = getattr(self.cfg, "ui_language", None)
+        if "inline_keyboard" in kb:
+            return listen.with_button(kb, self._listen_token, lang)
+        # The fixed keyboard is a reply keyboard, sent once per topic; a message holds one kind of markup, so
+        # the listen button rides along and _post attaches it to every reply that does not carry the keyboard.
+        return dict(kb, _listen={"inline_keyboard": [listen.button_row(self._listen_token, lang), menus.unbuttons_row(lang, later=True)]})
 
     def _yes_no_keyboard(self) -> dict:
         """Yes/no answer buttons for a reply that ends in a question."""
@@ -1143,6 +1206,10 @@ class Mirror:
                      "created": time.time(), "language": self.cfg.target_language, "options": options}
             if record_reply and self.first_reply_id is None and self._queued_first is None and self._pending_index:
                 entry["index"] = self._pending_index
+            if self._queue_tag:  # its translation is still running: the drain waits for it (bounded)
+                entry["reply"] = self._queue_tag
+                entry["hold_until"] = time.time() + QUEUED_TRANSLATION_HOLD
+                self._queue_until = self._queue_until or entry["hold_until"]
             with reply_outbox.locked() as path:
                 entries = reply_outbox.load(path)
                 retained = reply_outbox.append(path, entries, entry)
@@ -1153,6 +1220,7 @@ class Mirror:
                 self._queued_first = entry
             self.dropped = before
             self.queued += 1
+            self._accepted()
             log("reply part queued for redelivery")
             return False
 
@@ -1186,12 +1254,17 @@ class Mirror:
                 params["text"] = _plain(text)[:TELEGRAM_LIMIT]
             if reply_parameters:
                 params["reply_parameters"] = reply_parameters
+            listen_late = None
             if thread:
                 params["message_thread_id"] = thread
                 if reply_markup:
                     if "keyboard" in reply_markup:
                         if keyboard_due(thread, chat=found.away if found else None):
-                            params["reply_markup"] = reply_markup
+                            params["reply_markup"] = {k: v for k, v in reply_markup.items() if k != "_listen"}
+                            listen_late = reply_markup.get("_listen")  # added once the reply is out
+                        elif reply_markup.get("_listen"):
+                            params["reply_markup"] = reply_markup["_listen"]
+                            self._listen_sent = True
                     else:
                         params["reply_markup"] = reply_markup
             try:
@@ -1229,12 +1302,15 @@ class Mirror:
                 log("send failed (network); retaining part for redelivery")
                 break
             # Telegram accepted this part. Local bookkeeping must never trigger a resend.
+            self._accepted()
             if record_reply and thread and self.first_reply_id is None:
                 self.first_reply_id = result.get("message_id")
             try:
                 self._keyboard_went_out(params, thread, found)
             except Exception:
                 log("delivered reply keyboard bookkeeping failed")
+            if listen_late:
+                self._listen_late(where, thread, result, listen_late)
             if record_reply and thread:
                 try:
                     from .topics import record_reply as remember_reply
@@ -1359,16 +1435,18 @@ class Mirror:
                 # A question in the reply's last characters gets yes/no answer buttons;
                 # any other reply ends with the fixed one-time keyboard.
                 kb = (self._yes_no_keyboard() if "?" in md[-QUESTION_TAIL:] else self._reply_keyboard(footer, session))
+                kb = self._with_listen(kb, session)
             rp = reply_parameters if i == 0 else None
             asked = bool(kb and "inline_keyboard" in kb)
             if slots is not None:
                 self._track = []
+            self._listen_sent = False
             try:
                 sent_part = self._emit(session, title, msg, self._footer(footer) if is_last and not asked else "",
                                        reply_markup=kb, reply_parameters=rp)
             finally:
                 if slots is not None:
-                    slots.append({"msgs": self._track or [], "kb": kb if asked else None,
+                    slots.append({"msgs": self._track or [], "kb": kb if asked else (kb["_listen"] if self._listen_sent else None),
                                   "footer": is_last and not asked, "asked": asked})
                 self._track = None
             sent += sent_part
@@ -1413,6 +1491,12 @@ class Mirror:
     def _index_reply(self, session: str, message_id: Optional[int], text: str, has_summary: bool) -> None:
         """Add the reply just delivered (its first message `message_id`) to the topic's pinned replies
         index. Runs last, after the voice summary: it never fails or delays the reply."""
+        token, self._listen_token = self._listen_token, None
+        if token:
+            try:
+                listen.remember(token, session, text)
+            except OSError:
+                log("listen text not saved")
         if message_id is None:
             return
         paras = [p for p in text.split("\n\n") if p.strip()]
@@ -1460,6 +1544,7 @@ class Mirror:
         lang = self.cfg.target_language
         pin = summary is not None
         self.first_reply_id = None
+        self._listen_token = None
         self._queued_first = None
         self._pending_index = {"text": hide_links(prepared, held), "has_summary": pin}
         if not (translate_fn and needs_translation(prepared, lang)):
@@ -1592,22 +1677,46 @@ class Mirror:
         slots: list = []
         self.first_reply_id = None
         queued_before = self.queued
-        sent = self._send_layout(session, title, prepared, pin, footer, reply_keyboard=True,
-                                 reply_parameters=reply_params, slots=slots)
+        tag = secrets.token_hex(8)
+        self._queue_tag, self._queue_until = tag, None
+        try:
+            sent = self._send_layout(session, title, prepared, pin, footer, reply_keyboard=True,
+                                     reply_parameters=reply_params, slots=slots)
+        finally:
+            self._queue_tag = None
         first = self.first_reply_id
         shown_at = time.monotonic() - box["t0"]
         th = box["thread"]
-        th.join(TRANSLATE_TIMEOUT)
+        wait = TRANSLATE_TIMEOUT
+        if self.queued > queued_before and self._queue_until:  # settle the queued parts before their hold ends
+            wait = min(wait, max(0.0, self._queue_until - time.time() - 10.0))
+        th.join(wait)
         took = time.monotonic() - box["t0"]
-        if self.queued > queued_before:
-            # Queued originals have no edit target. Keep the complete original instead of
-            # queuing a second copy of the answer as translated follow-ups.
-            self._index_reply(session, first, hide_links(prepared, held), pin)
-            return sent
         shown: Optional[str] = None if th.is_alive() else box["shown"]
         failed = th.is_alive() or box["error"] is not None
         if shown is not None:  # an engine can alter a placeholder: what is left of one becomes "[redacted]"
             shown = scrub_placeholders(shown, held)
+        if self.queued > queued_before:
+            # Queued parts have no message to edit: the translation replaces them in the outbox, so the
+            # owner gets them in his language; a failed translation releases the originals instead.
+            targets = None
+            try:
+                if not failed and shown is not None and shown.strip() != prepared.strip():
+                    asked = any(slot.get("asked") for slot in slots)
+                    targets = self._instant_targets(shown, prepared, pin,
+                                                    "" if asked else self._translated_footer(footer, box["engines"]),
+                                                    fold=self.cfg.original != "edit-off")
+            finally:
+                # Only a reply that is queued WHOLE can be swapped: a delivered part has no matching
+                # translated part, so its queued remainder is released as the original instead.
+                whole = self.queued - queued_before == len(slots)
+                replaced = self._settle_queued(session, tag, targets if whole else None,
+                                               {"text": hide_links(shown, held), "has_summary": pin}
+                                               if targets and whole else None, expected=len(slots))
+            log(f"reply shown in {shown_at:.1f}s; " + (f"translated in {took:.1f}s; queued parts translated"
+                                                        if replaced else "queued parts keep the original"))
+            self._index_reply(session, first, hide_links(prepared, held), pin)
+            return sent
         if failed or shown is None or shown.strip() == prepared.strip():
             log(f"reply shown in {shown_at:.1f}s; " + (f"translation failed after {took:.1f}s; original kept"
                                                         if failed else "translation unchanged; original kept"))
@@ -1635,6 +1744,54 @@ class Mirror:
         else:
             self._index_reply(session, first, hide_links(prepared, held), pin)
         return sent + followups
+
+    def _settle_queued(self, session: str, tag: str, targets: Optional[list], index: Optional[dict],
+                       expected: int = 0) -> bool:
+        """The translation of an instant reply is ready (`targets`, as _instant_targets builds them) or failed
+        (None). Its parts still waiting in the outbox (tagged `tag`, held from the drain) are replaced by the
+        translated parts, which take the place of the first, the reply-to of the first and the keyboard of
+        the last. The swap happens only when it is exact: all `expected` parts are still queued (none was
+        delivered, live or by an expired hold) and no other part of the session sits between them (a
+        concurrent reply keeps its turn). Otherwise, or without a translation, the parts are released as
+        they are. Runs under the session lock, so the drain never sends a part being replaced; no network
+        call happens here. Returns True when translated parts were queued."""
+        from . import reply_outbox
+        with reply_outbox.session_locked(session):
+            with reply_outbox.locked() as path:
+                entries = reply_outbox.load(path)
+                mine = [i for i, e in enumerate(entries) if e.get("reply") == tag]
+                if not mine:
+                    return False
+                between = any(e["session"] == session and e.get("reply") != tag
+                              for e in entries[mine[0]:mine[-1] + 1])
+                if targets and (len(mine) != expected or between):
+                    log("queued reply kept its original (parts already delivered or interleaved)")
+                    targets = None
+                if not targets:
+                    for i in mine:
+                        entries[i].pop("reply", None)
+                        entries[i].pop("hold_until", None)
+                    reply_outbox.save(path, entries)
+                    return False
+                old = [entries[i] for i in mine]
+                head, tail = old[0], old[-1]
+                new = []
+                for n, (body, foot) in enumerate(targets):
+                    options = dict(head["options"])
+                    options["reply_parameters"] = head["options"].get("reply_parameters") if n == 0 else None
+                    options["reply_markup"] = tail["options"].get("reply_markup") if n == len(targets) - 1 else None
+                    options["footer"] = foot
+                    entry = {k: head[k] for k in ("session", "title", "thread", "chat", "created", "language")}
+                    entry.update(text=restore_links(body, self._held, escape=True), options=options,
+                                 answer_to=head.get("answer_to") if n == 0 else None)
+                    new.append(entry)
+                if index and any(e.get("index") for e in old):
+                    new[0]["index"] = index
+                drop = set(mine)
+                rest = [e for i, e in enumerate(entries) if i not in drop]
+                reply_outbox.save(path, rest[:mine[0]] + new + rest[mine[0]:])
+        log(f"queued reply translated before redelivery ({len(old)} part(s) became {len(new)})")
+        return True
 
     def _apply_targets(self, session: str, title: str, slots: list, targets: list) -> tuple:
         """Show the translated `targets` in place of the instant reply's `slots`, for the owner and the
@@ -2433,10 +2590,10 @@ def last_reply_failure() -> Optional[BaseException]:
 
 
 def run_reply(cfg: Config, title: str, session: str, text: str, translate: bool, transcript: str = "",
-              answer_to: Optional[dict] = None) -> int:
+              answer_to: Optional[dict] = None, on_accept: Optional[Callable[[], None]] = None) -> int:
     """Entry for `ctb mirror`: slow, high-quality offline models are allowed here (fast=False).
     A short reply gets the one-line footer. On failure the reason is remembered (last_reply_failure)
-    for the Stop worker's alert."""
+    for the Stop worker's alert. `on_accept` runs once, when the first part was accepted or queued."""
     global _last_failure
     from .scheduled import suppressed
     if suppressed(session, "reply", text):
@@ -2448,6 +2605,7 @@ def run_reply(cfg: Config, title: str, session: str, text: str, translate: bool,
               else usage.footer(cfg, transcript))
     try:
         m = build(cfg)
+        m.on_accept = on_accept
         m.send_reply(title, session, text, fn, footer, answer_to=answer_to)
     except (TelegramError, TranslateError, OSError) as e:
         _last_failure = e
@@ -2547,15 +2705,8 @@ def run_file(cfg: Config, title: str, session: str, path: str, caption: str,
 
 def run_typing(cfg: Config, session: str) -> int:
     """'typing...' in the session's topic (sendChatAction). Quiet when the session has no topic."""
-    try:
-        bot = Bot.from_config(cfg)
-        found = place(cfg, session)
-        if found:
-            flood.optional_call(bot, "sendChatAction", {"chat_id": found.chat, "message_thread_id": found.thread,
-                                                        "action": "typing"}, budget=False)  # gate only
-    except Exception:
-        return 1
-    return 0
+    from .typing_notice import run_typing as run
+    return run(cfg, session, bot_class=Bot, find_place=place, gate=flood)
 
 
 def _essential_place(cfg: Config, bot, session: str):
@@ -2597,8 +2748,9 @@ def send_essential(cfg: Config, bot, session: str, fields: dict) -> Optional[dic
     return None
 
 
-def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = None, bot=None) -> None:
-    """Delivery notices share the durable outbox, including when the alert is flooded."""
+def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = None, bot=None) -> bool:
+    """Delivery notices share the durable outbox, including when the alert is flooded. True when the notice was
+    sent or safely queued; False when it was neither (callers that retry use this)."""
     from . import reply_outbox
     try:
         bot = bot or Bot.from_config(cfg)
@@ -2607,6 +2759,8 @@ def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = N
             body = t("alert_delivery_failed", lang=ui_lang) + " · " + reason_str(exc, lang=ui_lang)
         elif text.startswith("The turn ended"):
             body = t("alert_no_reply", lang=ui_lang)
+        elif text.startswith("The last answer may be incomplete"):
+            body = t("alert_reply_incomplete", lang=ui_lang)
         else:
             body = text
         mark = L.RLM if ui_lang == "he" else ""
@@ -2619,7 +2773,7 @@ def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = N
             if not any(e["session"] == session for e in entries) and flood.remaining(chat) <= 0:
                 try:
                     if send_essential(cfg, bot, session, {"text": body, "disable_notification": True}) is not None:
-                        return
+                        return True
                 except (TelegramError, OSError):
                     pass
             with reply_outbox.locked() as path:
@@ -2629,8 +2783,10 @@ def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = N
                     "thread": found.thread if found else None, "chat": chat, "answer_to": None,
                     "created": time.time(), "language": ui_lang, "options": {"record_reply": False}})
             log("delivery alert queued" if retained else "delivery alert not delivered or retained; outbox full")
+            return bool(retained)
     except Exception:
         log("delivery alert could not be queued")
+        return False
 
 
 def voice_summary(cfg: Config, bot, session: str, he_body: str, topics: Optional[TopicMap] = None) -> None:
@@ -2857,6 +3013,10 @@ def run_notify(cfg: Config, session: str, ntype: str, bot=None) -> int:
             set_state(cfg, session, "done" if ntype == "idle_prompt" else "waiting", bot=bot)
         except Exception as exc:  # the card below must not depend on the placeholder refresh
             _notify_log(f"state refresh failed: {type(exc).__name__}")
+        if ntype == "permission_prompt":
+            from . import permission_request
+            if permission_request.open_for(session):
+                return 0  # its own card is out (the PermissionRequest hook): no screen card, no second ring
         if ntype != "idle_prompt":
             from . import dialogs
             time.sleep(1.0)  # The child is detached; allow the terminal dialog to draw.

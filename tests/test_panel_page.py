@@ -68,10 +68,10 @@ def test_every_agent_card_kind_is_drawn_with_text_only():
     card = func("agentCard")
     assert 'shown(c,"title")' in card and 'shown(c,"detail")' in card and 'shown(c,"topic")' in card
     # option labels, step names, figures and link labels are agent text: always set as text, never markup
-    assert 'el("span",null,o)' in func("choiceBody")
-    assert 'el("span","sl",s)' in func("progressBody")
+    assert 'el("span",null,label)' in func("choiceBody") and 'shown(c,"options")[i]' in func("choiceBody")
+    assert 'el("span","sl",shown(c,"steps")[i])' in func("progressBody")
     nums = func("numbersBody")
-    assert 'el("b",null,f.value)' in nums and 'el("span",null,f.label)' in nums and ".slice(0,3)" in nums
+    assert 'el("b",null,shown(f,"value"))' in nums and 'el("span",null,shown(f,"label"))' in nums and ".slice(0,3)" in nums
 
 
 def test_a_card_link_opens_only_https_and_only_through_telegram():

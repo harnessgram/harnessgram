@@ -34,6 +34,9 @@ def pane(monkeypatch):
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "recently_moving", lambda s: False)
     monkeypatch.setattr(I, "pane_runs_session", lambda pane, s: True)
+    monkeypatch.setattr(I, "_pane_from_process", lambda s: "%1")
+    from ctb import idle_lines
+    monkeypatch.setattr(idle_lines, "_foreground_claude", lambda p, s: True)
     return p
 
 
@@ -428,6 +431,9 @@ def auto(bot, monkeypatch):
     monkeypatch.setattr(I, "session_busy", lambda s: False)
     monkeypatch.setattr(I, "_start_compact_progress", lambda *a, **k: started.append(a))
     topics = SimpleNamespace(place_of=lambda s: SimpleNamespace(thread=5, chat=7))
+    monkeypatch.setattr(I, "_pane_from_process", lambda s: "%1")
+    from ctb import idle_lines
+    monkeypatch.setattr(idle_lines, "_foreground_claude", lambda p, s: True)
     cfg = Config(bot_token="t", owner_chat_id=7, ui_language="en")
     return SimpleNamespace(started=started, topics=topics, cfg=cfg, bot=bot)
 
@@ -477,3 +483,51 @@ def test_auto_compact_stays_quiet_when_enter_was_refused(monkeypatch, auto):
     monkeypatch.setattr(I.time, "monotonic", iter(range(0, 10_000)).__next__)
     assert run_auto(auto) is False
     assert p.box == "" and auto.started == [] and auto.bot.methods("sendMessage") == []
+
+
+
+@pytest.mark.parametrize('entry', ['telegram', 'keypad'])
+@pytest.mark.parametrize('change', ['session', 'foreground'])
+@pytest.mark.parametrize('moment', ['before_typing', 'before_enter'])
+def test_explicit_compaction_checks_session_and_foreground_before_typing_and_enter(
+        cli, pane, monkeypatch, entry, change, moment):
+    from ctb import idle_lines
+    target, foreground = ['%1'], [True]
+    monkeypatch.setattr(I, '_pane_from_process', lambda s: target[0] if s == SID else None)
+    monkeypatch.setattr(idle_lines, '_foreground_claude', lambda p, s: foreground[0])
+    def changed():
+        if change == 'session':
+            target[0] = '%2'
+        else:
+            foreground[0] = False
+    original_box, original_tmux = I.input_box, I._tmux
+    def box(p):
+        result = original_box(p)
+        if moment == 'before_typing':
+            changed()
+        return result
+    def tmux(*args):
+        result = original_tmux(*args)
+        if moment == 'before_enter' and args[0] == 'send-keys' and '-l' in args:
+            changed()
+        return result
+    monkeypatch.setattr(I, 'input_box', box)
+    monkeypatch.setattr(I, '_tmux', tmux)
+    if entry == 'telegram':
+        say(cli, '/compact')
+    else:
+        q = {'id':'q', 'data':'k:/compact', 'message':dict(cli.m, message_id=3)}
+        I.keypad_press(q, cli.cfg, cli.bot, q['message'], SID)
+    assert not pane.sent and not cli.started
+    assert not [c for c in pane.calls if c[0] == 'send-keys' and 'Enter' in c]
+    if moment == 'before_typing':
+        assert not typed_keys(pane)
+
+
+def test_last_session_check_runs_after_before_enter_callback(pane, monkeypatch):
+    target = ['%1']
+    monkeypatch.setattr(I, '_pane_from_process', lambda s: target[0])
+    assert I.type_command(SID, '%1', '/compact', verify_session=True,
+        before_enter=lambda: target.__setitem__(0, '%2')) == 'stale'
+    assert not pane.sent
+    assert not [c for c in pane.calls if c[0] == 'send-keys' and 'Enter' in c]

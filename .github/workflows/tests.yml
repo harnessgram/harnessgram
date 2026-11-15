@@ -18,14 +18,18 @@ jobs:
     # Agent PRs open as drafts; tests run once they are marked ready, and on main.
     if: github.event_name == 'push' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Parallel with xdist the suite takes ~2 minutes; the limit stays 20 as a guard (2026-11-15).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
       - run: sudo apt-get install -y tmux
-      - run: uv run -q --with pytest --with pytest-timeout --with-editable . python -m pytest -q --timeout 20 tests --ignore=tests/test_live.py
+      # Wall-clock CPU budgets (tests/test_cpu_budget.py) run locally; shared runners are too noisy for them.
+      - env:
+          CTB_SKIP_BENCH: "1"
+        run: uv run -q --with pytest --with pytest-timeout --with pytest-xdist --with pillow --with-editable . python -m pytest -q --timeout 20 -n auto tests --ignore=tests/test_live.py
 
   package:
     # The wheel and the source archive build, pass the metadata check, and a clean install runs the command.

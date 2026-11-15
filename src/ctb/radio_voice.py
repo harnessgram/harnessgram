@@ -4,11 +4,14 @@ Route 1, Gemini TTS on Vertex (the config's gemini_vertex_project and gemini_tok
 credentials the translator uses): billed speech, so every clip is cached on disk by its exact text, model, voice
 and style, and a daily cap (radio.tts_daily_minutes) stops it for the rest of the day.
 
-The cap is hard: before each request a conservative amount of speech is reserved (and the request asks the model
-for no more audio than that, maxOutputTokens), and the request is sent only when the reservation fits. Afterwards
+The local cap is defensive: before each request a conservative amount of speech is reserved and the request is sent
+only when the reservation fits. The request first asks the model for no more audio than that (maxOutputTokens); some
+models refuse that field, and then the length is held by the text instead: speech seconds are estimated from the
+characters (SECONDS_PER_CHAR, deliberately slow), text longer than one request may carry is split into several short
+requests, and text that does not fit what is left of the day goes to the free voice. Afterwards
 the reservation is settled to what was actually billed (the response's audio token count, or the audio length,
 whichever is more); a request whose outcome is unknown (a timeout, a broken response) keeps its whole
-reservation. A provider-side budget on the Google Cloud project is still the ceiling for money (docs/radio.md).
+reservation and blocks further paid requests that day. Only a provider-enforced billing limit can provide an absolute ceiling (docs/radio.md).
 Route 2, the system voice (macOS `say`, a Hebrew voice such as Carmit): local and free; used when Vertex is not
 configured, fails, or the cap is reached.
 Credentials go only into a request header; nothing secret is logged.
@@ -31,13 +34,19 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
 from .config import Config, write_private
 
 RATE = 48000
-SECONDS_PER_CHAR = 0.075  # Gemini Hebrew speech, measured on the narration voice
+# Estimated seconds of Gemini Hebrew speech per character of text. The narration voice was measured at 0.075 s per
+# character (about 13 characters a second); 0.09 (about 11) deliberately overestimates, because the estimate is the only
+# length control for a model that refuses maxOutputTokens: too long an estimate costs a little reserved budget, too
+# short a one could let a request run past its reservation (which blocks paid speech for the day).
+SECONDS_PER_CHAR = 0.09
+MAX_REQUEST_SECONDS = 40.0   # estimated speech per paid request; longer text is split into several requests
 # Audio tokens per second of Gemini speech. The lower of the published rates (25; input audio is 32), so a token
 # count turns into at least as many seconds as were spoken, and a token ceiling into no more seconds than reserved.
 AUDIO_TOKENS_PER_SECOND = 25
@@ -62,22 +71,65 @@ def to_pcm(data: bytes, input_args) -> bytes:
 
 
 class Usage:
-    """Billed (or reserved) seconds per local day, in a small private JSON file ({"days": {date: seconds}}, the last
-    KEEP_DAYS dates). Reserve and settle hold a file lock, so two speakers never both fit into the same remaining
-    minutes. Each retained date keeps its own total. Reservations are refused if the clock moves before the
-    latest recorded date, so turning the clock back cannot renew the budget."""
+    """One locked daily ledger for all paid speech, with a room sub-total inside it.
+
+    Reservations and settlements change both counters in one atomic write. In-flight reservations
+    survive a restart, and settlement always belongs to the date on which the request was reserved.
+    """
 
     KEEP_DAYS = 14
 
-    def __init__(self, path: Path):
-        self.path = path
+    def __init__(self, path: Path, *, room: bool = False, legacy_room: Optional[Path] = None):
+        self.path, self.room, self.legacy_room = path, room, legacy_room
+
+    def for_room(self) -> Usage:
+        return Usage(self.path, room=True, legacy_room=self.legacy_room)
 
     def _read(self) -> dict:
+        """Missing is fresh; any malformed existing ledger fails closed and is never overwritten."""
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        except FileNotFoundError:
+            return {"days": {}}
+        except (OSError, ValueError, RecursionError):
+            return {"unreadable": True}
+        def valid_day(day):
+            if not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                return False
+            try:
+                from datetime import date
+                date.fromisoformat(day)
+                return True
+            except ValueError:
+                return False
+        def valid_number(value):
+            return type(value) in (int, float) and math.isfinite(value) and value >= 0
+        def valid_days(value):
+            return isinstance(value, dict) and all(valid_day(k) and valid_number(v) for k, v in value.items())
+        try:
+            if not isinstance(data, dict) or set(data) - {"days", "room_days", "shared_room", "date", "seconds", "blocked", "pending"}:
+                raise ValueError
+            if not ("days" in data or {"date", "seconds"} <= data.keys()):
+                raise ValueError
+            if any(not valid_days(data[k]) for k in ("days", "room_days") if k in data):
+                raise ValueError
+            if ("date" in data) != ("seconds" in data) or ("date" in data and
+                    (not valid_day(data["date"]) or not valid_number(data["seconds"]))):
+                raise ValueError
+            if any(type(data[k]) is not bool for k in ("shared_room", "blocked") if k in data):
+                raise ValueError
+            pending = data.get("pending", {})
+            if not isinstance(pending, dict):
+                raise ValueError
+            for key, item in pending.items():
+                if (not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{32}", key) or
+                    not isinstance(item, dict) or set(item) != {"day", "seconds", "room"} or
+                    not valid_day(item["day"]) or not valid_number(item["seconds"]) or
+                    item["seconds"] <= 0 or type(item["room"]) is not bool):
+                    raise ValueError
+        except (ValueError, OverflowError, TypeError):
+            return {"unreadable": True}
+        return data
 
     @contextlib.contextmanager
     def _locked(self):
@@ -90,65 +142,133 @@ class Usage:
     def _day(now: Optional[float]) -> str:
         return time.strftime("%Y-%m-%d", time.localtime(now))
 
-    def _days(self) -> dict:
+    def _ledger(self) -> dict:
         data = self._read()
-        days = {}
-        raw = data.get("days")
-        for day, seconds in (raw.items() if isinstance(raw, dict) else []):
-            if isinstance(day, str) and isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
-                days[day] = max(0.0, float(seconds))
-        if isinstance(data.get("date"), str) and isinstance(data.get("seconds"), (int, float)):  # the older one-day file
-            days[data["date"]] = max(days.get(data["date"], 0.0), float(data["seconds"]))
-        return days
+        if data.get("unreadable"):
+            return {"unreadable": True}
+        days = dict(data.get("days", {}))
+        if "date" in data:
+            days[data["date"]] = max(days.get(data["date"], 0.0), data["seconds"])
+        room_days = dict(data.get("room_days", {}))
+        for item in data.get("pending", {}).values():
+            day, seconds = item["day"], item["seconds"]
+            if days.get(day, 0) < seconds or (item["room"] and room_days.get(day, 0) < seconds):
+                return {"unreadable": True}
+        if not data.get("shared_room") and self.legacy_room is not None:
+            old = Usage(self.legacy_room)._ledger()
+            if old.get("unreadable"):
+                return {"unreadable": True}
+            for day, seconds in old["days"].items():
+                days[day] = days.get(day, 0.0) + seconds
+                room_days[day] = seconds
+        return {"days": days, "room_days": room_days,
+                "shared_room": bool(data.get("shared_room") or self.legacy_room is not None),
+                "blocked": data.get("blocked", False), "pending": data.get("pending", {})}
+
+    def _write(self, data: dict) -> None:
+        for key in ("days", "room_days"):
+            data[key] = dict(sorted(data[key].items())[-self.KEEP_DAYS:])
+        write_private(self.path, json.dumps(data))
 
     @staticmethod
     def _used(days: dict, day: str) -> float:
         own = days.get(day, 0.0)
         later = [d for d in days if d > day]
-        return max([own] + [days[max(later)]]) if later else own  # the clock went back: never a fresh budget
+        return max([own] + [days[max(later)]]) if later else own
+
+    def readable_today(self, now: Optional[float] = None) -> Optional[float]:
+        data = self._ledger()
+        if data.get("unreadable"):
+            return None
+        return self._used(data["room_days" if self.room else "days"], self._day(now))
 
     def today(self, now: Optional[float] = None) -> float:
-        return self._used(self._days(), self._day(now))
+        data = self._ledger()
+        if data.get("unreadable"):
+            return 24 * 3600.0  # an unreadable ledger counts as a fully used day
+        return self._used(data["room_days" if self.room else "days"], self._day(now))
 
-    def _add(self, seconds: float, now: Optional[float]) -> None:
-        days, day = self._days(), self._day(now)
-        days[day] = round(max(0.0, days.get(day, 0.0) + seconds), 2)
-        keep = dict(sorted(days.items())[-self.KEEP_DAYS:])
-        write_private(self.path, json.dumps({"days": keep}))
+    def _change(self, data: dict, seconds: float, day: str) -> None:
+        for key in (("days", "room_days") if self.room else ("days",)):
+            data[key][day] = max(0.0, data[key].get(day, 0.0) + seconds)
 
     def add(self, seconds: float, now: Optional[float] = None) -> None:
         with self._locked():
-            self._add(seconds, now)
+            data = self._ledger()
+            if data.get("unreadable"):
+                return  # never overwrite a ledger we could not read
+            self._change(data, seconds, self._day(now))
+            self._write(data)
 
     def allows(self, seconds: float, cap_minutes: float, now: Optional[float] = None) -> bool:
         return cap_minutes > 0 and self.today(now) + seconds <= cap_minutes * 60
 
-    def reserve(self, estimate: float, cap_minutes: float, now: Optional[float] = None) -> Optional[Tuple[float, str]]:
-        """Reserve the seconds one request may cost at most: (seconds, day), or None when they do not fit."""
-        if cap_minutes <= 0:
+    def _left(self, data: dict, day: str, cap_minutes: float, room_cap_minutes: Optional[float]) -> Optional[float]:
+        """Seconds that may still be reserved now, or None when paid speech is blocked (same rules as reserve)."""
+        if cap_minutes <= 0 or (self.room and (room_cap_minutes is None or room_cap_minutes <= 0)):
             return None
-        now = time.time() if now is None else now
+        if (data.get("unreadable") or data["blocked"] or
+                data["pending"]):
+            return None
+        days = data["days"]
+        if days and day < max(days):
+            return None
+        left = cap_minutes * 60 - self._used(days, day)
+        if self.room:
+            left = min(left, room_cap_minutes * 60 - self._used(data["room_days"], day))
+        return left
+
+    def available(self, cap_minutes: float, now: Optional[float] = None,
+                  room_cap_minutes: Optional[float] = None) -> Optional[float]:
+        """Seconds a new reservation could take right now (None: blocked or unreadable). A read, not a reservation."""
         with self._locked():
-            days, day = self._days(), self._day(now)
-            if days and day < max(days):
+            now = time.time() if now is None else now
+            return self._left(self._ledger(), self._day(now), cap_minutes, room_cap_minutes)
+
+    def reserve(self, estimate: float, cap_minutes: float, now: Optional[float] = None,
+                room_cap_minutes: Optional[float] = None) -> Optional[Tuple[float, str, str]]:
+        """Reserve against the shared cap AND, for room speech, its sub-cap, under one lock."""
+        if cap_minutes <= 0 or (self.room and (room_cap_minutes is None or room_cap_minutes <= 0)):
+            return None
+        with self._locked():
+            now = time.time() if now is None else now
+            data, day = self._ledger(), self._day(now)
+            left = self._left(data, day, cap_minutes, room_cap_minutes)
+            if left is None:
                 return None
-            left = cap_minutes * 60 - self._used(days, day)
             want = min(estimate * RESERVE_FACTOR + RESERVE_EXTRA, left)
+            # Only reserve whole audio tokens, rounding down so the request fits BOTH remaining totals.
+            want = math.floor(want * AUDIO_TOKENS_PER_SECOND) / AUDIO_TOKENS_PER_SECOND
             if want < estimate * MIN_RESERVE_FACTOR or want <= 0:
                 return None
-            self._add(want, now)
-            return want, day
+            self._change(data, want, day)
+            nonce = uuid.uuid4().hex
+            data["pending"][nonce] = {"day": day, "seconds": want, "room": self.room}
+            self._write(data)
+            return want, day, nonce
 
-    def settle(self, reserved: Tuple[float, str], billed: Optional[float], now: Optional[float] = None) -> None:
-        """Replace a reservation by what was billed (None: unknown, so the whole reservation stays counted)."""
-        seconds, day = reserved
-        if billed is None:
+    def settle(self, reserved: Tuple[float, str, str], billed: Optional[float], now: Optional[float] = None,
+               *, overrun: bool = False) -> None:
+        """Settle and block overruns atomically; unknown results remain pending for their day."""
+        seconds, day, nonce = reserved
+        if billed is None or not math.isfinite(billed) or billed < 0:
             return
         with self._locked():
-            if day == self._day(now):
-                self._add(billed - seconds, now)
-            elif billed > seconds:  # reserved yesterday: only what went over the reservation is new today
-                self._add(billed - seconds, now)
+            data = self._ledger()
+            if data.get("unreadable"):
+                return
+            item = data["pending"].get(nonce)
+            if item != {"day": day, "seconds": seconds, "room": self.room} or day not in data["days"]:
+                return
+            self._change(data, billed - seconds, day)
+            del data["pending"][nonce]
+            data["blocked"] = data["blocked"] or overrun or billed > seconds + 1e-6
+            self._write(data)
+
+
+def paid_usage(directory: Path) -> Usage:
+    """The shared ledger, including usage recorded by the room before the shared-budget upgrade."""
+    return Usage(directory / "tts-usage.json", legacy_room=directory / "room" / "tts-usage.json")
 
 
 TOKEN_TIMEOUT = 90.0     # gcloud can take 20-40 s to print a token on a loaded Mac (17 s measured at load 36)
@@ -203,19 +323,34 @@ def forget_token(cfg: Config) -> None:
         _tokens.pop(tuple(cfg.gemini_token_command or ()), None)
 
 
-# Models that refuse maxOutputTokens: for them the day's cap holds by the reservation (an estimate x 2 + 5 s of
-# the plain text, read verbatim) and is settled to the billed audio afterwards, so one clip can pass the cap by
-# what it overran its reservation; the next request then no longer fits.
+# Models that refused maxOutputTokens (remembered while the process runs): they are asked without it, and the
+# length is held by the text estimate instead (see `fits_without_ceiling`).
 NO_CEILING: set = set()
 
 
+def estimate_seconds(text: str) -> float:
+    """Estimated seconds of speech for the text (deliberately slow, see SECONDS_PER_CHAR)."""
+    return len(text) * SECONDS_PER_CHAR
+
+
+def fits_without_ceiling(text: str, max_seconds: float) -> bool:
+    """A request with no maxOutputTokens may be sent only when the text's estimated speech is a short request and
+    fits inside the reservation with the same margin the reservation itself demands."""
+    estimate = estimate_seconds(text)
+    return estimate <= MAX_REQUEST_SECONDS and estimate * MIN_RESERVE_FACTOR <= max_seconds + 1e-9
+
+
 def vertex(text: str, cfg: Config, model: str, voice: str, style: str, max_seconds: float = 0.0,
-           timeout: float = 120.0, why: Optional[list] = None, hard: bool = False) -> Tuple[bytes, Optional[float]]:
+           timeout: float = 120.0, why: Optional[list] = None, hard: bool = True) -> Tuple[bytes, Optional[float]]:
     """Gemini TTS on Vertex -> (PCM 48 kHz mono or b'', billed seconds). Billed is 0.0 when no request was sent,
     None when one was sent and its cost is unknown (keep the whole reservation), else the seconds billed.
-    `max_seconds` caps the audio the model may produce (maxOutputTokens). With `hard` (the brainstorming room's own
-    cap) a request is never sent without that ceiling: a model that refuses it gets nothing (the free voice speaks).
-    A failure's reason goes to `why`."""
+    The request asks for no more audio than `max_seconds` (maxOutputTokens). A model that refuses that field (HTTP
+    400) is asked once more without it, and from then on without it; such a request is sent only when the text's
+    estimated speech fits `max_seconds` (and one request), otherwise nothing is sent and the caller uses the free
+    voice. `hard` is retained for call compatibility. A failure's reason goes to `why`."""
+    if max_seconds <= 0 or not math.isfinite(max_seconds):
+        _why(why, "no usable reserved length; using the free voice")
+        return b"", 0.0
     from .creds import for_outside
     clean = getattr(cfg, "redact_outgoing", True)
     text, style = for_outside(text, clean), for_outside(style, clean)  # every field of the request
@@ -231,8 +366,16 @@ def vertex(text: str, cfg: Config, model: str, voice: str, style: str, max_secon
         part["speechMetadata"] = {"style": style}  # newer TTS models read the text verbatim; style goes here
     generation = {"responseModalities": ["AUDIO"],
                   "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}
-    if max_seconds > 0 and model not in NO_CEILING:
-        generation["maxOutputTokens"] = max(1, int(math.floor(max_seconds * AUDIO_TOKENS_PER_SECOND)))
+    token_ceiling = int(math.floor(max_seconds * AUDIO_TOKENS_PER_SECOND))
+    if token_ceiling < 1:
+        _why(why, "the reserved length is below one audio token")
+        return b"", 0.0
+    if model not in NO_CEILING:
+        generation["maxOutputTokens"] = token_ceiling
+    elif not fits_without_ceiling(text, max_seconds):
+        _why(why, "the text is too long for the reserved length; using the free voice")
+        return b"", 0.0
+    refused_ceiling = False
     body = {"contents": [{"role": "user", "parts": [part]}], "generationConfig": generation}
     url = (f"https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/"
            f"{urllib.parse.quote(model, safe='-._')}:generateContent")
@@ -242,6 +385,8 @@ def vertex(text: str, cfg: Config, model: str, voice: str, style: str, max_secon
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 result = json.load(resp)
+            if refused_ceiling:
+                NO_CEILING.add(model)  # it answered once the ceiling was left out: the ceiling was the problem
             break
         except urllib.error.HTTPError as e:
             try:
@@ -249,15 +394,14 @@ def vertex(text: str, cfg: Config, model: str, voice: str, style: str, max_secon
             except Exception:
                 detail = ""
             e.close()
-            if e.code == 400 and "maxOutputTokens" in generation and hard:
-                NO_CEILING.add(model)  # refused, so not billed; never asked again without the ceiling
-                _why(why, "the voice model refuses a length ceiling; a hard cap sends nothing")
-                return b"", 0.0
             if e.code == 400 and "maxOutputTokens" in generation:
-                # gemini-3.8-flash-tts refuses maxOutputTokens with a bare "invalid argument" (every
-                # update went out in `say`). Refused requests are not billed; ask again without the ceiling.
-                NO_CEILING.add(model)
-                generation.pop("maxOutputTokens")
+                # Refused, so not billed. Ask again without the ceiling, but only when the text itself keeps the
+                # request inside the reservation.
+                if not fits_without_ceiling(text, max_seconds):
+                    _why(why, "the voice model refuses a length ceiling and the text is too long to send without one")
+                    return b"", 0.0
+                del generation["maxOutputTokens"]
+                refused_ceiling = True
                 continue
             if e.code in (401, 403):
                 forget_token(cfg)  # an expired or revoked token: fetch a fresh one next time
@@ -349,53 +493,154 @@ def spoken_log(path: Path, route: str, text: str, now: Optional[float] = None) -
         pass
 
 
+def split_text(text: str, max_seconds: float = MAX_REQUEST_SECONDS) -> list:
+    """The text as pieces whose estimated speech is at most `max_seconds` each, cut at sentence ends (or, for one
+    overlong sentence, at spaces, or at the length when there are no spaces). Joining the pieces with a space gives
+    the original words back. A text that already fits is returned whole."""
+    limit = max(1, int(max_seconds / SECONDS_PER_CHAR))
+    if len(text) <= limit:
+        return [text]
+    units = []
+    for sentence in re.split(r"(?<=[.!?…:;])\s+", text):
+        while len(sentence) > limit:
+            cut = sentence.rfind(" ", 0, limit + 1)
+            cut = cut if cut > 0 else limit
+            units.append(sentence[:cut].strip())
+            sentence = sentence[cut:].strip()
+        if sentence:
+            units.append(sentence)
+    pieces, current = [], ""
+    for unit in units:
+        if current and len(current) + 1 + len(unit) > limit:
+            pieces.append(current)
+            current = unit
+        else:
+            current = f"{current} {unit}" if current else unit
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _cache_key(model: str, voice: str, style: str, text: str) -> str:
+    return hashlib.sha256(json.dumps([model, voice, style, text]).encode()).hexdigest()
+
+
+def _cache_put(path: Path, pcm: bytes) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(pcm)
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _paid_piece(piece: str, cfg: Config, settings: dict, cache: Path, usage: Usage, now: Optional[float],
+                why: list) -> bytes:
+    """One paid request: reserve, send, settle. PCM, or b"" with the reason in `why` (the caller falls back to the
+    free voice for the whole text). A piece already paid for is read from the cache."""
+    global last_cap_out
+    model, voice = settings["tts_model"], settings["voice"]
+    style = settings.get("style") or DEFAULT_STYLE
+    path = cache / f"{_cache_key(model, voice, style, piece)}.pcm"
+    try:
+        hit = path.read_bytes()
+        if hit:
+            return hit
+    except OSError:
+        pass
+    try:
+        reserved = usage.reserve(estimate_seconds(piece), settings["tts_daily_minutes"], now,
+                                 room_cap_minutes=settings.get("tts_room_daily_minutes"))
+    except OSError:
+        reserved = None
+        why.append("the paid voice budget is unavailable")
+    if not reserved:
+        cap = min(settings["tts_daily_minutes"], settings.get("tts_room_daily_minutes", 0)) if usage.room else settings["tts_daily_minutes"]
+        why.append("the paid voice is off (daily cap is 0)" if cap <= 0 else
+                   f"today's {cap} paid minutes are used up")
+        last_cap_out = cap > 0
+        return b""
+    try:
+        pcm, billed = vertex(piece, cfg, model, voice, style, max_seconds=reserved[0], why=why, hard=True)
+    except Exception as e:
+        pcm, billed = b"", None
+        why.append(f"Vertex voice crashed ({e.__class__.__name__})")
+    # Whatever the provider did, record the full observed cost (never hide an overrun). A response longer than
+    # its reservation is discarded without caching, and the ledger blocks further paid speech that day.
+    observed = max(seconds_of(pcm), billed or 0.0)
+    overrun = not math.isfinite(observed) or observed > reserved[0] + 1e-6
+    if overrun:
+        why.append("the voice model exceeded its length ceiling; using the free voice")
+        pcm = b""
+    try:
+        usage.settle(reserved, observed if billed is not None or overrun else None, now, overrun=overrun)
+    except OSError:
+        # The persisted pending reservation still prevents another request today.
+        pcm = b""
+        why.append("the paid voice budget could not be saved")
+    if pcm:
+        _cache_put(path, pcm)
+    return pcm
+
+
 def speak(text: str, cfg: Config, settings: dict, cache: Path, usage: Usage,
           now: Optional[float] = None) -> Tuple[bytes, str]:
     """(PCM, route) with route "cache", "vertex", "say" or "" when nothing could speak. Why the paid voice was
-    not used is kept in `last_reason` (for the log; never a secret)."""
+    not used is kept in `last_reason` (for the log; never a secret).
+
+    The paid voice is length-controlled by the text: it is split into requests of at most MAX_REQUEST_SECONDS of
+    estimated speech, and is used only when ALL of them fit what is left of today's paid minutes (otherwise the whole
+    text goes to the free voice, never half and half). Each request reserves before it is sent and is settled to
+    the billed seconds before the next one starts."""
     global last_reason, last_cap_out
     last_reason, last_cap_out = "", False
     why: list = []
     text = clean_for_voice(text)  # the voice reads the text verbatim: no symbols or unsayable Latin tokens reach it
+    if settings.get("tts_force_system"):
+        last_reason = "no listener detected; using the free system voice"
+        pcm = system_voice(text, settings.get("say_voice", ""))
+        return (pcm, "say") if pcm else (b"", "")
     model, voice = settings["tts_model"], settings["voice"]
     style = settings.get("style") or DEFAULT_STYLE
-    key = hashlib.sha256(json.dumps([model, voice, style, text]).encode()).hexdigest()
-    path = cache / f"{key}.pcm"
+    path = cache / f"{_cache_key(model, voice, style, text)}.pcm"
     try:
         pcm = path.read_bytes()
         if pcm:
             return pcm, "cache"
     except OSError:
         pass
-    estimate = len(text) * SECONDS_PER_CHAR
-    hard = bool(settings.get("tts_hard_cap"))
-    if hard and model in NO_CEILING:  # a hard cap and a model that cannot be held to a length: the free voice
-        why.append("the voice model refuses a length ceiling; a hard cap uses the free voice")
-        last_reason = "; ".join(why)
-        pcm = system_voice(text, settings.get("say_voice", ""))
-        return (pcm, "say") if pcm else (b"", "")
-    reserved = usage.reserve(estimate, settings["tts_daily_minutes"], now) if settings["tts_daily_minutes"] > 0 else None
-    if not reserved:
-        why.append("the paid voice is off (tts_daily_minutes is 0)" if settings["tts_daily_minutes"] <= 0 else
-                   f"today's {settings['tts_daily_minutes']} paid minutes are used up")
-        last_cap_out = settings["tts_daily_minutes"] > 0
-    if reserved:
-        try:
-            pcm, billed = vertex(text, cfg, model, voice, style, max_seconds=reserved[0], why=why,
-                                 **({"hard": True} if hard else {}))
-        except Exception as e:
-            pcm, billed = b"", None
-            why.append(f"Vertex voice crashed ({e.__class__.__name__})")
-        usage.settle(reserved, billed, now)
-        if pcm:
-            try:
-                cache.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_suffix(".tmp")
-                tmp.write_bytes(pcm)
-                tmp.replace(path)
-            except OSError:
-                pass
-            return pcm, "vertex"
+    pieces = split_text(text)
+    paid = b""
+    try:
+        left = usage.available(settings["tts_daily_minutes"], now, room_cap_minutes=settings.get("tts_room_daily_minutes"))
+    except OSError:
+        left = None
+        why.append("the paid voice budget is unavailable")
+    need = sum(estimate_seconds(p) * MIN_RESERVE_FACTOR for p in pieces)
+    if left is not None and need <= left:
+        parts = []
+        for piece in pieces:
+            part = _paid_piece(piece, cfg, settings, cache, usage, now, why)
+            if not part:
+                parts = []
+                break
+            parts.append(part)
+        paid = b"".join(parts)
+    elif left is not None:
+        cap = min(settings["tts_daily_minutes"], settings.get("tts_room_daily_minutes", 0)) if usage.room else settings["tts_daily_minutes"]
+        why.append(f"the text needs about {need:.0f} s of paid speech but only {max(left, 0):.0f} s are left today"
+                   if cap > 0 else "the paid voice is off (daily cap is 0)")
+        last_cap_out = cap > 0
+    elif not why:
+        cap = min(settings["tts_daily_minutes"], settings.get("tts_room_daily_minutes", 0)) if usage.room else settings["tts_daily_minutes"]
+        why.append("the paid voice is off (daily cap is 0)" if cap <= 0 else
+                   f"today's {cap} paid minutes are used up")
+        last_cap_out = cap > 0
+    if paid:
+        if len(pieces) > 1:
+            _cache_put(path, paid)
+        return paid, "vertex"
     last_reason = "; ".join(why) or "the paid voice gave no audio"
     pcm = system_voice(text, settings.get("say_voice", ""))
     return (pcm, "say") if pcm else (b"", "")

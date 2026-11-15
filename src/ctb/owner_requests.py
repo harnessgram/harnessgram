@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -52,11 +53,12 @@ def _read(path):
     return json.loads(raw) if len(raw) <= FILE_BYTES else None
 
 
-def read(now: float, folder: Path = None) -> list:
+def read(now: float, folder: Path = None, *, history=False) -> list:
     """Flat rows, grouped by project, owner first, team second, recent completions last.
 
     Both the installed ledger's string notes and {at,text} notes are accepted. Done's
     `updated` is the ledger's completion time. No cache of the source: the next poll sees adds.
+    `history` retains older completions and all notes for topic cards, including supplied note dates.
     """
     if folder is None:
         return []
@@ -87,20 +89,60 @@ def read(now: float, folder: Path = None) -> list:
                     or status not in ("open", "done") or created is None or updated is None):
                 continue
             seen.add(ident)
-            if status == "done" and not 0 <= now - updated <= DONE_DAYS:
+            if not history and status == "done" and not 0 <= now - updated <= DONE_DAYS:
                 continue
             notes = item.get("notes")
             steps = []
-            for note in (notes if isinstance(notes, list) else [])[-MAX_NOTES:]:
+            notes = notes if isinstance(notes, list) else []
+            for note in notes[-MAX_NOTES:]:  # the same window as always, sliced before any cleaning
                 text = _text(note.get("text") if isinstance(note, dict) else note)
                 if text:
                     steps.append({"text": text})
+                    if history and isinstance(note, dict) and _time(note.get("at")) is not None:
+                        steps[-1]["at"] = _time(note["at"])
             rows.append({"project": _text(project), "id": ident, "title": title, "status": status,
                          "wait": "owner" if item.get("wait") == "owner" else "team",
                          "age": max(0, int(now - created)), "updated": updated,
+                         "older": status == "open" and item.get("wait") == "owner" and now - updated >= DONE_DAYS,
+                         "urgent": bool(steps and steps[-1]["text"] == "pushed by owner"),
                          "note": steps[-1]["text"] if steps else "", "steps": steps})
+            topic = item.get("topic")
+            if isinstance(topic, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", topic):
+                rows[-1]["topic"] = topic
+            if history:
+                rows[-1]["created"] = created
     return sorted(rows, key=lambda r: (r["project"].casefold(), r["status"] == "done",
                                       r["wait"] != "owner", -r["updated"], r["id"]))
+
+
+def latest_notes(folder: Path = None) -> dict:
+    """{(project, id): the item's latest note, whole}: for checks on the full text (a "parked:" marker past the
+    display cut). Same bounded, no-symlink reader as `read`; never shown, so it is not cleaned for display."""
+    out = {}
+    if folder is None:
+        return out
+    try:
+        paths = sorted(folder.glob("*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        project = _text(project_name(path.stem))
+        if not project:
+            continue
+        try:
+            data = _read(path)
+        except (OSError, ValueError, RecursionError):
+            continue
+        items = data.get("items") if isinstance(data, dict) else None
+        for item in (items if isinstance(items, list) else [])[:MAX_ITEMS]:
+            if not isinstance(item, dict) or type(item.get("id")) is not int:
+                continue
+            notes = item.get("notes")
+            texts = [n.get("text") if isinstance(n, dict) else n for n in (notes if isinstance(notes, list) else [])]
+            texts = [t for t in texts if isinstance(t, str) and t.strip()]
+            if texts:
+                out[(project, item["id"])] = texts[-1][:FILE_BYTES]
+    return out
 
 
 def translate(rows, tr, waiting):

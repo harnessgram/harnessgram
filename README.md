@@ -298,6 +298,7 @@ Or write `~/.config/claude-telegram-bridge/config.json` yourself and `chmod 600`
 | `progress_details` | `false` | when enabled, progress can include action details, output previews and assistant text |
 | `auto_account_switch` | `false` | allow automatic account switching and session moves, which can transfer transcripts between accounts |
 | `quota_auto_continue` | `false` | send a continue instruction when quota is confirmed to have returned |
+| `idle_lines` | `{}` (on, 4 h) | the idle-line nudger: open team items of the owner ledger that did not move for `hours` (default 4) show in the Cockpit's "Idle lines" block and `ctb idle-lines`; a project listed in `leads` (ledger project -> session id) also gets one short fixed line typed into that session when it is quiet and idle, at most once per item per 4 h. `{"on": false}` turns it off. A latest ledger note containing `parked:` (optionally `parked: until YYYY-MM-DD`) parks the item; see docs/panel.md |
 | `session_auto_revive` | `false` | reopen sessions after reboot or crash; restart the heartbeat after enabling |
 | `context_footer` | `true` | a small italic `🧠 123k` line (context size) under the last message of each reply |
 | `context_hint_tokens` | `400000` | add a `/compact` hint to that line from this many tokens up (`0` = never) |
@@ -891,7 +892,7 @@ Use a tagged release rather than the moving `main` branch, and keep the version 
 harnessgram --version                       # note the version you have now
 harnessgram wait-idle                       # waits up to 30 s until no session is mid-reply
 uv tool upgrade harnessgram                 # or: pipx upgrade harnessgram
-                                            # from the repository, pin a tag: uv tool install --force git+https://github.com/harnessgram/harnessgram@v0.3.0
+                                            # from the repository, pin a tag: uv tool install --force git+https://github.com/harnessgram/harnessgram@v0.2.0
 harnessgram install                         # re-applies the hooks and restarts the services it owns
 harnessgram doctor                          # one line per check; it names any service still running old code
 ```

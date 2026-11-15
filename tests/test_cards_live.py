@@ -97,7 +97,7 @@ def test_stop_skips_a_busy_card_lock_silently(stop):
 @pytest.mark.parametrize(("reply", "expected"), [
     ("First sentence. Second sentence.", "First sentence."),
     ("First line\nSecond line", "First line"),
-    ("x" * 230, "x" * 200),
+    ("x" * 230, "x" * 230),  # the page clamps the preview; the stored text stays whole
     ("```text\nSummary: raw file contents\n```\nSafe sentence. More.", "Safe sentence."),
 ])
 def test_stop_falls_back_to_a_short_first_sentence(stop, reply, expected):
@@ -144,6 +144,7 @@ def test_stale_plan_reminder_is_ten_minutes_and_asks_for_rewritten_steps():
 def test_a_quiet_background_reply_never_reaches_the_card(stop, monkeypatch):
     rec = own()
     monkeypatch.setattr(hooks, "background_only_turn", lambda *a, **kw: True)
+    monkeypatch.setattr(hooks, "chatter_reply", lambda reply: True)
     stop("Summary: internal background detail.")
     saved = {r["id"]: r for r in cards.open_cards()}
     assert "live" not in saved[rec["id"]]

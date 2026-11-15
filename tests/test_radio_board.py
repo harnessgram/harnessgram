@@ -131,7 +131,7 @@ def test_the_ticker_lists_what_waits_first_then_landings_in_full():
     assert all("time" not in e for e in entries if e["mark"] == "waiting")   # no age: it would change each minute
 
 
-# --- the staff edition: names and counts only ---------------------------------------------------------------
+# --- the staff edition: labels, numbers and checked lines only ---------------------------------------------
 
 SECRET_ITEM = "סוד פנימי של הבעלים"
 
@@ -146,16 +146,16 @@ def test_no_item_text_can_reach_a_staff_frame():
     view["projects"][0]["text"] = SECRET_ITEM          # even a field slipped into the view is never read
     view["extra"] = SECRET_ITEM
     sl = B.staff_slide(view)
-    assert sl["rows"] == [{"name": "פרויקט אלף", "done": 1, "open": 3}]
+    assert sl["rows"] == [{"name": "פרויקט א׳", "done": 1, "open": 3, "pct": 0, "cards": []}]
     ops = json.dumps(P.layout(sl, "/nowhere/x.png").data(), ensure_ascii=False)
-    assert SECRET_ITEM not in ops and "פרויקט אלף" in ops
+    assert SECRET_ITEM not in ops and "פרויקט א׳" in ops
 
 
 def test_a_staff_label_that_fails_the_gate_is_left_out():
     sl = B.staff_slide({"lang": "he", "sections": ["done_today", "in_work"], "at": NOW,
                         "projects": [{"label": "Project with English", "done": [], "open": 2},
                                      {"label": "פרויקט בית", "done": [{"key": "a"}], "open": True}]})
-    assert sl["rows"] == [{"name": "פרויקט בית", "done": 1, "open": 0}]
+    assert sl["rows"] == [{"name": "פרויקט בית", "done": 1, "open": 0, "pct": 0, "cards": []}]
 
 
 def test_the_staff_overview_shows_all_eight_listed_projects(tmp_path):
@@ -324,9 +324,79 @@ def test_board_encoder_settings_ticker_overlay_and_no_secret_on_argv():
                               strip_fd=4, strip=(1100, 662, 6))
     joined = " ".join(args)
     assert "-c:v mjpeg -framerate 10" in joined and "-b:v 600k" in joined and "rtmp" not in joined
-    assert "-i pipe:4" in joined and "crop=w=1100:h=ih:x='iw-1100-mod(n*6,iw/2)'" in joined
+    assert "-i pipe:4" in joined
+    assert f"crop=w=1100:h=ih:x='iw-1100-mod(floor(n/{S.TICKER_STEP_FRAMES})*{S.TICKER_STEP_FRAMES}*6,iw/2)'" in joined
     assert "overlay=x=0:y=662" in joined and "-map [v]" in joined
     assert " ".join(radio.encoder_args("libx264", 3)).count("-c:v png -framerate 2") == 1  # the card is unchanged
+
+
+@pytest.mark.parametrize("encoder", ["libx264", "h264_videotoolbox"])
+@pytest.mark.parametrize("out", [15, 30])
+@pytest.mark.parametrize("ticker", [False, True])
+@pytest.mark.parametrize("explicit_rate", [False, True])
+def test_board_encoder_has_a_bounded_rate_and_fixed_decoder_contract(encoder, out, ticker, explicit_rate):
+    args = radio.encoder_args(encoder, fps=S.FPS, codec=S.CODEC,
+                              bitrate=radio.BOARD_BITRATE if explicit_rate else None,
+                              strip_fd=4 if ticker else None,
+                              strip=(*S.BoardShow.strip_window, S.TICKER_SPEED) if ticker else None,
+                              output_fps=out)
+    def value(flag):
+        return args[args.index(flag) + 1]
+
+    assert value("-fps_mode") == "cfr" and value("-r") == str(out)
+    assert value("-g") == value("-keyint_min") == str(2 * out)
+    assert value("-force_key_frames") == "expr:gte(t,n_forced*2)"
+    assert value("-flags") == "+cgop" and value("-bf") == "0"
+    assert value("-profile:v") == "main" and value("-level:v") == "3.1"
+    assert value("-maxrate") == value("-b:v")
+    rate = int(value("-b:v").removesuffix("k"))
+    assert rate <= int(value("-bufsize").removesuffix("k")) <= 2 * rate
+    graph = value("-filter_complex" if ticker else "-vf")
+    assert f"fps={out},scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=tv,format=yuv420p" in graph
+    if ticker:
+        assert f"floor(n/{S.TICKER_STEP_FRAMES})*{S.TICKER_STEP_FRAMES}*{S.TICKER_SPEED}" in graph
+        assert "mod(n*" not in graph
+    if encoder == "libx264":
+        assert value("-sc_threshold") == "0"
+        assert "nal-hrd=cbr" in value("-x264-params") and "open-gop=0" in value("-x264-params")
+    else:
+        assert value("-constant_bit_rate") == "1"
+    audio = args[args.index("-c:a"):args.index("-metadata")]
+    assert audio == ["-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2"]
+
+
+@pytest.mark.parametrize("encoder", ["libx264", "h264_videotoolbox"])
+@pytest.mark.parametrize("out", [15, 30])
+def test_card_encoder_args_match_main_925e9b3_byte_for_byte(monkeypatch, encoder, out):
+    monkeypatch.setenv("CTB_RADIO_OUT_FPS", str(out))
+    # Frozen from main before the board fix. In particular, do not apply the board's rate/GOP options here.
+    video = (["-c:v", "h264_videotoolbox", "-realtime", "1", "-allow_sw", "1", "-profile:v", "main", "-bf", "0"]
+             if encoder == "h264_videotoolbox" else
+             ["-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage,zerolatency", "-bf", "0"])
+    expected = ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
+                "-probesize", "32", "-analyzeduration", "100000", "-f", "s16le", "-ar", "48000", "-ac", "1",
+                "-thread_queue_size", "64", "-i", "pipe:0", "-analyzeduration", "100000", "-f", "image2pipe",
+                "-c:v", "png", "-framerate", "2", "-thread_queue_size", "8", "-i", "pipe:7",
+                "-map", "1:v", "-map", "0:a", "-vf", f"fps={out},format=yuv420p",
+                "-g", str(2 * out), "-keyint_min", str(2 * out), *video,
+                "-b:v", "250k", "-maxrate", "300k", "-bufsize", "600k",
+                "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2", "-metadata", "comment=card-test",
+                "-flush_packets", "1", "-max_interleave_delta", "100000",
+                "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1"]
+    assert radio.encoder_args(encoder, 7, "card-test") == expected
+
+
+def test_ticker_cycle_waits_for_the_same_step_as_the_encoder(tmp_path):
+    show = S.BoardShow(_show_dir(tmp_path), tmp_path / "bin")
+    # Check every frame through several strip wraps, including wraps between step boundaries.
+    end = 4 * P.HALF // S.TICKER_SPEED
+    for n in range(end):
+        show.strip_n = n
+        offset = (n // S.TICKER_STEP_FRAMES) * S.TICKER_STEP_FRAMES * S.TICKER_SPEED
+        assert show.cycle() == offset // P.HALF
+        if n % S.TICKER_STEP_FRAMES:
+            show.strip_n = n - 1
+            assert show.cycle() == offset // P.HALF
 
 
 def test_the_board_switch_is_a_runtime_setting_off_by_default():

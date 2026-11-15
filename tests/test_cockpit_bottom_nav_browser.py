@@ -20,7 +20,8 @@ def browser():
         b.close()
 
 
-def open_mock(browser, lang, count=1, scheme="light"):
+def open_mock(browser, lang, count=1, scheme="light", mint=None):
+    mint = mint if mint is not None else {"status": 200}
     ctx = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme=scheme, bypass_csp=True)
     page = ctx.new_page()
     apps = [{"name": "studio" if i == 0 else "extra%d" % i, "title": "Studio" if i == 0 else "Extra %d" % i,
@@ -32,6 +33,11 @@ def open_mock(browser, lang, count=1, scheme="light"):
             route.fulfill(content_type="application/javascript", body=panel_browser.STUB % json.dumps("test"))
         elif url.endswith("/api/state"):
             route.fulfill(content_type="application/json", body=json.dumps(state))
+        elif url.endswith("/api/app-token"):
+            if mint["status"] == 0:
+                route.abort()
+            else:
+                panel_browser.app_token_reply(route, mint["status"])
         else:
             route.fulfill(content_type="text/html", body=panel_page.render_page(lang, "test").decode())
     page.route("**/*", respond)
@@ -85,4 +91,19 @@ def test_more_sheet_closes_on_outside_tap_and_app_frame_clears_the_bar(browser):
     assert frame_bottom <= bar_top
     toast_bottom = page.evaluate("()=>document.getElementById('toast').getBoundingClientRect().bottom")
     assert toast_bottom <= bar_top
+    ctx.close()
+
+
+@pytest.mark.parametrize("status", [503, 0])
+def test_a_failed_app_token_shows_the_offline_state_and_retry_recovers(browser, status):
+    mint = {"status": status}
+    ctx, page = open_mock(browser, "en", mint=mint)
+    page.locator(".tabs .tab", has_text="Studio").click()
+    page.wait_for_selector(".apperr")
+    assert page.locator(".apperr").is_visible() and page.locator("iframe.appframe").count() == 0
+    assert "No connection" in page.locator(".apperr").inner_text()
+    mint["status"] = 200
+    page.locator(".apperr button").click()
+    page.wait_for_selector("iframe.appframe")
+    assert page.locator(".apperr").count() == 0
     ctx.close()

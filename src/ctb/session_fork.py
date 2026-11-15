@@ -100,6 +100,9 @@ def start(cfg, bot, topics, session, scope, token, now=None):
         if not shutil.which("tmux"):
             raise ForkError("fork_no_tmux")
         sid = str(uuid.uuid4())
+        from . import assistant
+        if assistant.is_assistant(session):
+            assistant.mark(sid)  # the fork keeps the assistant role on every later launch (OSError: no fork)
         # Resume history belongs to the source account, even if the default changed.
         account = accounts.account_for(session)
         argv = inbox.shell_argv(accounts.shell_command(session)

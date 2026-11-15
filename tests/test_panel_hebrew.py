@@ -199,7 +199,7 @@ def test_the_strings_table_has_every_key_the_page_uses():
 
 def test_hebrew_strings_never_mix_english_outside_an_isolate():
     for key, value in panel_page.STRINGS["he"].items():
-        bare = re.sub("⁨[^⁩]*⁩", "", value)
+        bare = re.sub("⁨[^⁩]*⁩", "", value).replace("{n}", "1")  # requestText substitutes the localized count
         assert not re.search(r"[A-Za-z]", bare), key
         for name in re.findall("⁨([^⁩]*)⁩", value):
             assert len(name.split()) <= 3, key

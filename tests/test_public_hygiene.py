@@ -27,7 +27,9 @@ PRIVATE_TERMS = Path(os.environ.get("HARNESSGRAM_PRIVATE_TERMS")
 
 def _tracked():
     try:
-        out = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, timeout=30).stdout
+        # Inspect new source before the first commit as well as tracked files.
+        out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                             cwd=ROOT, capture_output=True, check=True, timeout=30).stdout
         names = [n for n in out.decode("utf-8").split("\0") if n]
     except (OSError, subprocess.SubprocessError):
         names = []
@@ -110,6 +112,7 @@ PUBLIC_HOSTS = {
     "generativelanguage.googleapis.com", "translate.googleapis.com", "clients5.google.com", "pypi.org",
     "www.w3.org", "supabase.com", "docs.astral.sh", "pipx.pypa.io", "www.googleapis.com", "accounts.google.com",
     "oauth2.googleapis.com",  # YouTube API
+    "apps.apple.com", "apps",  # App Store links (app requests; "apps" is the regex host fragment)
     "localhost", "127.0.0.1", "x", "a", "hgl", "user", "claude", "x.y", "...", "host",
 }
 HOST_OK = re.compile(r"^example\.|(?:^|\.)t\.me$|(?:^|\.)(?:example(?:\.(?:com|org|net|test|invalid))?|test|invalid|localhost)$"

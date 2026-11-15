@@ -192,12 +192,12 @@ def pane_for_session(sid: str) -> Optional[str]:
 
 def at_prompt(pane: str) -> bool:
     """True only for an idle input box: not busy, and not a permission/plan/question menu."""
-    from .inbox import _tmux
+    from .inbox import _tmux, strip_tip
     try:
         out = _tmux("capture-pane", "-p", "-t", pane)
         if out.returncode != 0:
             return False
-        tail = out.stdout.splitlines()[-12:]
+        tail = strip_tip(out.stdout).splitlines()[-12:]
         if any(MENU.search(l) for l in tail):
             return False
         return (any(l.lstrip("│ ").startswith("❯") for l in tail)

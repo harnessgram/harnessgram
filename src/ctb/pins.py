@@ -22,11 +22,14 @@ import re
 import time
 from typing import Dict, Optional
 
-from . import flood, fmt
+from . import flood
+from .lazy import lazy_module
 from . import lang as L
 from .config import Config, home_chat, private_dir, state_dir, write_private
 from .projects import owner_chats
 from .telegram import TelegramError
+
+fmt = lazy_module(".fmt")
 
 STATE_FILE = "pins.json"
 _CALL_TIMEOUT = 5   # the index is a nicety: never hold the sender for the default 15 seconds

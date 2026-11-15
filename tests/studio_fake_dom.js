@@ -11,6 +11,7 @@ El.prototype.appendChild = function (c) { if (c.parentNode) c.parentNode.removeC
 El.prototype.removeChild = function (c) { var i = this.childNodes.indexOf(c); if (i >= 0) this.childNodes.splice(i, 1); c.parentNode = null; return c; };
 El.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); if (k === "class") this.className = String(v); };
 El.prototype.getAttribute = function (k) { return k in this.attrs ? this.attrs[k] : null; };
+El.prototype.getElementsByTagName = function (tag) { var found = []; walk(this, function (e) { if (e.tagName === tag) found.push(e); }); return found; };
 El.prototype.addEventListener = function (t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); };
 El.prototype.click = function () { (this.listeners.click || []).forEach(function (f) { f({}); }); };
 El.prototype.fire = function (t, ev) { (this.listeners[t] || []).forEach(function (f) { f(ev || {}); }); };
@@ -54,7 +55,7 @@ var sandbox = {document: doc, window: win, setTimeout: function (f, ms) { timers
 function start(script) { vm.runInNewContext(script, sandbox); }
 function send(data) { handler({source: HOST, data: data}); }
 function hello(lang) {
-  send({cockpit: "hello", initData: "init", lang: lang || "he", dir: (lang || "he") === "he" ? "rtl" : "ltr", theme: "", focus: false, inset: {bottom: 0}});
+  send({cockpit: "hello", token: "scoped-test-token", lang: lang || "he", dir: (lang || "he") === "he" ? "rtl" : "ltr", theme: "", focus: false, inset: {bottom: 0}});
 }
 function flush() { return new Promise(function (r) { setImmediate(r); }); }
 var answered = {};

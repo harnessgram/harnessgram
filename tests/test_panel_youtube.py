@@ -233,6 +233,12 @@ def test_switch_and_projects_go_through_the_staff_settings(srv):
     assert yt(srv, {"action": "enable", "on": "yes"})[0] == 400
 
 
+def test_there_is_no_free_text_level_to_switch_on(srv):
+    """The staff edition is structured data only: the Cockpit has no action that could turn free text on."""
+    assert yt(srv, {"action": "content", "level": "summaries", "steps": True})[0] == 400
+    assert "content" not in Y.settings(srv.cfg) and "step_names" not in Y.settings(srv.cfg)
+
+
 def test_start_takes_two_taps_and_one_token(srv):
     _connected()
     assert yt(srv, {"action": "start", "armed": "x" * 32})[0] == 409  # no first tap
@@ -444,3 +450,11 @@ def test_the_card_says_reconnect_and_reports_a_failed_revoke():
         assert panel_page.STRINGS[lang]["ytReconnect"] and panel_page.STRINGS[lang]["ytRevokeFailed"]
     Y._op(action="disconnect", at=int(time.time()), done=True, ok=True, result="youtube_disconnected_revoke_failed")
     assert Y.operation()["result"] == "youtube_disconnected_revoke_failed" and not Y.operation()["failed"]
+
+
+def test_youtube_failure_messages_are_localized_and_only_known_codes_are_rendered():
+    from ctb import panel_page
+    for lang in ("he", "en"):
+        text = panel_page.STRINGS[lang]["ytErr_youtube_rules_invalid"]
+        assert text and "youtube_rules_invalid" not in text
+    assert 'S.ytErr_youtube_rules_invalid' in panel_page.PAGE

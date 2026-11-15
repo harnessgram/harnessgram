@@ -100,9 +100,9 @@ def cold_compact(session: str, transcript: str, idle_since: float, timeout: floa
                  clock: Callable[[], float] = time.time, spawn_fn: Optional[Callable] = None) -> bool:
     """The owner writes after an hour's break into a big context: the whole context is re-read at full price anyway, so compact first.
     Starts the compaction and returns True; the message stays queued and the waiter started
-    after the compaction delivers it. Falls back to delivery if no compaction marker within 30 s."""
+    after the compaction delivers it. Falls back to delivery after cancelling this attempt if it has not submitted within 30 s."""
     try:
-        if clock() - idle_since < COLD_AFTER:
+        if not compact.cold_eligible(session, transcript, clock()):
             return False
         from .compact import limit_for
         if not limit_for(session):
@@ -112,20 +112,15 @@ def cold_compact(session: str, transcript: str, idle_since: float, timeout: floa
         if ctx < COLD_MIN:
             return False
         started = clock()
+        attempt = compact.cold_offer(session)
         if spawn_fn is not None:
-            spawn_fn(session, ctx)
+            spawn_fn(session, ctx, cold_attempt=attempt)
         else:
-            compact.spawn_auto_compact(session, ctx, cold=True)  # a process: wake exits right after
-        mark = compact.marker(session)
-        while clock() - started < timeout:
-            try:
-                if mark.exists() and mark.stat().st_mtime >= started - 1:
-                    return True
-            except OSError:
-                pass
-            sleep(poll_interval)
-        return False
+            compact.spawn_auto_compact(session, ctx, cold=True, cold_attempt=attempt)  # a process: wake exits right after
+        return compact.wait_cold(session, attempt, started, timeout, clock, sleep, poll_interval)
     except Exception:
+        if "attempt" in locals():
+            compact.cold_timeout(session, attempt)
         return False
 
 
@@ -209,7 +204,9 @@ def _pane_is_ours(pane: str, chain: list) -> bool:
 
 def hook_start(stdin_text: str) -> int:
     """Associate a session with its tmux pane without trusting arbitrary pane targets, and a SessionStart after /compact (source == "compact") tells the topic the wait is over:
-    the PreCompact notice asked the owner to wait for exactly this message."""
+    the PreCompact notice asked the owner to wait for exactly this message. After a compaction, a resume or a
+    /clear it prints the recall block (recall.py) as SessionStart additionalContext; nothing on any error."""
+    out = None
     try:
         data = json.loads(stdin_text)
         if not isinstance(data, dict):
@@ -259,9 +256,27 @@ def hook_start(stdin_text: str) -> int:
         if source in ("clear", "resume") and load_config().ready:
             # the topic says so, and follows the window when the new conversation has no topic (direct.py)
             spawn(["direct-note", f"--session={session}", "--field=switch", f"--value={source}:{previous}"])
+        out = _recall(data, previous)
     except (OSError, ValueError, TypeError, AttributeError):
         pass
+    if out:
+        try:
+            print(json.dumps(out, ensure_ascii=False))
+        except (OSError, ValueError, TypeError):
+            pass
     return 0
+
+
+def _recall(data: dict, previous: str) -> Optional[dict]:
+    """The recall block (recall.py) for a compaction, a resume or a /clear; None on any error."""
+    try:
+        cfg = load_config()
+        if not cfg.ready:
+            return None
+        from . import recall
+        return recall.at_session_start(cfg, data, previous)
+    except Exception:
+        return None
 
 
 def wait_for_message(data: dict, inbox: Optional[Inbox] = None, poll: float = POLL, settle: float = SETTLE,

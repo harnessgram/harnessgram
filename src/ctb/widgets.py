@@ -98,7 +98,8 @@ def handle_query(query, cfg, bot, inbox):
             current = [r for r in decisions.open_decisions() if r["id"] == ident]
             if (index > 1 or len(current) != 1 or current[0]["title"] != entry.get("question")
                     or [current[0]["yes"], current[0]["no"]] != entry.get("options")
-                    or panel.stale_reasons_now(cfg).get(ident) in ("ended", "replaced")):
+                    or panel.stale_reasons_now(cfg).get(ident) in ("ended", "replaced")
+                    or current[0].get("perm")):  # a widget never answers a Claude Code permission request
                 return result
             rec = decisions.answer(cfg, inbox, ident, ("yes", "no")[index])
         change = {"chat_id": cfg.owner_chat_id, "message_id": query["message_id"], "chat_data": str(index)}

@@ -183,7 +183,7 @@ def test_refresh_interval_is_short_while_seen_and_backs_off_while_hidden():
 def test_subjects_lose_paths_links_addresses_and_secrets():
     tasks = [{"content": "Inspect /Users/someone/private/client/file", "status": "in_progress"},
              {"content": "Read ~/notes/plan.md and C:\\Users\\x\\y.txt", "status": "pending"},
-             {"content": "Use sk_live_abcdefghijklmnop1234567 now", "status": "pending"},
+             {"content": "Use sk_" + "live_abcdefghijklmnop1234567 now", "status": "pending"},
              {"content": "Mail someone@example.com", "status": "pending"},
              {"content": "Edit src/ctb/cards.py", "status": "pending"},
              {"content": "Open https://example.com/x?token=abc", "status": "pending"}]

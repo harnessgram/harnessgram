@@ -7,6 +7,11 @@ An answer reaches the asking session exactly like a decision's (see decisions.py
 the session's own text quoted, queued to its inbox as a "panel" message. Nothing the owner does on a card
 is approval for a sensitive action, and the text the session receives says so.
 
+Every card has a `visibility`: "private" (the owner's own surfaces: the Cockpit and his private chat; the
+default), "team" (project topics) or "public" (anything that leaves the owner's surfaces: the radio's YouTube
+staff station and mirror, any public post). Those outward paths take a card only when `is_public` says so; a
+missing or unknown value reads as private (fail closed).
+
 The state file, its lock, the text rules and the proof of the calling session are the decisions module's.
 """
 from __future__ import annotations
@@ -21,19 +26,22 @@ import time
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
-from . import decisions as D
+from . import card_media, decisions as D
 from .config import Config, home_chat, private_dir, state_dir, write_private
 
 STATE_FILE = "cards.json"
 PROGRESS_STALE_AFTER = 10 * 60
 PROGRESS_CLOSE_AFTER = 6 * 60 * 60  # legacy constant; unfinished work is not closed by age
-PROGRESS_FINISHED_GRACE = 10 * 60
+PROGRESS_FINISHED_GRACE = 30 * 60  # a finished card stays in view 30 minutes, then folds into old cards
 PROGRESS_ENDED_GRACE = 5 * 60
+PROGRESS_FOLD_AFTER = 30 * 60  # completed progress leaves the main stack after half an hour
 KINDS = ("progress", "choice", "ask", "link", "numbers")
+VISIBILITIES = ("private", "team", "public")
+DEFAULT_VISIBILITY = "private"
 ASKS = ("choice", "ask")  # the owner answers these once; the others only show
 TITLE_CHARS = 120
 DETAIL_CHARS = 600
-LIVE_CHARS = 200
+LIVE_CHARS = 1600  # storage/translation bound; the page clamps the preview without losing its words
 STEP_CHARS = 40
 LABEL_CHARS = 30
 VALUE_CHARS = 14
@@ -77,6 +85,27 @@ def _locked(until: Optional[float] = None):
         yield base / STATE_FILE
 
 
+def visibility_of(rec) -> str:
+    """A card's visibility; anything missing, unknown or not a card reads as private (fail closed)."""
+    value = rec.get("visibility") if isinstance(rec, dict) else None
+    return value if isinstance(value, str) and value in VISIBILITIES else DEFAULT_VISIBILITY
+
+
+def is_public(rec) -> bool:
+    """The only test an outward path (YouTube staff station, mirror, public post) may use: exactly "public"."""
+    return isinstance(rec, dict) and rec.get("visibility") == "public"
+
+
+def _visibility(value, old: Optional[str] = None) -> str:
+    """The visibility a publish asks for: None keeps the card's own (private for a new card); a value that is
+    not one of VISIBILITIES is refused, never guessed."""
+    if value is None:
+        return old if old in VISIBILITIES else DEFAULT_VISIBILITY
+    if not isinstance(value, str) or value not in VISIBILITIES:
+        raise CardError("--visibility is private, team or public")
+    return value
+
+
 def _strings(value, limit: int, most: int) -> Optional[List[str]]:
     if not isinstance(value, list) or len(value) > most:
         return None
@@ -101,7 +130,16 @@ def _body(kind: str, raw: dict) -> Optional[dict]:
         return body
     if kind == "choice":
         options = _strings(raw.get("options"), LABEL_CHARS, MAX_OPTIONS)
-        return {"options": options} if options and len(options) >= 2 else None
+        if not options or len(options) < 2:
+            return None
+        body = {"options": options}
+        if "images" in raw:
+            images = raw["images"]
+            if (not isinstance(images, list) or len(images) != len(options)
+                    or not all(isinstance(x, str) and card_media.ID.fullmatch(x) for x in images)):
+                return None
+            body["images"] = list(images)
+        return body
     if kind == "ask":
         return {}
     if kind == "link":
@@ -150,7 +188,8 @@ def _record(ident, raw) -> Optional[dict]:
         return None
     rec = {"id": ident, "kind": kind, "session": raw["session"], "title": raw["title"], "detail": raw["detail"],
            "chat": raw["chat"], "thread": raw["thread"], "created": float(raw["created"]),
-           "updated": float(raw["updated"]), "state": state, "pick": None, "text": "", "closed": 0.0, **body}
+           "updated": float(raw["updated"]), "state": state, "pick": None, "text": "", "closed": 0.0,
+           "visibility": visibility_of(raw), **body}
     for key in ("finished_since", "ended_since"):
         if kind == "progress" and D._num(raw.get(key)):
             rec[key] = float(raw[key])
@@ -193,14 +232,33 @@ def _load(path) -> Dict[str, dict]:
 def _save(path, data: Dict[str, dict]) -> None:
     closed = sorted((r for r in data.values() if r["state"] != "open"), key=lambda r: r["closed"], reverse=True)
     for gone in closed[KEEP_CLOSED:]:
+        if gone.get("images") and time.time() - gone["closed"] < card_media.GRACE:
+            continue  # keep the close time through the image deletion grace
         del data[gone["id"]]
     write_private(path, json.dumps(data, ensure_ascii=False))
 
 
 def open_cards() -> List[dict]:
-    """Every open card, oldest first. Read without the lock: writes replace the file atomically."""
+    """Every open card, oldest first. Lock-free: hooks can read while a writer holds the lock.
+
+    Panel state and media reads sweep copies under their existing cards lock.
+    """
     data = _load(state_dir() / STATE_FILE)
     return sorted((r for r in data.values() if r["state"] == "open"), key=lambda r: (r["created"], r["id"]))
+
+
+def image_available(ident: str, now: Optional[float] = None) -> bool:
+    now = time.time() if now is None else now
+    return any(ident in r.get("images", []) and (r["state"] == "open" or now - r["closed"] < card_media.GRACE)
+               for r in _load(state_dir() / STATE_FILE).values())
+
+
+def image(ident: str):
+    """Only copies belonging to a live card or its close grace may be served."""
+    with _locked() as path:
+        data = _load(path)
+        card_media.cleanup(data.values())
+        return card_media.read(ident) if image_available(ident) else None
 
 
 def finished(rec: dict) -> bool:
@@ -218,6 +276,7 @@ def reconcile_progress(ended: set, now: Optional[float] = None, elapsed: Optiona
     elapsed = time.monotonic() if elapsed is None else elapsed
     with _locked() as path:
         data = _load(path)
+        card_media.cleanup(data.values(), now)
         changed = False
         for rec in data.values():
             if rec["kind"] != "progress" or rec["state"] != "open":
@@ -301,9 +360,17 @@ def scrub_subject(text: str) -> str:
 
 
 def subject_line(text: str) -> str:
-    """Short, plain card text: scrub before truncation so a cut credential cannot escape redaction."""
+    """Plain card text, kept whole for the page's expandable preview.
+
+    Scrub before enforcing the storage bound so a cut credential cannot escape redaction.
+    Oversized input ends at a word boundary; ordinary summaries are never preview-cut here.
+    """
     from . import fmt
-    return _clean(scrub_subject(fmt.FENCE.sub(" ", text))[:LIVE_CHARS], LIVE_CHARS, "live", required=False)
+    text = scrub_subject(fmt.FENCE.sub(" ", text))
+    if len(text) > LIVE_CHARS:
+        prefix = text[:LIVE_CHARS - 1]
+        text = (prefix.rsplit(" ", 1)[0] if " " in prefix else "") + "…"
+    return _clean(text, LIVE_CHARS, "live", required=False)
 
 
 def update_live(session: str, text: str, now: Optional[float] = None, until: Optional[float] = None) -> int:
@@ -513,7 +580,31 @@ def _fields(kind: str, steps=None, at=None, percent=None, options=None, url="", 
 
 
 def publish(session: str, chat: int, thread: int, kind: str, title: str, detail: str = "", ident: str = "",
-            now: Optional[float] = None, **fields) -> dict:
+            now: Optional[float] = None, images=None, visibility: Optional[str] = None, **fields) -> dict:
+    """Prepare private copies outside the cards lock; roll them back on any refusal."""
+    if images and (kind != "choice" or not isinstance(images, (list, tuple))
+                   or len(images) != len(fields.get("options") or [])):
+        raise CardError("use one --image per option, in the same order")
+    if kind not in KINDS:
+        raise CardError(f"unknown card kind {kind}")
+    _visibility(visibility)  # a wrong value is refused before anything is copied or written
+    if images:
+        _fields(kind, **fields)  # reject invalid options before reading sources
+    copied = []
+    try:
+        if images:
+            copied = card_media.store_many(images)
+        return _publish(session, chat, thread, kind, title, detail, ident, now, copied, visibility=visibility,
+                        **fields)
+    except BaseException as exc:
+        card_media.discard(copied)
+        if isinstance(exc, card_media.MediaError):
+            raise CardError(str(exc)) from None
+        raise
+
+
+def _publish(session: str, chat: int, thread: int, kind: str, title: str, detail: str = "", ident: str = "",
+             now: Optional[float] = None, media_ids=None, visibility: Optional[str] = None, **fields) -> dict:
     """A new card, or with `ident` this session's own open card of the same kind replaced in place.
     A card that asks the owner something is never changed after it was published."""
     if kind not in KINDS:
@@ -535,6 +626,8 @@ def publish(session: str, chat: int, thread: int, kind: str, title: str, detail:
             title = title if (title or "").strip() else old["title"]
             detail = detail if (detail or "").strip() else old.get("detail", "")
     body = _fields(kind, **fields)
+    if media_ids:
+        body["images"] = media_ids
     title = _clean(title, TITLE_CHARS, "title")
     detail = _clean(detail, DETAIL_CHARS, "detail", multiline=True, required=False)
     with _locked() as path:
@@ -547,7 +640,8 @@ def publish(session: str, chat: int, thread: int, kind: str, title: str, detail:
                 raise CardError(f"card {ident} is a {old['kind']} card")
             if kind in ASKS:
                 raise CardError("a card that asks the owner is not edited; close it and publish a new one")
-            raw = dict(old, title=title, detail=detail, updated=now, **body)
+            raw = dict(old, title=title, detail=detail, updated=now, visibility=_visibility(visibility, old.get("visibility")),
+                       **body)
             if kind == "progress":
                 raw.update(state="open", closed=0.0)
                 for key in ("auto_closed", "finished_since", "ended_since"):
@@ -564,7 +658,8 @@ def publish(session: str, chat: int, thread: int, kind: str, title: str, detail:
             while ident in data:
                 ident = secrets.token_hex(8)
             raw = {"kind": kind, "session": session, "chat": chat, "thread": thread, "title": title,
-                   "detail": detail, "created": now, "updated": now, "state": "open", **body}
+                   "detail": detail, "created": now, "updated": now, "state": "open",
+                   "visibility": _visibility(visibility), **body}
             if kind == "progress":
                 raw["step_at"] = [now] * body["at"]
         if kind == "progress" and ident not in data:
@@ -691,7 +786,7 @@ def view(rec: dict, now: float) -> dict:
     """A card as the panel page gets it (no session id beyond its short form, no chat ids)."""
     out = {"id": rec["id"], "kind": rec["kind"], "title": rec["title"], "detail": rec["detail"],
            "age": max(0, int(now - rec["updated"])), "session": rec["session"][:8]}
-    for key in ("steps", "at", "percent", "options", "url", "label", "figures", "live", "live_at"):
+    for key in ("steps", "at", "percent", "options", "images", "url", "label", "figures", "live", "live_at"):
         if key in rec:
             out[key] = rec[key]
     if "live_at" in rec:
@@ -704,10 +799,11 @@ def view(rec: dict, now: float) -> dict:
 # --- the commands -------------------------------------------------------------------
 
 def _line(rec: dict) -> str:
-    return f"{rec['id']}  {rec['kind']}  {rec['title']}"
+    return f"{rec['id']}  {rec['kind']}  {visibility_of(rec)}  {rec['title']}"
 
 
-def run(cfg: Config, action: str, title: str = "", detail: str = "", ident: str = "", **fields) -> int:
+def run(cfg: Config, action: str, title: str = "", detail: str = "", ident: str = "",
+        visibility: Optional[str] = None, **fields) -> int:
     """`ctb card <action>`: 0 when it worked, 1 with a one-line reason when it was refused. The session is
     always the one the command runs inside (decisions.caller_session)."""
     try:
@@ -727,12 +823,22 @@ def run(cfg: Config, action: str, title: str = "", detail: str = "", ident: str 
             return 0
         if action not in KINDS:
             raise CardError(f"unknown card command {action}")
-        rec = publish(sid, chat, thread, action, title, detail, ident, **fields)
+        from . import assistant
+        if assistant.is_assistant(sid):  # fails closed: a config that cannot be read counts as an assistant
+            # An assistant session's card never leaves the owner (team topics, the radio's public surfaces) and
+            # never carries a local file; an update makes even an older card of its own private.
+            if visibility not in (None, "private") or fields.get("images"):
+                raise CardError("an assistant session publishes private cards only, with no attached files")
+            visibility = "private"
+        rec = publish(sid, chat, thread, action, title, detail, ident, visibility=visibility, **fields)
         if action in ASKS:
             from . import cockpit_notice
             cockpit_notice.update(cfg, rec, True)
         waits = " and waits for the owner's answer" if action in ASKS else ""
         print(f"card {rec['id']} is in the control panel{waits}: {rec['title']}")
+        if action == "choice" and not rec.get("images"):
+            print("tip: when the options are visual (designs, screenshots, pictures), attach one --image per option "
+                  "so the owner sees them on the card.", file=sys.stderr)
         return 0
     except D.DecisionError as e:
         print(f"Harnessgram: {e.reason}", file=sys.stderr)

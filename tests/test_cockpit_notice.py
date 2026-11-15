@@ -221,6 +221,7 @@ function tabsFn(){ app.children.push({answer:true}); }
 const tabsRender=tabsFn;
 ''' + page[start:end].replace('tabs(d);', 'tabsRender(d);') + r'''
 function radioPlayerDraw(){} function hookHealthCard(){}
+function v2Prepare(){} function v2Enabled(){return false;}
 function renderAll(){} function renderHere(){} function renderAgents(){} function renderSettings(){}
 function appOf(){return true;} function showApp(){} function applyChrome(){} function syncBack(){} function syncClose(){} function adoptBackLayers(){}
 function retireMissingBackLayers(){}
@@ -364,6 +365,7 @@ const wa={initData:"test"}, ASKS={}, rf={className:""}, requests=[], rendered=[]
 const document={getElementById(){return rf;}};
 const window={parent:null, postMessage(){}}; window.parent=window;
 function status(){} function makeDigest(){} function radioPlayerRefresh(){}
+function v2Enabled(){return false;}
 function render(d){last=d;rendered.push(d.value);} function waitingCount(){return 0;}
 function fetch(){return new Promise(resolve=>requests.push(resolve));}
 ''' + page[start:end] + r'''

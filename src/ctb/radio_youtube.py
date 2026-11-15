@@ -1,4 +1,4 @@
-"""The staff or explicitly armed mirror edition of the team radio on YouTube: an unlisted live stream the owner can share with his staff.
+"""The staff or explicitly armed mirror edition of the team radio on YouTube. The staff edition is an unlisted live stream the owner can share with his staff; the mirror edition is private (only the owner's account).
 
     harnessgram radio youtube status [--live] | connect | start | stop | disconnect
 
@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import launch, radio, radio_card, radio_script, radio_staff, radio_voice
-from .config import Config, HOME, private_dir, state_dir, write_private
+from .config import Config, HOME, RADIO_SUITABILITY_KEY, private_dir, state_dir, write_private
 
 LABEL = "com.claude-telegram-bridge.radio-youtube"
 MARKER = "ctb-radio-youtube"
@@ -67,6 +67,8 @@ STREAM_TITLE = "Harnessgram staff radio"   # the reusable ingest stream this rad
 MAX_HOURS = 11            # YouTube archives a stream only when it is shorter than 12 hours
 POLL = 30
 MAX_FAILURES = 5
+MIRROR_WAIT = 300
+MIRROR_WAIT_POLL = 5
 FAILURE_WINDOW = 900
 CONNECT_TIMEOUT = 600
 _SAFE_SECRET = re.compile(r"[A-Za-z0-9._~+/=:-]{8,4096}")
@@ -112,10 +114,83 @@ def settings(cfg: Config) -> dict:
         names.update(raw.get("projects") if isinstance(raw.get("projects"), dict) else {})
         picked = [k for k in prefs["projects"] if isinstance(k, str) and k in catalog_keys(s, names)]
         s["projects"] = {k: names.get(k) or k for k in picked[:radio_staff.MAX_PROJECTS]}
+    # The staff labels: ONLY the owner's staff map (radio.youtube.projects); a listed project without one is shown
+    # under a neutral "Project A" (radio_staff._label), never under its key, topic or display name.
+    staff_map = raw.get("projects") if isinstance(raw.get("projects"), dict) else {}
+    s["labels"] = {k: staff_map[k] for k in s["projects"] if isinstance(staff_map.get(k), str)}
+    # The one identity a card is matched by: the listed key itself (case and spacing ignored), never a display
+    # name. A key that another project's display name or another listed key also folds to is ambiguous: no card
+    # is matched to it at all (default deny).
+    from .radio_board import project_key
+    claims: Dict[str, set] = {}
+    names = base["project_names"] if isinstance(base.get("project_names"), dict) else {}
+    for k in list(s["projects"]) + list(names):
+        claims.setdefault(project_key(k), set()).add(k)
+    for k, v in names.items():
+        if isinstance(v, str):
+            claims.setdefault(project_key(v), set()).add(k)
+    s["card_keys"] = {project_key(k): k for k in s["projects"] if claims.get(project_key(k)) == {k}}
+    s["filters"] = staff_filters(cfg, raw, base)
     return s
 
 
-PREFS = "cockpit.json"   # in folder(): {"enabled": bool, "projects": [ledger keys]}, written by the Cockpit only
+DENY_TERMS = "~/.config/harnessgram/private-terms.txt"  # the private deny-list the public-hygiene test also reads
+
+
+def staff_filters(cfg: Config, raw: dict, base: Optional[dict] = None) -> dict:
+    """What the owner-written staff strings (the station title, the staff labels) are checked against: every part
+    of the team members' names, the private deny-list (`deny_terms_file`, else HARNESSGRAM_PRIVATE_TERMS, else
+    DENY_TERMS; one PLAIN term per line, `#` comments) and the child-suitability list (a JSON object with a
+    "pattern": `suitability_file`, else the radio's shared suitability file).
+    Fail closed: a list that is not set, missing or unreadable leaves "broken" with a reason (the station then uses
+    its built-in title). A deny-list line that is not a plain term (any regular-expression syntax) is refused as a
+    whole ("deny_list_not_literal"): the staff edition does not start, and a running one ends, until it is fixed."""
+    out: dict = {"names": [], "deny": None, "unsuitable": None, "broken": False, "reason": ""}
+
+    def fail(reason: str) -> dict:
+        out.update(broken=True, reason=reason, deny=None, unsuitable=None)
+        return out
+    members = getattr(getattr(cfg, "team", None), "members", None)
+    if members is not None and not isinstance(members, dict):
+        return fail("team_list_invalid")
+    names = [n for n in (members or {}).values()]
+    if not all(isinstance(n, str) and n.strip() for n in names):
+        return fail("team_list_invalid")
+    out["names"] = names
+    deny = raw.get("deny_terms_file")
+    if deny is not None and (not isinstance(deny, str) or not deny.strip()):
+        return fail("deny_list_setting")
+    path = Path(os.path.expanduser(deny or os.environ.get("HARNESSGRAM_PRIVATE_TERMS") or DENY_TERMS))
+    try:
+        lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()]
+    except FileNotFoundError:
+        return fail("deny_list_missing")
+    except (OSError, ValueError):
+        return fail("deny_list_unreadable")
+    terms = [radio_staff.literal_term(ln) for ln in lines if ln and not ln.startswith("#")]
+    if any(t is None for t in terms):
+        return fail("deny_list_not_literal")
+    suit = raw.get("suitability_file")
+    if suit is None:
+        suit = (base or {}).get(RADIO_SUITABILITY_KEY) or None
+    if not isinstance(suit, str) or not suit.strip():
+        return fail("suitability_missing")
+    try:
+        data = json.loads(Path(os.path.expanduser(suit)).read_text(encoding="utf-8"))
+        unsuitable = re.compile(data["pattern"], re.I)
+    except FileNotFoundError:
+        return fail("suitability_missing")
+    except (OSError, ValueError, KeyError, TypeError, re.error):
+        return fail("suitability_unreadable")
+    out["deny"], out["unsuitable"] = terms, unsuitable
+    return out
+
+
+RULES_INVALID = "deny_list_not_literal"   # the one filter failure that stops the staff edition
+
+
+# in folder(): {"enabled": bool, "projects": [ledger keys]}, written by the Cockpit only
+PREFS = "cockpit.json"
 
 
 def cockpit_prefs() -> dict:
@@ -463,11 +538,15 @@ class YouTube:
             "cdn": {"ingestionType": "rtmp", "resolution": "variable", "frameRate": "variable"},
             "contentDetails": {"isReusable": True}})
 
-    def insert_broadcast(self, title: str) -> dict:
+    def insert_broadcast(self, title: str, privacy: str = "unlisted") -> dict:
+        """The staff edition is unlisted so its link can be shared with staff; the mirror edition (the owner's whole
+        home audio, family schedule included) is private: only the owner's signed-in account can watch it."""
+        if privacy not in ("unlisted", "private"):
+            raise ValueError("privacy")
         start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return self._call("POST", "/liveBroadcasts", {"part": "snippet,status,contentDetails"}, {
             "snippet": {"title": title, "scheduledStartTime": start},
-            "status": {"privacyStatus": "unlisted", "selfDeclaredMadeForKids": False},
+            "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
             # only fields liveBroadcasts.insert documents as settable; latency stays YouTube's default (normal).
             # No monitor stream: with it on, YouTube requires a testing step before live, and autoStart is used.
             "contentDetails": {"enableAutoStart": True, "enableAutoStop": True, "enableDvr": True,
@@ -874,7 +953,9 @@ def view(cfg: Config, client_ready: bool, base_ready: bool, now: Optional[float]
             "hours_left": round(left, 1) if left is not None else None,
             "ended": not live and run.get("pipeline") in ("ended", "failed", "stopped"),
             "failed": bool(run.get("gave_up")), "cleanup": len(_pending()),
-            "bridge_off": not policy.on(), "projects": catalog(cfg), **operation(now)}
+            "bridge_off": not policy.on(), "projects": catalog(cfg),
+            # why the configured title and labels are not used right now ("" when both lists are in place)
+            "filters_blocked": s["filters"].get("reason") or "", **operation(now)}
 
 
 def disconnect(cfg: Config, service: Optional[Service] = None) -> str:
@@ -929,6 +1010,8 @@ def mirror_ready(cfg: Config) -> bool:
     """A live, local home feed, not a leftover playlist. Missing/off is a quiet wait, never publication."""
     if not radio.wanted() or not radio.settings(cfg)["radio_player"]:
         return False
+    if radio.private_audio_on():
+        return False  # home-only audio is on the air: the mirror holds, it never carries it
     try:
         path = mirror_playlist()
         if path.is_symlink() or path.parent.is_symlink() or not 0 <= time.time() - path.stat().st_mtime < 15:
@@ -944,7 +1027,7 @@ def mirror_ready(cfg: Config) -> bool:
 
 
 def set_mirror(cfg: Config, on: bool, expect: Optional[dict] = None) -> str:
-    """Explicit CLI/Cockpit action only. Approval: full home audio + board, unlisted.
+    """Explicit CLI/Cockpit action only. Approval: full home audio + board, private.
     Automatic paths only READ this standing start; off revokes it before attempting any cleanup."""
     from . import policy
     with _locked():
@@ -966,6 +1049,11 @@ def set_mirror(cfg: Config, on: bool, expect: Optional[dict] = None) -> str:
                 _write(folder() / MIRROR_START, {"on": True, "owner_start": secrets.token_hex(16),
                        "approval": MIRROR_APPROVAL, "generation": conn["generation"],
                        "channel_digest": _channel_digest(conn["channel_id"]), "at": int(time.time())})
+            try:  # a station that Play started now has a mirror following it: it is no longer Play's to stop
+                from . import radio_play
+                radio_play.adopt()
+            except Exception:
+                pass
             if radio.wanted() and not _job_on():
                 _load_job(settings(cfg))  # a waiting job; no API call and no broadcast here
             return "youtube_mirror_on"
@@ -1089,12 +1177,15 @@ def start(cfg: Config, service: Optional[Service] = None, load_job: Callable[[di
 
 
 def _start(cfg: Config, service: Optional[Service], load_job: Callable[[dict], None],
-           expect: Optional[dict] = None, mirror_job: bool = False) -> str:
+           expect: Optional[dict] = None, mirror_job: bool = False,
+           mirror_guard: Optional[Callable[[], bool]] = None) -> str:
     s = settings(cfg)
     if sys.platform != "darwin" and load_job is _load_job:
         raise YouTubeError("youtube_macos_only")
     if not s["enabled"]:
         raise YouTubeError("youtube_disabled")
+    if s["filters"].get("reason") == RULES_INVALID:
+        raise YouTubeError("youtube_rules_invalid")
     from . import policy
     if not policy.on():  # the bridge is off: nothing is created on YouTube
         raise YouTubeError("mirror_off")
@@ -1145,7 +1236,7 @@ def _start(cfg: Config, service: Optional[Service], load_job: Callable[[dict], N
                 raise YouTubeError("youtube_mirror_not_armed")
             if not mirror_ready(cfg):
                 return "youtube_mirror_waiting"
-        ready = (lambda: policy.on() and mirror_started() and mirror_ready(cfg)) if mirror_job else None
+        ready = (lambda: mirror_guard is not None and mirror_guard() and mirror_ready(cfg)) if mirror_job else None
         return _create(s, svc, load_job, api, conn["generation"], ready=ready)
 
 
@@ -1160,7 +1251,9 @@ def _create(s: dict, svc: "Service", load_job: Callable[[dict], None], api: "You
     svc.store.set(STREAM_KEY, key)
     if ready is not None and not ready():
         return "youtube_mirror_waiting"
-    broadcast = api.insert_broadcast(s["title"])
+    # the same gated title the board shows and the voice says (deny-list and names; built-in without the lists)
+    broadcast = api.insert_broadcast(radio_staff.station_title(s["title"], s),
+                                     privacy="private" if s["edition"] == "mirror" else "unlisted")
     bid = broadcast.get("id") or ""
     if not bid:
         raise YouTubeError("youtube_api_failed", why="no broadcast id")
@@ -1302,7 +1395,7 @@ class StaffStation:
         self.quit = threading.Event()
         self.pipe: Optional[radio.Pipeline] = None
         self.service = service
-        self.ending = ""  # why the job ends itself: "" (it does not), "off", "owner", "ended"
+        self.ending = ""  # why the job ends itself: "" (it does not), "off", "owner", "ended", "rules", ...
         # Every connection starts a new generation with the identification card on screen (connect()). A real
         # card is drawn only from a gather begun under the current generation, so an update that read the
         # settings before a reconnect can never put its (older) card back on air.
@@ -1327,6 +1420,8 @@ class StaffStation:
         why = ""
         if not self.s["enabled"]:
             why = "off"
+        elif self.s["filters"].get("reason") == RULES_INVALID:
+            why = "rules"  # a deny-list line that is not a plain term: nothing goes out until it is fixed
         elif not policy.on():  # the bridge-off switch, read again each time (never cached)
             why = "bridge_off"
         elif not self.owner_started():
@@ -1360,7 +1455,30 @@ class StaffStation:
         state = build_state(self.cfg, now=now, light=True)
         ledger_dir = Path(os.path.expanduser(self.s["ledger_dir"])) if self.s["ledger_dir"] else None
         ledger = radio_script.ledger_items(ledger_dir, now)
-        return radio_script.snapshot(state, [], ledger, [], now, team_by=radio_script.ledger_open_by(ledger_dir))
+        snap = radio_script.snapshot(state, [], ledger, [], now, team_by=radio_script.ledger_open_by(ledger_dir))
+        snap["staff_cards"] = self.staff_cards()
+        return snap
+
+    def staff_cards(self) -> List[dict]:
+        """The live progress cards of the listed projects only, as NUMBERS: a card's title and step names are
+        never copied (structured data only). A card is a project's only when it lives in that project's own group
+        chat (radio_board.card_projects) and the group's name is the listed key itself, unambiguously."""
+        from . import radio_board
+        by_key = self.s.get("card_keys")
+        if not isinstance(by_key, dict):
+            by_key = {}
+        out = []
+        for pk, card in radio_board.card_projects(self.cfg):
+            key = by_key.get(pk)
+            if key is None:
+                continue
+            steps = card.get("steps")
+            # Automatic cards retain only a selection of the full task list, even when fewer than six are shown.
+            # Their percentage remains useful, but the displayed steps cannot supply a reliable total.
+            total = len(steps) if isinstance(steps, list) and not card.get("automatic") else 0
+            out.append({"project": key, "total": total,
+                        "at": card.get("at"), "percent": card.get("percent"), "updated": card.get("updated")})
+        return out
 
     def draw(self, view: dict, generation: Optional[int] = None) -> bool:
         """The staff card, only while `generation` is still the current one (None: the identification card, which
@@ -1538,6 +1656,7 @@ class StaffStation:
              "owner": "run: no owner start is recorded; not streaming",
              "bridge_off": "run: the bridge was turned off; ending the broadcast (a new start is the owner's)",
              "connection_changed": "run: the YouTube connection changed; ending the broadcast",
+             "rules": "run: the staff deny-list holds a line that is not a plain term; ending the broadcast",
              "ended": "run: max_hours reached; ending the broadcast"}.get(self.ending, "run: ending"))
         return self.give_up(end=self.ending != "owner" or bool(_state().get("broadcast_id")),
                             why="failed" if self.ending == "owner" else "ended")
@@ -1586,12 +1705,13 @@ class MirrorStation(StaffStation):
             return False  # unreadable permission/settings never permit publication
         from . import policy
         return bool(self.s["edition"] == "mirror" and self.s["enabled"] and mirror_started() and
+                    self.s["filters"].get("reason") != RULES_INVALID and
                     policy.on() and radio.wanted())
 
     def feed_board(self) -> None:
         from . import radio_board
         base, now = radio.settings(self.cfg), time.time()
-        sources = radio_board.gather(self.cfg, base, now)
+        sources = radio_board.gather(self.cfg, base, now, public_only=True)  # the mirror is public: public cards only
         self.show.update(radio_board.collect(sources, base["project_names"], now, lang=base["lang"]))
 
     def start_board(self) -> None:
@@ -1637,7 +1757,7 @@ class MirrorStation(StaffStation):
                     and st.get("start_generation") == generation() and time.time() < self.end_time():
                 ok = True
             else:
-                ok = _start(self.cfg, svc, lambda s: None, mirror_job=True) == "youtube_started"
+                ok = _start(self.cfg, svc, lambda s: None, mirror_job=True, mirror_guard=self.allowed) == "youtube_started"
             if ok:
                 current = _state()
                 self.broadcast_id = str(current.get("broadcast_id") or "")
@@ -1660,15 +1780,27 @@ class MirrorStation(StaffStation):
 
     def _run(self) -> int:
         svc = self.service or Service(self.s)
+        waiting_since = None
         try:
             while not self.quit.is_set():
                 if not self.allowed() or not mirror_ready(self.cfg):
                     self.end_current(svc)
                     self._status(pipeline="waiting", ffmpeg_pid=None)
                     # A stopped home radio or revoked permission ends the job. Bridge off or missing HLS waits.
-                    if not radio.wanted() or not mirror_started() or self.s["edition"] != "mirror" or not self.s["enabled"]:
+                    if (not radio.wanted() or not mirror_started() or self.s["edition"] != "mirror"
+                            or not self.s["enabled"] or self.s["filters"].get("reason") == RULES_INVALID):
                         return self.give_up(why="ended")  # unload, so the next authorized start can load a fresh job
-                    self.quit.wait(1)
+                    if self.allowed() and radio.private_audio_on():
+                        waiting_since = None  # holding for home-only audio is not a missing feed: no timeout
+                        self.quit.wait(MIRROR_WAIT_POLL)
+                    elif self.allowed():
+                        if waiting_since is None:
+                            waiting_since = time.monotonic()
+                        if time.monotonic() - waiting_since >= MIRROR_WAIT:
+                            return self.give_up(why="ended")
+                        self.quit.wait(MIRROR_WAIT_POLL)
+                    else:
+                        self.quit.wait(1)
                     continue
                 try:
                     self.start_board()  # no broadcast if the moving picture cannot be prepared
@@ -1678,6 +1810,8 @@ class MirrorStation(StaffStation):
                     if not url or not key:
                         raise YouTubeError("youtube_reconnect")
                     encoder = radio.pick_encoder(self.s["video_encoder"])
+                    if not self.allowed() or not mirror_ready(self.cfg):
+                        continue  # recheck after setup and before the encoder can start
                     self.pipe = radio.Pipeline(url, key, self.dir / "unused.png", encoder, None,
                                   lambda pid: self._status(ffmpeg_pid=pid), quit=self.quit,
                                   err_path=self.dir / "ffmpeg.err", marker=MARKER, source=self.show,
@@ -1685,10 +1819,13 @@ class MirrorStation(StaffStation):
                                                not self.show.failed and time.time() < self.end_time(),
                                   hls_input=mirror_playlist(), output_fps=MIRROR_FPS, bitrate=MIRROR_BITRATE)
                     self._status(pipeline="live")
+                    live_since = time.monotonic()
                     why = self.pipe.run()
+                    if time.monotonic() - live_since >= 60:
+                        waiting_since = None
                     if self.quit.is_set():
                         break
-                    if why in (radio.MIRROR_OFF, radio.MODE_CHANGED) or not mirror_ready(self.cfg):
+                    if why in (radio.MIRROR_OFF, radio.MODE_CHANGED):
                         if self.show.failed:
                             raise YouTubeError("youtube_job_failed")
                         continue  # off, missing/restarted playlist, or time to rotate: no failure budget used

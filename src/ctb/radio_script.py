@@ -22,6 +22,8 @@ LATIN = re.compile(r"[A-Za-z]")
 MAX_ITEMS = 3           # items read aloud per update
 MAX_SCRIPT = 600        # about 45 seconds of Hebrew speech
 QUOTA_WARN = 80         # percent from which a quota window is worth saying
+QUOTA_REPEAT = 6 * 3600
+QUOTA_THRESHOLDS = (80, 90, 95, 100)
 DONE_WINDOW = 24 * 3600
 FRESH_WINDOW = 6 * 3600  # an item that appeared (or was finished) within this many seconds is news; older ones are backlog
 CLOCK_SKEW = 300         # seconds: an item stamped this far in the future is still taken as now; beyond it, bogus
@@ -510,20 +512,51 @@ def digest(snap: dict, last: Optional[dict] = None) -> str:
     quota bands. An item that merely ages out of the window, or an old backlog item that comes or goes, does
     not change it."""
     facts = {"attention": told_keys(snap, last), "done": sorted(i["key"] for i in recent_done(snap, last)),
-             "working": snap.get("working", 0), "quota": sorted(f"{q['label']}/{q['window']}/{q['pct'] // 5}"
-                                                                for q in snap.get("quota") or [])}
+             "working": snap.get("working", 0), "quota": _bands(snap)}
     return hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def _quota_band(q: dict) -> int:
+    return max((n for n in QUOTA_THRESHOLDS if q["pct"] >= n), default=0)
+
+
+def _quota_key(q: dict) -> str:
+    return json.dumps([q["label"], q["window"]], ensure_ascii=False)
+
+
 def _bands(snap: dict) -> List[str]:
-    return sorted(f"{q['label']}/{q['window']}/{q['pct'] // 5}" for q in snap.get("quota") or [])
+    return sorted(f"{_quota_key(q)}/{_quota_band(q)}" for q in snap.get("quota") or [] if _quota_band(q))
+
+
+def quota_reset(snap: dict, last: dict) -> dict:
+    """Keep announcement times across band decreases and missing observations."""
+    return last
+
+
+def quota_due(snap: dict, last: dict) -> List[dict]:
+    remembered = last.get("quota_spoken") or {}
+    now = _now(snap)
+    due = []
+    seen = set()
+    for q in snap.get("quota") or []:
+        band = _quota_band(q)
+        if not band:
+            continue
+        key = _quota_key(q)
+        if key in seen:
+            continue
+        seen.add(key)
+        prior = remembered.get(key)
+        if not prior or now - prior["at"] >= QUOTA_REPEAT:
+            due.append(q)
+    return due
 
 
 def news(snap: dict, last: dict) -> List[Tuple[str, dict]]:
     """What happened since the last spoken update, besides new things waiting for the owner (those are
     'urgent'): ("done", item) for a task-list item finished, ("finished", session) for a session that was
     working and now waits, ("agent", record) for a background agent that ended, ("quota", row) for a quota
-    window that crossed into a new 5 % band above QUOTA_WARN. Empty before the first update."""
+    window that is due at a quota threshold. Empty before the first update."""
     if not last:
         return []
     out: List[Tuple[str, dict]] = []
@@ -534,9 +567,7 @@ def news(snap: dict, last: dict) -> List[Tuple[str, dict]]:
                 if s["id"] in was_working and s["state"] == "idle"]
     since, said = float(last.get("at") or 0), set(last.get("agents") or [])
     out += [("agent", a) for a in snap.get("agents_done") or [] if a["key"] not in said and float(a["at"]) > since]
-    bands = set(last.get("quota_bands") or [])
-    out += [("quota", q) for q in snap.get("quota") or []
-            if f"{q['label']}/{q['window']}/{q['pct'] // 5}" not in bands]
+    out += [("quota", q) for q in quota_due(snap, last)]
     return out
 
 
@@ -555,7 +586,8 @@ def decide(snap: dict, last: dict, now: float, every: float, news_gap: Optional[
     return None
 
 
-def remember(snap: dict, now: float, last: Optional[dict] = None) -> dict:
+def remember(snap: dict, now: float, last: Optional[dict] = None,
+             spoken_quota: Optional[List[dict]] = None) -> dict:
     """What the radio keeps after an update. `last`: the previous record, so that an item announced before and
     still waiting stays "told" after it ages out of the window."""
     new = {"at": now, "attention": told_keys(snap, last),
@@ -563,6 +595,10 @@ def remember(snap: dict, now: float, last: Optional[dict] = None) -> dict:
            "working_ids": sorted(s["id"] for s in snap.get("sessions") or [] if s["state"] == "working"),
            "agents": sorted(a["key"] for a in snap.get("agents_done") or []),
            "quota_bands": _bands(snap)}
+    quota_spoken = dict(quota_reset(snap, last or {}).get("quota_spoken") or {})
+    for q in (quota_due(snap, last or {}) if spoken_quota is None else spoken_quota):
+        quota_spoken[_quota_key(q)] = {"at": now}
+    new["quota_spoken"] = quota_spoken
     new["digest"] = digest(snap, new)
     return new
 
@@ -607,10 +643,12 @@ def build_news(snap: dict, last: dict, names: Dict[str, str], lang: str = "he", 
         n = len(done) - len(lines)
         out.append(("ועוד אחד הושלם." if n == 1 else f"ועוד {number_he(n)} הושלמו.") if he else
                    f"And {n} more done.")
+    rep["quota_rows"] = []
     for q in [q for k, q in items if k == "quota"][:1]:
         line = _quota_line(q, he)
         out.append(line)
         rep["quota"].append(line)
+        rep["quota_rows"].append(q)
     return whole(private_speech(" ".join(out), snap.get("private_accounts") or []), MAX_SCRIPT)
 
 
@@ -785,7 +823,8 @@ def build_script(snap: dict, last: dict, names: Dict[str, str], lang: str = "he"
     out.extend(work_lines)
     rep["team"].extend(work_lines)
 
-    for q in (snap.get("quota") or [])[:2]:
+    quota_rows = quota_due(snap, last)[:2]
+    for q in quota_rows:
         out.append(_quota_line(q, he))
         rep["quota"].append(out[-1])
 
@@ -804,6 +843,7 @@ def build_script(snap: dict, last: dict, names: Dict[str, str], lang: str = "he"
     while len(script) > MAX_SCRIPT and len(out) > 3:
         out.pop()
         script = " ".join(out)
+    rep["quota_rows"] = [q for q in quota_rows if _quota_line(q, he) in out]
     return whole(private_speech(script, snap.get("private_accounts") or []), MAX_SCRIPT)
 
 

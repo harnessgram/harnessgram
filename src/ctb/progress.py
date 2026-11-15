@@ -11,12 +11,15 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import flood, fmt
+from . import flood
+from .lazy import lazy_module
 from . import lang as L
 from .config import AGENT_NOTICES, Config, activity_level, home_chat, private_dir, setting_on, state_dir, write_private
 from .i18n import get_lang, t
 from .telegram import Bot, TelegramError
 from .topics import chat_of, place
+
+fmt = lazy_module(".fmt")
 
 
 def interim_text(text: str, cfg: Config, fast: bool = False) -> str:
@@ -371,7 +374,7 @@ def append_boundary(session: str, root: Optional[Path] = None, until: Optional[f
 
 
 def safe_name(value: str) -> str:
-    from .inbox import safe_name as _safe
+    from .config import safe_name as _safe
     return _safe(value)
 
 
@@ -681,9 +684,9 @@ def append_progress(session: str, data: dict, cfg: Config, root: Optional[Path] 
             old = []
         queued = {r.get("uuid") for r in old}
         known = {r.get("url") for r in old if r.get("kind") == "link"}  # already queued for the owner
-        from .hooks import read_blocks
+        from .hooks import read_blocks_of
         try:
-            blocks = read_blocks(Path(data.get("transcript_path") or "").read_text(encoding="utf-8").splitlines()) if cfg.progress_details else []
+            blocks = read_blocks_of(data.get("transcript_path") or "") if cfg.progress_details else []
         except OSError:
             blocks = []
         with open(path, "a", encoding="utf-8") as f:
