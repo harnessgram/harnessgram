@@ -7,10 +7,12 @@ from ctb import panel_page
 import panel_browser
 from test_cockpit_overflow_browser import browser  # noqa: F401
 from test_cockpit_compact_browser import state
+from cockpit_v2_browser import rich_state
 
 
 def open_cockpit(browser, data=None):
     ctx = browser.new_context(viewport={"width": 390, "height": 844}, bypass_csp=True)
+    ctx.add_init_script("window.__CTB_TEST__ = true")
     page = ctx.new_page()
     if data is None:
         data = state()
@@ -55,6 +57,31 @@ def go_back(page, method):
 
 def assert_root(page):
     page.wait_for_function("history.state.cockpitBack.index === 0 && !Telegram.WebApp.BackButton.isVisible")
+
+
+def test_every_inner_screen_and_sheet_shows_back_and_home_hides_it(browser):
+    """A new screen must join the shared history stack, not turn native back into app close."""
+    ctx, page = open_cockpit(browser, rich_state("he"))
+    try:
+        assert_root(page)
+        for tab in (1, 2, 3):
+            page.locator(".tabs .tab").nth(tab).click()
+            page.wait_for_function("Telegram.WebApp.BackButton.isVisible")
+        page.locator(".tabs .tab").nth(1).click()
+        page.locator('[data-v2-section="project-list"] .v2-pcard').first.click()
+        page.wait_for_function("Telegram.WebApp.BackButton.isVisible")
+        page.locator(".topic-card").first.click()
+        page.wait_for_selector("dialog.topic-sheet[open]")
+        assert page.evaluate("Telegram.WebApp.BackButton.isVisible")
+        page.evaluate("window.__backClick()")
+        page.wait_for_function("!document.querySelector('dialog.topic-sheet[open]')")
+        assert page.evaluate("Telegram.WebApp.BackButton.isVisible")
+        page.evaluate("window.__backClick()")
+        page.locator('[data-v2-section="project-list"]').wait_for()
+        page.locator(".tabs .tab").first.click()
+        assert_root(page)
+    finally:
+        ctx.close()
 
 
 @pytest.mark.parametrize("method", ["popstate", "button"])

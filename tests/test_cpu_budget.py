@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import perf_fixture
+from conftest import signed_in
 from ctb import creds, hooks, panel
 
 pytestmark = pytest.mark.skipif(os.environ.get("CTB_SKIP_BENCH") == "1", reason="CTB_SKIP_BENCH=1")
@@ -31,6 +32,7 @@ def _cold():
 
 
 def test_a_state_build_with_300_cards_and_300_ledger_items_stays_fast(tmp_path, monkeypatch):
+    signed_in("main")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     cfg, now, _ = perf_fixture.build(tmp_path, cards=300, items=300)
     _cold()
@@ -80,6 +82,7 @@ class _BotApi(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def hook_env(tmp_path):
     """A sandboxed home with a fixture state, a config pointing at a local Bot API, and a session with a transcript."""
+    signed_in("main")
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _BotApi)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     os.environ["CLAUDE_CONFIG_DIR"] = str(tmp_path / "claude")

@@ -1,4 +1,4 @@
-"""The Harnessgram widget device API (device_tokens.py, panel.py): pairing behind the fresh owner login, a hashed
+"""The HarnessGram widget device API (device_tokens.py, panel.py): pairing behind the fresh owner login, a hashed
 30-day token that reaches only the two widget routes, a read-only snapshot, and answers that never touch a
 sensitive decision."""
 import json
@@ -7,7 +7,8 @@ import time
 
 import pytest
 
-from ctb import decisions, device_tokens, listen_link, panel
+from conftest import signed_in
+from ctb import cards, decisions, device_tokens, listen_link, panel
 from ctb.config import state_dir
 from test_decisions import ORBIT_S, ask, queued, rig, roomy_budget, server, cfg  # noqa: F401  (fixtures)
 from test_panel import OWNER, call, signed
@@ -57,6 +58,7 @@ def test_pairing_needs_the_fresh_owner_login_and_stores_only_a_hash(rig, server)
 
 
 def test_pairing_is_rate_limited(rig, server):
+    signed_in("main")
     for _ in range(device_tokens.PAIR_LIMIT):
         pair(server)
     status, _, data = call(server, path="/api/device-pair", init=signed(), body=b"{}")
@@ -159,16 +161,42 @@ def test_the_snapshot_is_the_parsers_subset_with_the_sensitive_flag(rig, server)
     token = pair(server)["token"]
     plain = ask(rig, title="Ship the fix?", detail="the private detail", routine=True)
     risky = ask(rig, title="Promote build 13 to production?")
+    with decisions._locked() as path:
+        rows = decisions._load(path)
+        rows[plain["id"]]["msg"] = 77
+        rows[risky["id"]].pop("msg", None)  # a record written before exact-message links
+        decisions._save(path, rows)
     status, headers, data = widget(server, token=token)
     body = json.loads(data)
     assert status == 200 and headers["Cache-Control"] == "no-store" and body["ok"] is True
-    assert set(body) == {"ok", "now", "bot_id", "decisions", "sessions", "cards", "radio_player"}
+    assert set(body) == {"ok", "now", "bot_id", "decisions", "sessions", "cards", "radio_player", "waiting_count",
+                         "appSwitches", "today"}
+    assert set(body["today"]) == {"done_today", "total_today", "waiting"}
+    assert body["appSwitches"] == {"wideCockpit": True, "summaryRows": True}
     by_id = {d["id"]: d for d in body["decisions"]}
     assert by_id[plain["id"]]["sensitive"] is False and by_id[risky["id"]]["sensitive"] is True
+    assert by_id[plain["id"]]["link"] == by_id[plain["id"]]["url"] + "/77"
+    assert by_id[risky["id"]]["link"] == by_id[risky["id"]]["url"]
     assert set(by_id[plain["id"]]) <= set(panel.WIDGET_DECISION) | {k + "_he" for k in panel.WIDGET_DECISION}
     assert "the private detail" not in data.decode() and ORBIT_S not in data.decode()
     assert body["radio_player"] == {"ok": True, "enabled": False, "on": False}
     assert widget(server, token=token, body=b'{"x": 1}')[0] == 400
+
+
+def test_each_progress_card_carries_its_last_authored_update_time(rig, server):
+    """The iOS Live Activity follows the most recently updated unfinished card, so the snapshot says when each
+    card's steps last moved (epoch seconds); a live line written later does not move it."""
+    token = pair(server)["token"]
+    now = time.time()
+    old = cards.publish(ORBIT_S, 1, 7, "progress", "Old task", steps=["a", "b"], at=0, now=now - 600)
+    new = cards.publish(ORBIT_S, 1, 7, "progress", "New task", steps=["a", "b"], at=0, now=now - 300)
+    cards.publish(ORBIT_S, 1, 7, "progress", "", ident=old["id"], at=1, now=now - 60)
+    cards.update_live(ORBIT_S, "Still working", now=now - 5)
+    by_id = {c["id"]: c for c in json.loads(widget(server, token=token)[2])["cards"]}
+    assert by_id[old["id"]]["updated"] == pytest.approx(now - 60)
+    assert by_id[new["id"]]["updated"] == pytest.approx(now - 300)
+    assert all(isinstance(c["updated"], float) for c in by_id.values())
+    assert set(by_id[old["id"]]) <= set(panel.WIDGET_CARD) | {k + "_he" for k in panel.WIDGET_CARD}
 
 
 def test_the_owner_state_carries_the_sensitive_flag_too(rig, server):
@@ -200,6 +228,7 @@ def test_a_plain_decision_is_answered_once_and_a_repeat_is_a_success(rig, server
     ("Keep the old backups?", "", "Keep", "Delete backups", True),   # the no label counts too
 ])
 def test_a_sensitive_decision_needs_the_app(rig, server, title, detail, yes, no, routine):
+    signed_in("main")
     token = pair(server)["token"]
     rec = ask(rig, title=title, detail=detail, yes=yes, no=no, routine=routine)
     for choice in ("yes", "no"):
@@ -210,6 +239,7 @@ def test_a_sensitive_decision_needs_the_app(rig, server, title, detail, yes, no,
 
 
 def test_the_sensitive_check_runs_under_the_lock_on_the_record_it_answers(rig, server, monkeypatch):
+    signed_in("main")
     token = pair(server)["token"]
     rec = ask(rig, title="Ship the fix?", routine=True)
     seen = []

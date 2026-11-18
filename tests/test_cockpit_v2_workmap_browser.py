@@ -28,7 +28,7 @@ def browser():
 def opened(browser):
     made = []
 
-    def make(lang="he", scheme="light", width=390, morning=True, work_map=True):
+    def make(lang="he", scheme="light", width=390, morning=True, work_map=True, edit=None):
         state = copy.deepcopy(rich_state(lang))
         lines, brief = workmap_sample(lang)
         if work_map:
@@ -36,6 +36,8 @@ def opened(browser):
                 p["work_map"] = lines
         if morning:
             state["morning"] = brief
+        if edit:
+            edit(state)
         ctx, page, calls, errors, st = open_v2(browser, lang, scheme, state=state, width=width)
         made.append(ctx)
         return page, calls, errors
@@ -80,6 +82,23 @@ def test_no_morning_card_without_a_briefing(opened):
     assert page.locator(".v2-morning").count() == 0
 
 
+def test_morning_ledger_shows_hebrew_original_and_pending(opened):
+    def edit(state):
+        morning = state["morning"]
+        morning["overnight"][0].update(what="Finished in file.py", what_he="הושלם בקובץ file.py")
+        morning["waiting"][0].update(what="Awaiting approval", what_he=None)
+
+    page, _, errors = opened(edit=edit)
+    card = page.locator('.v2-morning')
+    translated = card.locator('.wm-line').filter(has_text='הושלם בקובץ')
+    assert translated.locator('.wm-what').get_attribute('dir') == 'rtl'
+    assert '\u2068file.py\u2069' in translated.locator('.wm-what').inner_text()
+    translated.get_by_role('button', name='מקור', exact=True).click()
+    assert 'Finished in file.py' in translated.locator('.orig').inner_text()
+    pending = card.locator('.wm-line').filter(has_text='Awaiting approval')
+    assert pending.locator('.tr').count() == 1 and errors == []
+
+
 @pytest.mark.parametrize("lang", ["he", "en"])
 @pytest.mark.parametrize("scheme", ["light", "dark"])
 def test_the_work_map_fits_on_the_project_page_and_folds_after_six_lines(opened, lang, scheme):
@@ -91,7 +110,7 @@ def test_the_work_map_fits_on_the_project_page_and_folds_after_six_lines(opened,
     assert got["overflow"] <= 0 and got["left"] >= 15.5 and got["right"] >= 15.5
     assert 12 <= got["pad"] <= 16 and got["small"] == [] and got["out"] == 0 and got["lines"] == 6
     heads = card.locator(".wm-head").all_inner_texts()
-    assert heads[0] == ("מחכה לך" if lang == "he" else "Waiting for you") and len(heads) == 2  # the done lines are folded
+    assert heads[0] == ("ממתין לתשובתך" if lang == "he" else "Waiting for you") and len(heads) == 2  # the done lines are folded
     card.locator("[data-wm=more]").click()
     page.wait_for_function("()=>document.querySelectorAll('[data-v2-section=project-workmap] .wm-line').length===8")
     assert card.locator(".wm-head").count() == 3 and errors == []

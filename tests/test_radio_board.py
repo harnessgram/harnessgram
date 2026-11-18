@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import signed_in
+
 from ctb import cards, panel_settings, radio, radio_board as B, radio_motion as M, radio_paint as P, radio_show as S
 from ctb import radio_staff
 from test_decisions import ORBIT, ORBIT_S, THREAD, cfg, queued, rig, roomy_budget, server  # noqa: F401
@@ -221,6 +223,7 @@ def test_a_wall_marks_done_notes_and_stamps_the_fresh_one(tmp_path):
 
 @pytest.mark.skipif(not HAS_SWIFT, reason="needs swiftc (macOS)")
 def test_the_painter_draws_every_slide_and_a_transition(tmp_path):
+    signed_in("main")
     frames = all_frames(tmp_path)
     assert P.paint(tmp_path / "bin", frames)
     for f in frames:

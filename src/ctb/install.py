@@ -23,17 +23,19 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import launch
+from . import launch, listener_service
 from .config import HOME, config_dir, private_dir, state_dir
 
 LABEL = "com.claude-telegram-bridge.listener"
 UNIT = "claude-telegram-bridge.service"  # the listener unit; the jobs are in SERVICES below
 # Matches both launch forms: ".../ctb hook-stop" and "python -I -m ctb hook-stop".
-HOOK_RE = re.compile(r"\bctb['\"]?\s+hook-(?:stop|prompt|wake|post|notify|start|lifecycle|stop-failure|ask|permission)\b")
+HOOK_RE = re.compile(r"\bctb['\"]?\s+hook-(?:stop|prompt|wake|post|notify|start|lifecycle|stop-failure|ask|bash|permission)\b")
 
 
 def settings_path() -> Path:
@@ -61,10 +63,13 @@ def desired_hooks(wake: bool = True) -> dict:
             # Synchronous: record expiring question hashes before the tool can show its dialog.
             # Existing installs acquire this registration by running install again (merge is idempotent).
             "PreToolUse": [{"matcher": "AskUserQuestion",
-                            "hooks": [{"type": "command", "command": command("hook-ask"), "timeout": 5}]}],
+                            "hooks": [{"type": "command", "command": command("hook-ask"), "timeout": 5}]},
+                           {"matcher": "Bash",
+                            "hooks": [{"type": "command", "command": command("hook-bash"), "timeout": 5}]}],
             # Claude Code's permission prompt, answered from the phone (permission_request.py): the hook waits for the
             # owner's answer below its timeout and otherwise prints nothing, so the terminal prompt stays.
-            "PermissionRequest": [{"hooks": [{"type": "command", "command": command("hook-permission"),
+            "PermissionRequest": [{"matcher": ".*|AskUserQuestion|ExitPlanMode",
+                                   "hooks": [{"type": "command", "command": command("hook-permission"),
                                               "timeout": PERMISSION_TIMEOUT}]}],
             "PostToolUse": [{"hooks": [{"type": "command", "command": command("hook-post"), "timeout": 30}]}],
             "UserPromptSubmit": [{"hooks": [{"type": "command", "command": command("hook-prompt")}]}],
@@ -132,7 +137,7 @@ def remove_settings(settings: dict) -> Tuple[dict, List[str]]:
         del new["hooks"]
     if statusline_wired(new):
         del new["statusLine"]
-        changes.append("Removed the Harnessgram status line")
+        changes.append("Removed the HarnessGram status line")
     return new, changes
 
 
@@ -188,13 +193,13 @@ class Service:
 
 
 SERVICES: Tuple[Service, ...] = (
-    Service("listener", LABEL, "claude-telegram-bridge", ("serve",), "keepalive", "Harnessgram listener"),
+    Service("listener", LABEL, "claude-telegram-bridge", ("serve",), "keepalive", "HarnessGram listener"),
     Service("dashboard", f"{LABEL_PREFIX}.dashboard", f"{UNIT_PREFIX}-dashboard", ("dashboard",), "interval",
-            "Harnessgram dashboard refresh and periodic jobs"),
+            "HarnessGram dashboard refresh and periodic jobs"),
     Service("heartbeat", f"{LABEL_PREFIX}.heartbeat", f"{UNIT_PREFIX}-heartbeat", ("heartbeat",), "keepalive",
-            "Harnessgram heartbeat"),
+            "HarnessGram heartbeat"),
     Service("daily", f"{LABEL_PREFIX}.daily", f"{UNIT_PREFIX}-daily", ("dashboard", "--daily"), "calendar",
-            "Harnessgram morning summary"),
+            "HarnessGram morning summary"),
 )
 SCHEDULES = tuple(s for s in SERVICES if s.name != "listener")
 
@@ -360,12 +365,45 @@ def _write_atomic(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+_sh_output: Optional[str] = None
+
+
 def _sh(*cmd: str) -> int:
     """The command's exit code; 127 when it cannot be started at all (for example no systemctl)."""
+    global _sh_output
     try:
-        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60).returncode
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        _sh_output = done.stdout
+        return done.returncode
     except (OSError, subprocess.SubprocessError):
+        _sh_output = ""
         return 127
+
+
+def _launchctl(*cmd: str) -> Tuple[int, str]:
+    """Run launchctl through the installer's command seam and retain `print` output.
+
+    Tests have historically replaced ``_sh`` with an exit-code-only fake. A successful
+    print from that seam therefore keeps its old meaning (loaded/running); the real
+    runner always records stdout, allowing the listener's pid check to remain strict.
+    """
+    global _sh_output
+    _sh_output = None
+    args = cmd[1:] if cmd and cmd[0] == "launchctl" else cmd
+    code = _sh("launchctl", *args)
+    output = _sh_output
+    # Older embedders supplied their print reader separately from the command
+    # seam. Honour that injected reader without ever falling through to the real
+    # subprocess reader when only `_sh` has been replaced.
+    reader = globals().get("_out")
+    real_reader = globals().get("_REAL_OUT")
+    legacy_job_read = (args and args[0] == "print"
+                       and args[-1].rsplit("/", 1)[-1] in (PANEL_JOB, RADIO_JOB))
+    if output is None and legacy_job_read and reader is not None and reader is not real_reader:
+        _, output = reader("launchctl", *args)
+    if output is None:  # an exit-code-only injected runner
+        output = "    pid = 1\n" if code == 0 and args and args[0] == "print" else ""
+    return code, output
 
 
 def _unit_name(svc: Service) -> str:
@@ -450,14 +488,103 @@ def _out(*cmd: str) -> Tuple[int, str]:
     return done.returncode, done.stdout
 
 
+_REAL_OUT = _out
+
+
 def _job_pid(label: str) -> Optional[int]:
     """The pid of a macOS launchd job that is loaded and running now, else None (also off macOS and when its
     plist is not installed: then launchctl is not even asked)."""
     if sys.platform != "darwin" or not (HOME / "Library" / "LaunchAgents" / f"{label}.plist").exists():
         return None
-    code, text = _out("launchctl", "print", f"gui/{os.getuid()}/{label}")
+    code, text = _launchctl("print", f"gui/{os.getuid()}/{label}")
     found = re.search(r"^\s*pid = (\d+)\s*$", text or "", re.M) if code == 0 else None
     return int(found.group(1)) if found else None
+
+
+@dataclass(frozen=True)
+class LaunchdStatus:
+    loaded: bool
+    pid: Optional[int] = None
+    spawn_failed: bool = False
+
+
+def launchd_status(label: str) -> LaunchdStatus:
+    """Read one launchd job without changing it. ``spawn failed`` is separate from a normally idle job."""
+    code, output = _out("launchctl", "print", f"gui/{os.getuid()}/{label}")
+    if code:
+        return LaunchdStatus(False)
+    match = re.search(r"^\s*pid = (\d+)\s*$", output, re.M)
+    failed = bool(re.search(r"(?:state|last exit reason)\s*=\s*spawn failed", output, re.I) or
+                  re.search(r"^\s*last exit code = 78\s*$", output, re.I | re.M))
+    pid = int(match.group(1)) if match else None
+    return LaunchdStatus(True, pid, failed and pid is None)  # an old exit code on a running job is not a failure
+
+
+def _panel_port(path: Path) -> Optional[int]:
+    """Read the panel port from its plist; this deliberately does not load the bridge config."""
+    try:
+        with path.open("rb") as fh:
+            args = plistlib.load(fh).get("ProgramArguments", [])
+        pos = args.index("--port")
+        port = int(args[pos + 1])
+        return port if 0 < port < 65536 else None
+    except (OSError, ValueError, TypeError, IndexError, plistlib.InvalidFileException):
+        return None
+
+
+def panel_answers(port: int, timeout: float = 20.0, opener=urllib.request.urlopen,
+                  sleep=time.sleep, clock=time.monotonic) -> bool:
+    """Whether loopback returned any HTTP response before the deadline (error statuses count as answers)."""
+    end = clock() + timeout
+    while True:
+        try:
+            response = opener(f"http://127.0.0.1:{port}/", timeout=min(1.0, max(0.1, end - clock())))
+            response.close()
+            return True
+        except urllib.error.HTTPError:
+            return True
+        except (OSError, ValueError):
+            if clock() >= end:
+                return False
+            sleep(min(0.25, max(0.0, end - clock())))
+
+
+def verify_launch_agents(services, say=print, repair: bool = True) -> List[str]:
+    """Check installed macOS jobs and repair each unhealthy job once; return names still unhealthy."""
+    if sys.platform != "darwin":
+        return []
+    uid = os.getuid()
+    jobs = [(s.name, s.label, service_files(s)[0], s.kind == "keepalive", False) for s in services]
+    panel_path = HOME / "Library" / "LaunchAgents" / f"{PANEL_JOB}.plist"
+    if panel_path.exists():
+        jobs.append(("panel", PANEL_JOB, panel_path, True, True))
+    failed = []
+    for name, label, path, needs_pid, is_panel in jobs:
+        port = _panel_port(path) if is_panel else None
+
+        def healthy() -> Tuple[bool, str]:
+            status = launchd_status(label)
+            if status.spawn_failed:
+                return False, "spawn failed"
+            if not status.loaded:
+                return False, "not loaded"
+            if needs_pid and status.pid is None:
+                return False, "no running pid"
+            if is_panel and (port is None or not panel_answers(port)):
+                return False, "local HTTP did not answer"
+            return True, f"running (pid {status.pid})" if status.pid else "loaded"
+
+        ok, detail = healthy()
+        repaired = False
+        if not ok and repair:
+            _sh("launchctl", "bootout", f"gui/{uid}/{label}")
+            repaired = _sh("launchctl", "bootstrap", f"gui/{uid}", str(path)) == 0
+            ok, detail = healthy()
+        suffix = " after one reload" if ok and repaired else ""
+        say(f"LaunchAgent {name}: " + (f"ok ({detail}){suffix}" if ok else f"DOWN ({detail})"))
+        if not ok:
+            failed.append(name)
+    return failed
 
 
 def _restart_panel(say) -> List[str]:
@@ -465,7 +592,7 @@ def _restart_panel(say) -> List[str]:
     program again, the newly installed code). A stopped or absent job is never started."""
     if _job_pid(PANEL_JOB) is None:
         return []
-    ok = _sh("launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{PANEL_JOB}") == 0
+    ok = _launchctl("kickstart", "-k", f"gui/{os.getuid()}/{PANEL_JOB}")[0] == 0
     say("Panel job: " + ("restarted on the new code" if ok else "could not be restarted. Run:"))
     if not ok:
         say(f"    launchctl kickstart -k gui/{os.getuid()}/{PANEL_JOB}")
@@ -487,7 +614,7 @@ def service_states(services) -> dict:
     services = [_service(s) for s in services]
     if sys.platform == "darwin":
         uid = os.getuid()
-        return {s.name: _sh("launchctl", "print", f"gui/{uid}/{s.label}") == 0 for s in services}
+        return {s.name: _launchctl("print", f"gui/{uid}/{s.label}")[0] == 0 for s in services}
     if sys.platform.startswith("linux") and services and systemd_user_available():
         return {s.name: _sh("systemctl", "--user", "is-active", "--quiet", _unit_name(s)) == 0 for s in services}
     return {s.name: None for s in services}
@@ -569,7 +696,7 @@ def run_install(dry_run: bool = False, service: bool = True, wake: bool = True, 
     if wire_statusline:
         new["statusLine"] = {"type": "command", "command": command("statusline")}
         if new.get("statusLine") != old.get("statusLine"):
-            changes.append("wire the Harnessgram status line")
+            changes.append("wire the HarnessGram status line")
     say(f"Claude Code settings: {path}")
     for c in changes:
         say(f"  {tag}{c}")
@@ -608,19 +735,21 @@ def run_install(dry_run: bool = False, service: bool = True, wake: bool = True, 
             say("  written")
             if start and sys.platform == "darwin":
                 uid = str(os.getuid())
-                _sh("launchctl", "bootout", f"gui/{uid}/{svc.label}")  # a re-install replaces a running one
                 if svc.name == "listener":
-                    # bootout returns once the old listener has exited, and the new one starts only below:
-                    # the last id written now is the old listener's, even one it wrote while stopping
-                    report.old_run = listener_run()
-                # bootstrap's own exit code, then launchd itself asked whether it now has the job
-                ok = (_sh("launchctl", "bootstrap", f"gui/{uid}", str(files[0])) == 0
-                      and _sh("launchctl", "print", f"gui/{uid}/{svc.label}") == 0)
+                    with listener_service.install_lock(blocking=True):
+                        _launchctl("bootout", f"gui/{uid}/{svc.label}")
+                        # The last id written after bootout belongs to the old listener.
+                        report.old_run = listener_run()
+                        ok = listener_service.load_and_verify(files[0], runner=_launchctl)
+                else:
+                    _launchctl("bootout", f"gui/{uid}/{svc.label}")
+                    ok = (_launchctl("bootstrap", f"gui/{uid}", str(files[0]))[0] == 0
+                          and _launchctl("print", f"gui/{uid}/{svc.label}")[0] == 0)
                 (report.running if ok else report.failed).append(svc.name)
                 if ok:
                     say("  loaded by launchd (it starts at every login)")
                 else:
-                    say("  NOT loaded. To load it, run:")
+                    say("  NOT loaded or running after retries. To load it, run:")
                     say(f"    launchctl bootstrap gui/{uid} {shlex.quote(str(files[0]))}")
         if start and not dry_run and sys.platform.startswith("linux") and service_file() is not None:
             say("Starting the systemd user units")
@@ -632,6 +761,11 @@ def run_install(dry_run: bool = False, service: bool = True, wake: bool = True, 
             # job when it is running; scheduled jobs start fresh on each run, and the radio is left alone
             report.restarted = [s.name for s in chosen if s.kind == "keepalive" and s.name in report.running]
             report.restarted += _restart_panel(say)
+            if sys.platform == "darwin":
+                unhealthy = verify_launch_agents(chosen, say=say)
+                chosen_names = [s.name for s in chosen]
+                report.failed = unhealthy
+                report.running = [name for name in chosen_names if name not in unhealthy]
             report.radio_kept = _job_pid(RADIO_JOB) is not None
             if report.radio_kept:
                 say("Radio: it keeps its current code until it is next turned off and on")
@@ -705,7 +839,7 @@ def uninstall(dry_run: bool = False, settings_file: Optional[Path] = None) -> in
         radios_ok = False
     new, changes = remove_settings(old)
     print(f"Claude Code settings: {path}")
-    for c in changes or ["no Harnessgram hooks found"]:
+    for c in changes or ["no HarnessGram hooks found"]:
         print(f"  {tag}{c}")
     if new != old and not dry_run:
         print(f"  settings written; backup: {_write_settings(path, new)}")
@@ -718,7 +852,7 @@ def uninstall(dry_run: bool = False, settings_file: Optional[Path] = None) -> in
         if dry_run:
             continue
         if sys.platform == "darwin":
-            _sh("launchctl", "bootout", f"gui/{os.getuid()}/{svc.label}")
+            _launchctl("bootout", f"gui/{os.getuid()}/{svc.label}")
         else:
             _sh("systemctl", "--user", "disable", "--now", f"{svc.unit}.timer" if svc.timed else f"{svc.unit}.service")
         for f in files:

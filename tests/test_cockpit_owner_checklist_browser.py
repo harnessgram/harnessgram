@@ -65,8 +65,14 @@ def me(page):
     page.locator(".tabs .tab").filter(has_text=re.compile(he["tabMe"] + "|" + he["tabBrief"])).first.click()
 
 
+def open_fold(page, block):
+    """Open a collapsed block and wait out its short reveal."""
+    block.locator(":scope > .compact-toggle").click()
+    page.wait_for_timeout(700)
+
+
 @pytest.mark.parametrize("brief_home", [False, True])
-def test_hebrew_requests_filter_steps_done_poll_and_no_overflow(browser, server, monkeypatch, brief_home):
+def test_hebrew_requests_group_expand_done_poll_and_no_overflow(browser, server, monkeypatch, brief_home):
     monkeypatch.setattr(panel.brief, "on", lambda: brief_home)
     put_requests("alpha", [request(1, "Prepare the release"),
                            request(2, "Review the screen", wait="owner", notes=["First step", {"text": "Latest step"}]),
@@ -79,41 +85,42 @@ def test_hebrew_requests_filter_steps_done_poll_and_no_overflow(browser, server,
         me(page)
         page.wait_for_selector(".request-row")
         assert page.locator("html").get_attribute("dir") == "rtl"
-        assert page.locator(".requests-needs .request-row").count() == 1
-        group = page.locator('[data-block="requests-project:alpha"]')
-        toggle = group.locator(":scope > .compact-toggle")
-        assert toggle.get_attribute("aria-expanded") == "false"
-        toggle.click()
-        page.wait_for_timeout(700)
-        titles = group.locator(".request-row:visible .nm").all_text_contents()
-        assert titles == ["לבדוק את המסך", "להכין את הגרסה"]
-        first = group.locator(".request-row").first
-        assert first.get_by_text("נדרש ממך").is_visible()
-        assert not first.locator(".request-note").is_visible()
+        mine = page.locator('[data-block="requests-group:owner:alpha"]')
+        assert mine.locator(":scope > .compact-toggle").get_attribute("aria-expanded") == "true"
+        assert mine.locator(".request-row:visible .nm").all_text_contents() == ["לבדוק את המסך"]
+        # The row is one compact line; the full text, note and steps wait behind a tap and the buttons stay in view.
+        first = mine.locator(".request-row").first
+        assert not first.locator(".request-details").is_visible()
+        assert first.locator(".request-actions").is_visible()
         first.locator(".request-toggle").click()
+        first.locator(".request-note").wait_for()
         assert first.locator(".request-note").inner_text() == "הבדיקה הושלמה"
         assert first.locator(".request-steps ol").inner_text().splitlines() == ["בדיקה ראשונה", "הבדיקה הושלמה"]
-        done = group.locator('[data-block="requests-done:alpha"]')
-        assert done.locator(":scope > button").get_attribute("aria-expanded") == "false"
-        assert not group.get_by_text("בקשה שבוצעה", exact=True).is_visible()
-        done.locator(":scope > .compact-toggle").click()
-        page.wait_for_timeout(700)
-        assert group.get_by_text("בקשה שבוצעה", exact=True).is_visible()
+        assert first.locator(".request-actions button:visible").count() == 3
+        # Items waiting on agents and finished ones stay folded until asked for.
+        agents = page.locator('[data-block="requests-agents"]')
+        assert agents.locator(":scope > .compact-toggle").get_attribute("aria-expanded") == "false"
+        open_fold(page, agents)
+        assert agents.locator('[data-block="requests-group:agents:alpha"] .nm').all_text_contents() == ["להכין את הגרסה"]
+        long_row = agents.locator('[data-block="requests-group:agents:beta"] .request-row').first
+        assert long_row.locator(".nm").evaluate("e => e.scrollWidth <= e.clientWidth + 1 || getComputedStyle(e).textOverflow === 'ellipsis'")
+        long_row.locator(".request-toggle").click()
+        long_row.locator(".request-note").wait_for()
+        done = page.locator('[data-block="requests-done"]')
+        assert not page.locator(".requests").get_by_text("בקשה שבוצעה", exact=True).is_visible()
+        open_fold(page, done)
+        assert done.get_by_text("בקשה שבוצעה", exact=True).is_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
-        page.get_by_role("group", name="לפי פרויקט").get_by_role("button", name=re.compile(r"^beta")).click()
-        assert page.locator(".request-project").count() == 1
-        assert not page.locator(".requests").get_by_text("לבדוק את המסך", exact=True).count()  # the brief may list it in its own section
-        # A normal state refresh sees the external file, and retains this viewer's filter.
+        # A normal state refresh sees the external file.
         put_requests("beta", [request(1, "בקשה ראשונה"), request(2, "בקשה שהגיעה עכשיו")])
         page.clock.run_for(61000)  # one idle poll (20 s), plus the brief's slower refresh when it is the home
-        page.locator(".requests").get_by_text("בקשה שהגיעה עכשיו", exact=True).wait_for()  # the brief may list it too
-        assert page.get_by_role("group", name="לפי פרויקט").get_by_role("button", name=re.compile(r"^beta")).get_attribute("aria-pressed") == "true"
+        agents.get_by_text("בקשה שהגיעה עכשיו", exact=True).wait_for()
     finally:
         ctx.close()
 
 
 @pytest.mark.parametrize("lang", ["he", "en"])
-def test_requests_phone_rail_shortlist_paging_expansion_and_remembered_groups(browser, server, monkeypatch, lang):
+def test_requests_phone_groups_paging_long_wait_and_remembered_folds(browser, server, monkeypatch, lang):
     monkeypatch.setattr(panel.brief, "on", lambda: False)
     long_title = "בקשה עם כותרת ארוכה " * 20
     note = "הערה מלאה לבקשה " * 30
@@ -121,77 +128,78 @@ def test_requests_phone_rail_shortlist_paging_expansion_and_remembered_groups(br
                                    notes=["שלב ראשון", note]) for n in range(1, 9)])
     put_requests("beta", [request(n, "בקשת צוות " + str(n)) for n in range(1, 13)])
     put_requests("gamma", [request(1, "מחכה לך", wait="owner")])
+    put_requests("oldie", [request(1, "ממתינה הרבה זמן", wait="owner", updated=time.time() - 9 * DAY)])
     put_requests("completed", [request(1, "בקשה סגורה", status="done")])
     for n in range(8):
         put_requests("project-" + str(n), [request(1, "משימה")])
     server.lang = lang  # the page is served in the server's UI language; the browser locale alone does not switch it
     ctx, page = panel_browser.open_panel(browser, server, signed(), lang=lang, width=390)
-    strings = panel_page.STRINGS[lang]
+    copy = panel_page.V2_STRINGS[lang]["requests"]
     try:
         page.clock.install()
         page.reload()
-        page.locator(".tabs .tab").filter(has_text=strings["tabMe"]).first.click()
-        rail = page.get_by_role("group", name=strings["requestsProject"])
+        page.locator(".tabs .tab").filter(has_text=panel_page.STRINGS[lang]["tabMe"]).first.click()
+        page.locator(".requests").wait_for()
         assert page.locator("html").get_attribute("dir") == ("rtl" if lang == "he" else "ltr")
-        assert rail.evaluate("e => e.scrollWidth > e.clientWidth")
-        assert rail.locator("button").evaluate_all("es => new Set(es.map(e=>Math.round(e.getBoundingClientRect().top))).size === 1")
-        assert rail.locator(".requests-pill-name").all_text_contents()[:4] == [strings["requestsAll"], "alpha", "gamma", "beta"]
-        assert "completed" not in rail.inner_text()
-        assert rail.locator("button").first.get_attribute("aria-pressed") == "true"
-        assert page.locator(".requests-needs .request-row").count() == 3
-        assert page.locator(".requests .request-row:visible").count() == 3  # project copies stay hidden
+        # Needs you: alpha (4) and gamma (1); the nine-day-old item is not here.
+        assert page.locator(".requests > .requests-needs > .requests-head .requests-count").inner_text() == "5"
+        owner = page.locator('[data-block^="requests-group:owner:"]')
+        assert owner.evaluate_all("es => es.map(e => e.getAttribute('data-block'))") == ["requests-group:owner:alpha", "requests-group:owner:gamma"]
+        assert owner.first.locator(".request-row:visible").count() == 4
+        assert page.locator(".requests-fold").evaluate_all("es => es.map(e => e.dataset.requests)") == ["agents", "long", "done"]
+        assert page.locator('[data-block="requests-long"] .request-row').count() == 1
         assert page.evaluate("document.documentElement.scrollWidth <= 390")
-        assert rail.evaluate("e => getComputedStyle(e).scrollSnapType.includes('inline')")
-        rail.evaluate("e => e.scrollLeft = document.documentElement.dir === 'rtl' ? -e.scrollWidth : e.scrollWidth")
-        assert rail.evaluate("e => Math.abs(e.scrollLeft) > 0")
-        group = page.locator('[data-block="requests-project:alpha"]')
-        group.locator(":scope > button").click()
-        page.wait_for_timeout(700)
-        assert group.locator(".request-row:visible").count() == 5
-        more = group.get_by_role("button", name=strings["requestsMore"].replace("{n}", "3"), exact=True)
+        # Agents are on it: collapsed by default, five rows per project, then Show all.
+        agents = page.locator('[data-block="requests-agents"]')
+        assert agents.locator(":scope > .compact-toggle").get_attribute("aria-expanded") == "false"
+        open_fold(page, agents)
+        beta = agents.locator('[data-block="requests-group:agents:beta"]')
+        assert beta.locator(".compact-figure").first.inner_text() == "12"
+        assert beta.locator(".request-row:visible").count() == 5
+        more = beta.get_by_role("button", name=copy["showAll"].replace("{n}", "12"), exact=True)
         assert more.is_visible()
-        first = group.locator(".request-row").first
-        row_button = first.locator(".request-toggle")
-        assert row_button.get_attribute("aria-expanded") == "false"
-        assert row_button.bounding_box()["height"] >= 44
-        assert first.locator(".nm").evaluate("e => getComputedStyle(e).webkitLineClamp") == "2"
-        assert not first.locator(".request-note").is_visible()
-        row_button.click()
-        assert row_button.get_attribute("aria-expanded") == "true"
-        assert first.locator(".request-note").is_visible()
-        assert first.locator(".request-note").inner_text() == note.strip()
-        assert first.locator(".request-steps li").count() == 2
-        assert first.locator(".nm").evaluate("e => e.scrollHeight <= e.clientHeight + 1")
-        row_button.focus()
-        page.keyboard.press("Enter")
-        assert not first.locator(".request-note").is_visible()
-        page.keyboard.press("Space")
-        assert first.locator(".request-note").is_visible()
+        row = beta.locator(".request-row").first
+        toggle = row.locator(".request-toggle")
+        assert toggle.get_attribute("aria-expanded") == "false"
+        assert toggle.bounding_box()["height"] >= 44
+        style = row.locator(".nm").evaluate("e => [getComputedStyle(e).whiteSpace, getComputedStyle(e).webkitLineClamp]")
+        assert style == ["pre-line", "3"]  # a long title wraps to three lines, then clips
+        tops = row.locator(".mt > *").evaluate_all("es => new Set(es.map(e => Math.round(e.getBoundingClientRect().top + e.getBoundingClientRect().height / 2))).size")
+        assert tops == 1  # the chip and the age share one metadata line
         more.click()
-        assert group.locator(".request-row:visible").count() == 8
-        assert not group.locator(".requests-more").count()
-        # State polls retain disclosure, row expansion, filter and pagination.
+        assert beta.locator(".request-row:visible").count() == 12
+        assert not beta.get_by_role("button", name=copy["showAll"].replace("{n}", "12"), exact=True).count()
+        # Opening a row fetches its text and shows the three buttons.
+        alpha_row = owner.first.locator(".request-row").first
+        alpha_row.locator(".request-toggle").click()
+        alpha_row.locator(".request-note").wait_for()
+        assert alpha_row.locator(".request-note").inner_text() == note.strip()
+        assert alpha_row.locator(".request-steps li").count() == 2
+        assert alpha_row.locator(".request-full").inner_text().startswith(long_title.strip())
+        toggle = alpha_row.locator(".request-toggle")
+        toggle.focus()
+        page.keyboard.press("Enter")
+        assert not alpha_row.locator(".request-note").is_visible()
+        page.keyboard.press("Space")
+        assert alpha_row.locator(".request-note").is_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= 390")
+        # State polls and a reload keep the folds, paging and the open row.
         page.clock.run_for(21000)
-        assert group.locator(":scope > button").get_attribute("aria-expanded") == "true"
-        assert group.locator(".request-row:visible").count() == 8
-        assert group.locator(".request-note:visible").count() == 1
-        assert page.locator('[data-block="requests-project:beta"] > button').get_attribute("aria-expanded") == "false"
+        assert agents.locator(":scope > .compact-toggle").get_attribute("aria-expanded") == "true"
+        assert beta.locator(".request-row:visible").count() == 12
+        assert alpha_row.locator(".request-note").is_visible()
         page.reload()
         page.locator(".requests").wait_for()
-        assert group.locator(":scope > button").get_attribute("aria-expanded") == "true"
-        assert page.locator('[data-block="requests-project:beta"] > button').get_attribute("aria-expanded") == "false"
-        page.locator(".requests-needs").get_by_role("button", name=strings["requestsShowAll"].replace("{n}", "5")).click()
-        page.wait_for_timeout(700)
-        assert page.locator(".requests-needs").count() == 0
-        assert page.locator(".request-project").count() == 2
-        assert page.locator(".requests .request-row:visible").count() == 5
-        assert not page.locator(".requests").get_by_text(strings["requestsTeam"], exact=True).count()
-        page.get_by_role("button", name=strings["requestsBackAll"], exact=True).click()
-        assert page.locator(".requests-needs .request-row").count() == 3
-        rail.get_by_role("button", name=re.compile(r"^beta")).click()
-        assert page.locator(".request-project").count() == 1
-        assert page.locator(".request-project .request-row:visible").count() == 5
+        assert page.locator('[data-block="requests-agents"] > .compact-toggle').get_attribute("aria-expanded") == "true"
+        assert page.locator('[data-block="requests-long"] > .compact-toggle').get_attribute("aria-expanded") == "false"
         assert page.evaluate("document.documentElement.scrollWidth <= 390")
+        # The narrowest common phone: the compact line still fits, open or not.
+        page.set_viewport_size({"width": 320, "height": 700})
+        page.locator('[data-block="requests-long"] > .compact-toggle').click()
+        page.wait_for_timeout(700)
+        page.locator('[data-block="requests-long"] .request-toggle').first.click()
+        assert page.evaluate("document.documentElement.scrollWidth <= 320")
+        assert page.locator(".requests").evaluate("e => e.scrollWidth <= e.clientWidth")
     finally:
         ctx.close()
 

@@ -1189,10 +1189,10 @@ def test_the_terminal_wizard_prints_what_it_printed_before(monkeypatch):
                      run_doctor=False, say=lines.append, input_fn=answer)
     assert code == 0
     assert "\n".join(lines) == "\n".join([
-        "Harnessgram setup\n",
+        "HarnessGram setup\n",
         "Step 1 of 4: create your bot (about 1 minute, in the Telegram app)",
         "  1. Open @BotFather (https://t.me/BotFather) and send /newbot.",
-        "     When it asks, send a name, for example: Harnessgram",
+        "     When it asks, send a name, for example: HarnessGram",
         '     Then a username that ends in "bot", for example: harnessgram_sample_bot',
         "  2. BotFather answers with a message that holds the token (it looks like 123456789:AAE...).",
         "     Tap the token to copy it, or copy the whole message. Setup reads it from the clipboard.",
@@ -1259,6 +1259,7 @@ def _failing_launchd(monkeypatch, tmp_path):
     monkeypatch.setattr(install_mod.sys, "platform", "darwin")
     ran = []
     monkeypatch.setattr(install_mod, "_sh", lambda *cmd: ran.append(cmd) or (5 if cmd[1] == "bootstrap" else 0))
+    monkeypatch.setattr(install_mod, "_out", lambda *cmd: (113, ""))  # the health check never reaches the real launchctl
     return ran
 
 
@@ -1282,6 +1283,7 @@ def test_a_service_that_did_not_start_is_shown_as_not_working(make, tmp_path, mo
 def test_a_started_service_counts_only_with_the_listener_confirmed(make, tmp_path, monkeypatch):
     _failing_launchd(monkeypatch, tmp_path)
     monkeypatch.setattr(install_mod, "_sh", lambda *cmd: 0)  # launchd loads everything
+    monkeypatch.setattr(install_mod, "_out", lambda *cmd: (0, "state = running\n\tpid = 123\n"))
     waits = []
 
     def wait(timeout, restarted=False, old_run=None):
@@ -1334,6 +1336,7 @@ def test_every_install_line_has_both_languages_and_hebrew_keeps_commands_apart()
 def _started_listener_page(make, tmp_path, monkeypatch, run_doctor, listener):
     _failing_launchd(monkeypatch, tmp_path)
     monkeypatch.setattr(install_mod, "_sh", lambda *cmd: 0)  # launchd loads everything
+    monkeypatch.setattr(install_mod, "_out", lambda *cmd: (0, "state = running\n\tpid = 123\n"))
     monkeypatch.setattr(doctor, "wait_listener", lambda timeout, restarted=False, old_run=None: listener)
     monkeypatch.setattr(doctor, "collect", lambda offline=False, bot=None, listener=None: list(listener or []))
     srv = make(install_hooks=True, service=True, start=True, run_doctor=run_doctor)

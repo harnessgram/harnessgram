@@ -350,6 +350,26 @@ def test_the_zone_converts_calendar_times():
     assert [(e.day, e.time) for e in schedule.parse_ics(text, cfg(timezone="UTC"), date(2026, 11, 15), date(2026, 11, 16))] == [("2026-11-15", "23:00")]
 
 
+@pytest.mark.parametrize("start,end", [
+    ("2026-10-25T01:30:00+03:00", "2026-10-25T01:15:00+02:00"),
+    ("2026-03-27T01:30:00+02:00", "2026-03-27T03:15:00+03:00"),
+])
+@pytest.mark.parametrize("local_start", [False, True])
+def test_ics_events_crossing_dst_keep_their_instants_and_local_display(start, end, local_start):
+    beginning, finish = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    dtstart = ("DTSTART;TZID=Asia/Jerusalem:" + beginning.strftime("%Y%m%dT%H%M%S") if local_start else
+               "DTSTART:" + beginning.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    text = ("BEGIN:VEVENT\nSUMMARY:DST\n" + dtstart + "\nDTEND:" +
+            finish.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "\nEND:VEVENT\n")
+    found = schedule.parse_ics(text, cfg(timezone="Asia/Jerusalem"), beginning.date(), beginning.date())
+    assert len(found) == 1
+    event = found[0]
+    assert (event.day, event.time) == (beginning.date().isoformat(), "01:30")
+    assert event.start.isoformat() == start
+    assert event.end.isoformat() == end
+    assert event.end.timestamp() - event.start.timestamp() == 45 * 60
+
+
 def test_an_unreadable_source_marks_the_calendar_not_ok_and_keeps_the_own_items(tmp_path):
     schedule.add(cfg(), "mine", NOW)
     got = schedule.view(cfg(), NOW, source_list=[schedule.IcsSource(str(tmp_path / "missing.ics"))])

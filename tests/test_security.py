@@ -72,7 +72,7 @@ def test_console_script_ignores_a_shadowing_module_in_the_project(tmp_path):
                       "from ctb.cli import main\nsys.exit(main())\n")
     script.chmod(0o755)
     out = subprocess.run([str(script), "--version"], cwd=proj, capture_output=True, text=True, timeout=60)
-    assert out.returncode == 0 and "Harnessgram" in out.stdout and not marker.exists()
+    assert out.returncode == 0 and "HarnessGram" in out.stdout and not marker.exists()
     # control: the old form really was exploitable, so this test would catch a regression
     subprocess.run([sys.executable, "-m", "ctb", "--version"], cwd=proj, capture_output=True, timeout=60,
                    env=dict(os.environ, PYTHONPATH=SRC))
@@ -287,7 +287,40 @@ def test_queue_is_capped_and_says_what_was_dropped(tmp_path):
         box.put("s", {"text": f"m{i}"})
     texts = [m["text"] for m in box.take("s")]
     assert texts[1:] == ["m5", "m6", "m7"]
-    assert "5 older Telegram message(s) were dropped" in texts[0]
+    assert "5 older queue item(s) were dropped" in texts[0]
+    note = box.peek("s")[0] if box.peek("s") else None
+    assert note is None  # take consumed the synthetic note along with the messages
+
+
+def test_queue_drop_note_has_a_non_owner_source_and_does_not_claim_telegram(tmp_path):
+    box = I.Inbox(tmp_path / "inbox", max_items=1)
+    box.put("s", {"text": "connector", "source": "mcp"})
+    box.put("s", {"text": "owner", "source": "owner"})
+    note = box.peek("s")[0]
+    assert note["source"] == "queue" and note["dropped"] == 1
+    assert "Telegram" not in note["text"]
+    delivered = framing.deliver("[Owner]", [note], "owner closing")
+    assert framing.QUEUE_HEADER in delivered and "[Owner]" not in delivered
+    assert "owner closing" not in delivered and framing.QUEUE_CLOSING in delivered
+
+
+def test_queue_evicts_mcp_suggestions_before_owner_messages(tmp_path):
+    box = I.Inbox(tmp_path / "inbox", max_items=3)
+    box.put("s", {"text": "connector-old", "source": "mcp"})
+    box.put("s", {"text": "owner-old", "source": "owner"})
+    box.put("s", {"text": "connector-new", "source": "mcp"})
+    box.put("s", {"text": "owner-new", "source": "owner"})
+    items = [item for item in box.take("s") if not item.get("dropped")]
+    assert [item["text"] for item in items] == ["owner-old", "connector-new", "owner-new"]
+
+
+def test_queue_preserves_mcp_answer_to_closed_decision(tmp_path):
+    box = I.Inbox(tmp_path / "inbox", max_items=2)
+    box.put("s", {"text": "answer", "source": "mcp", "decision": "0123456789abcdef"})
+    box.put("s", {"text": "suggestion", "source": "mcp"})
+    box.put("s", {"text": "owner", "source": "owner"})
+    items = [item for item in box.take("s") if not item.get("dropped")]
+    assert [item["text"] for item in items] == ["answer", "owner"]
 
 
 def test_old_downloads_are_cleaned_up(tmp_path):

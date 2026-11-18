@@ -1,6 +1,6 @@
 // Direction D is additive: reuse the existing authenticated actions and draft/back machinery.
 function v2Enabled(d){return !!d&&d.ui_v2_enabled===true&&!!d.settings&&["preview","on"].indexOf(d.settings.ui_v2)>=0;}
-function v2Image(name,cls){var img=el("img",cls);img.src=V2_ASSET+(["plane","book","books","visor","clapper","catalog","header","artwork","bell","gears","server","mic","laptop"].indexOf(name)>=0?name:"generic")+".webp";img.alt="";img.decoding="async";return img;}
+function v2Image(name,cls,art){var img=el("img",cls);img.width=160;img.height=100;img.src=V2_ASSET+(["plane","book","books","visor","clapper","catalog","header","artwork","bell","gears","server","mic","laptop"].indexOf(name)>=0?name:"generic")+".webp";img.alt="";img.decoding="async";if(art&&typeof v2ArtFill==="function")v2ArtFill(img,art);return img;}
 function v2Heading(text,ic){var h=el("h2","v2-heading");if(ic)h.appendChild(icon(ic));h.appendChild(el("span",null,text));return h;}
 function v2Prepare(d){
  var on=v2Enabled(d),root=document.documentElement,was=root.classList.contains("cockpit-v2");root.classList.toggle("cockpit-v2",on);
@@ -26,7 +26,14 @@ function v2Tabs(d){
 }
 // Ended or replaced decisions can no longer be answered. "old" alone is still answerable (classic rule), so it stays live.
 function v2IsStale(x){return !!x.stale&&x.stale!=="old";}
-function v2OpenCount(d){return (d.decisions||[]).filter(function(x){return !closed[x.id]&&!v2IsStale(x);}).length+(d.cards||[]).filter(function(c){return ASKS[c.kind]&&!c.ended&&!cardDone[c.id];}).length;}
+// The server's one shared count (ctb/waiting.py), minus what the owner answered here since that snapshot, so the
+// number drops at once; an older payload without it falls back to the local rule.
+function v2OpenCount(d){var srv=typeof d.waiting_count==="number";
+ var dec=(d.decisions||[]).filter(function(x){return srv?!(x.stale&&x.stale!=="old"):!v2IsStale(x);}),
+  ask=(d.cards||[]).filter(function(c){return ASKS[c.kind]&&!c.ended;});
+ var gone=dec.filter(function(x){return closed[x.id];}).length+ask.filter(function(c){return cardDone[c.id];}).length;
+ return srv?Math.max(0,d.waiting_count-gone):dec.length+ask.length-gone+(d.reminders||[]).length+(d.requests||[]).filter(v2OwnerRequest).length;}
+function v2OwnerRequest(r){return r.status==="open"&&r.wait==="owner"&&!r.older;}
 function v2PageHead(title,ic,greeting){var h=el("div","v2-page-head"),i=el("span","v2-head-icon");i.appendChild(icon(ic));h.appendChild(i);var b=el("div");b.appendChild(el("h2",null,title));if(greeting)b.appendChild(el("div","v2-greeting",greeting));h.appendChild(b);app.appendChild(h);}
 function v2Decision(d){
  var c=el("article","v2-decision");c.id="question-"+d.id;c.setAttribute("data-v2-decision",d.id);
@@ -44,12 +51,13 @@ function v2Decision(d){
  if(typeof d.request==="string"&&d.request){var rq=el("pre","pq-request",d.request);rq.dir="ltr";c.appendChild(rq);}
  var ta=el("textarea");ta.maxLength=300;ta.rows=2;ta.placeholder=S.notePh;ta.value=notes[d.id]||"";tune(ta,true);ta.addEventListener("input",function(){notes[d.id]=ta.value;syncClose();});
  var content=el("div");content.appendChild(el("div","safe",ago(d.age)+(d.old?" · "+V2.now.older:"")));
- source("v2"+d.id,[[d.title,he(d,"title")],[d.detail,he(d,"detail")]],content);
- if(d.url)content.appendChild(topicBtn(d.url));content.appendChild(ta);content.appendChild(el("div","safe",S.tapNote));
+ if(d.link)content.appendChild(v2MessageLink(d.link));
+ source("v2"+d.id,d,c);
+ if(d.url&&d.url!==d.link)content.appendChild(topicBtn(d.url));content.appendChild(ta);content.appendChild(el("div","safe",S.tapNote));
  var more=compactBlock("v2-decision:"+d.id,V2.now.details,"",content,"v2-detail",!!notes[d.id]);
  // Reuse the actual back-aware disclosure button. Moving it beside the picture
  // keeps aria-expanded correct even when native Back collapses the details.
- var picture=el("div","v2-picture");picture.appendChild(v2Image(d.project_asset));var mb=more.querySelector(".compact-toggle");
+ var picture=el("div","v2-picture");picture.appendChild(v2Image(d.project_asset,null,d.project_art));var mb=more.querySelector(".compact-toggle");
  mb.textContent="";mb.appendChild(el("span","v2-more",V2.now.more));mb.appendChild(el("span","v2-less",V2.now.less));picture.appendChild(mb);c.appendChild(picture);
  var buttons=el("div","v2-answer-buttons"),yes=el("button",null,shown(d,"yes")||V2.now.yes),no=el("button",null,shown(d,"no")||V2.now.no);
  [[yes,"yes"],[no,"no"]].forEach(function(p){p[0].type="button";p[0].setAttribute("data-v2-answer",p[1]);p[0].addEventListener("click",function(){answer(c,d,p[1],[yes,no],ta);});buttons.appendChild(p[0]);});c.appendChild(buttons);
@@ -60,7 +68,8 @@ function v2Decision(d){
  c.appendChild(more);return c;
 }
 // An agent's ask/choice card keeps its own answer controls; the picture is decoration.
-function v2AskCard(c){var box=agentCard(c,false);box.classList.add("v2-card-decision");box.setAttribute("data-v2-decision",c.id);box.insertBefore(v2Image(c.project_asset,"v2-card-picture"),box.firstChild);return box;}
+function v2MessageLink(url){var b=el("button","v2-message-link",V2.now.messageLink);b.type="button";b.addEventListener("click",function(e){e.preventDefault();e.stopPropagation();haptic("tap");openLink(url);});return b;}
+function v2AskCard(c){var box=agentCard(c,false);box.classList.add("v2-card-decision");box.setAttribute("data-v2-decision",c.id);box.insertBefore(v2Image(c.project_asset,"v2-card-picture",c.project_art),box.firstChild);if(c.link)box.appendChild(v2MessageLink(c.link));return box;}
 function v2Ring(p){
  var ring=el("span","v2-progress"),known=typeof p.percent==="number";ring.textContent=known?pf.format(p.percent/100):"–";
  ring.setAttribute("role","progressbar");ring.setAttribute("aria-valuemin","0");ring.setAttribute("aria-valuemax","100");if(known)ring.setAttribute("aria-valuenow",String(p.percent));else ring.setAttribute("aria-valuetext",V2.now.progressUnknown);
@@ -83,13 +92,14 @@ function v2ProjectOrder(list){var rank={waiting:0,blocked:1};
 function v2Project(p){
  var b=el("button","v2-project");b.type="button";b.setAttribute("data-status",p.status);b.setAttribute("data-project",p.key);
  // The picture and its stamp; the ring sits beside the status lines, never on top of the picture.
- var art=el("span","v2-project-art");art.appendChild(v2Image(p.asset));art.appendChild(v2Badge(p));b.appendChild(art);
+ var art=el("span","v2-project-art");art.appendChild(v2Image(p.asset,null,p.art));art.appendChild(v2Badge(p));b.appendChild(art);
  var name=el("bdi","v2-project-name",v2Name(p));name.title=shown(p,"name");b.appendChild(name);
  var meta=el("span","v2-project-meta"),lines=el("span","v2-project-lines");meta.appendChild(v2Ring(p));
  lines.appendChild(el("span","v2-project-status",p.stale&&p.status==="on_track"?V2.now.staleUpdate:V2.now[p.status]));
  var age=p.age==null?V2.now.noUpdate:V2.now.age+" "+ago(p.age);lines.appendChild(el("span","v2-project-age",age));meta.appendChild(lines);b.appendChild(meta);
  b.title=[shown(p,"name"),shown(p,"summary"),p.stale?V2.now.staleUpdate:"",age].filter(Boolean).join(" · ");b.setAttribute("aria-description",b.title);
- b.addEventListener("click",function(){v2OpenProject(p.key);});return b;
+ b.addEventListener("click",function(){if(b._artHeld){b._artHeld=false;return;}v2OpenProject(p.key);});
+ if(typeof v2ArtHold==="function")v2ArtHold(b,p);return b;
 }
 function v2Changes(d){var row=el("div","v2-changes");row.appendChild(icon("v2announce"));row.appendChild(el("b",null,V2.now.changed));var text=V2.now.noChange;
  var since=(d.cockpit_v2||{}).since;
@@ -138,8 +148,9 @@ function v2TopicCleanup(d){
  if(v2CleanupResult)body.appendChild(v2CleanupResultCard(v2CleanupResult));
  if(rows.length)body.appendChild(el("div","safe",V2.cleanup.hint.replace("{days}",nf.format(tc.days))));
  rows.forEach(function(x){
-  var row=el("div","v2-cleanup-row"),text=el("div","v2-cleanup-text"),name=el("bdi","v2-cleanup-name",x.name);name.dir="auto";
-  text.appendChild(name);text.appendChild(el("span","v2-cleanup-meta",(x.project?x.project+" · ":"")+V2.cleanup.last+" "+ago(x.age)));
+  var row=el("div","v2-cleanup-row"),text=el("div","v2-cleanup-text"),name=el("bdi","v2-cleanup-name",shown(x,"name"));name.dir="auto";
+  text.appendChild(name);text.appendChild(el("span","v2-cleanup-meta",(x.project?shown(x,"project")+" · ":"")+V2.cleanup.last+" "+ago(x.age)));
+  source("cleanup:"+x.id,x,text);
   var acts=el("div","v2-cleanup-actions"),keep=el("button","v2-cleanup-keep",V2.cleanup.keep),close=el("button","v2-cleanup-close",V2.cleanup.close);
   keep.type=close.type="button";keep.setAttribute("data-v2-cleanup","keep");keep.setAttribute("data-id",x.id);close.setAttribute("data-v2-cleanup","close");close.setAttribute("data-id",x.id);btns.push(keep,close);
   keep.addEventListener("click",function(){v2CleanupPost({action:"keep",ids:[x.id]},btns,function(j){if(j.kept)v2CleanupResult={kind:"keep",ids:[x.id]};});});
@@ -158,14 +169,30 @@ function v2TopicCleanup(d){
  var f=compactBlock("v2-cleanup",V2.cleanup.title+" ("+nf.format(rows.length)+")","",body,"v2-cleanup-fold",v2CleanupArmed||!!v2CleanupResult);f.setAttribute("data-v2-section","cleanup");return f;
 }
 function v2RequestList(rows){var ul=el("ul","v2-requests");rows.forEach(function(r){var li=requestRow(r,true);li.setAttribute("data-v2-request",r.project+":"+r.id);ul.appendChild(li);});return ul;}
+function v2ReminderList(rows){var ul=el("ul","v2-reminders");rows.forEach(function(r){var li=remRow(r,"v2"+r.ref);li.setAttribute("data-v2-reminder",r.ref);ul.appendChild(li);});return ul;}
+// Keep the first five of each source visible; the same Back-aware disclosure reveals the rest.
+function v2NeedsGroup(zone,key,rows,list){
+ if(!rows.length)return;
+ var group=el("div","v2-needs-group");group.setAttribute("data-v2-needs-group",key);if(key==="reminders")group.setAttribute("data-v2-section",key);group.appendChild(list(rows.slice(0,5)));
+ if(rows.length>5)group.appendChild(compactBlock("v2-needs-"+key,V2.now.showAll.replace("{n}",nf.format(rows.length)),"",list(rows.slice(5)),"v2-needs-more",
+  !!target&&rows.slice(5).some(function(r){return r.id===target;})));  // a deep link to a hidden question opens its fold
+ zone.appendChild(group);
+}
+function v2DecisionList(rows){var box=el("div");rows.forEach(function(x){box.appendChild(v2Decision(x));});return box;}
+function v2AskList(rows){var box=el("div");rows.forEach(function(c){box.appendChild(v2AskCard(c));});return box;}
 function v2Now(d){
  briefSeen=d.now;
  v2PageHead(V2.shell.now,"v2home",V2.now.greeting);
+ if(d.home_context){var hc=el("div","v2-context");  // inside the page head: decisions stays the first section
+  hc.appendChild(el("span","v2-context-chip",V2.now["contextMode_"+d.home_context.mode]||d.home_context.mode));
+  hc.appendChild(el("span","v2-context-why",V2.now["contextWhy_"+d.home_context.why]||d.home_context.why));app.lastChild.lastChild.appendChild(hc);}
  var morning=typeof v2MorningCard==="function"?v2MorningCard(d):null;if(morning)app.appendChild(morning);  // cockpit_v2_workmap.js
  var zone=el("section","v2-needs");zone.setAttribute("data-v2-section","decisions");zone.setAttribute("aria-label",V2.now.needs);var heading=v2Heading(V2.now.needs,"v2tower");
- var live=(d.decisions||[]).filter(function(x){return !closed[x.id];}),decs=live.filter(function(x){return !v2IsStale(x);}),stale=live.filter(v2IsStale),asks=(d.cards||[]).filter(function(c){return ASKS[c.kind]&&!c.ended&&!cardDone[c.id];});heading.appendChild(el("span","v2-count",nf.format(decs.length+asks.length)));zone.appendChild(heading);
- decs.forEach(function(x){zone.appendChild(v2Decision(x));});asks.forEach(function(c){zone.appendChild(v2AskCard(c));});
- if(!decs.length&&!asks.length)zone.appendChild(el("div","v2-empty",V2.now.empty));app.appendChild(zone);
+ var live=(d.decisions||[]).filter(function(x){return !closed[x.id];}),decs=live.filter(function(x){return !v2IsStale(x);}),stale=live.filter(v2IsStale),asks=(d.cards||[]).filter(function(c){return ASKS[c.kind]&&!c.ended&&!cardDone[c.id];});heading.appendChild(el("span","v2-count",nf.format(v2OpenCount(d))));zone.appendChild(heading);
+ v2NeedsGroup(zone,"decisions",decs,v2DecisionList);v2NeedsGroup(zone,"asks",asks,v2AskList);
+ v2NeedsGroup(zone,"reminders",d.reminders||[],v2ReminderList);
+ v2NeedsGroup(zone,"owner-requests",(d.requests||[]).filter(v2OwnerRequest).sort(function(a,b){return (b.updated||0)-(a.updated||0);}),v2RequestList);
+ if(v2OpenCount(d)===0)zone.appendChild(el("div","v2-empty",V2.now.empty));app.appendChild(zone);
  if(stale.length)app.appendChild(v2StaleFold(stale));
  var cleanup=v2TopicCleanup(d);if(cleanup)app.appendChild(cleanup);
  if(typeof v2ScheduleCard==="function"&&(d.addons||{}).schedule_card!==false)app.appendChild(v2ScheduleCard());  // cockpit_v2_schedule.js; the schedule_card add-on
@@ -176,12 +203,7 @@ function v2Now(d){
  if(!projects.length)tiles.appendChild(el("div","safe",V2.now.noProjects));app.appendChild(tiles);
  if(quiet.length){var qt=el("div","v2-projects");quiet.forEach(function(p){qt.appendChild(v2Project(p));});
   var qf=compactBlock("v2-quiet-projects",V2.now.lessActive+" ("+nf.format(quiet.length)+")","",qt,"v2-less");qf.setAttribute("data-v2-section","quiet-projects");app.appendChild(qf);}
- app.appendChild(v2Heading(V2.now.requests,"list"));var rows=d.requests||[],active=rows.filter(function(r){return r.status!=="done"&&!r.older;}),older=rows.filter(function(r){return r.status==="done"||r.older;});
- var requests=v2RequestList(active);requests.setAttribute("data-v2-section","requests");if(!active.length)requests.appendChild(el("li","v2-empty",S.requestsEmpty));app.appendChild(requests);
- // Old decisions remain in the first zone. This fold holds request history and reminders only.
- var aged=(d.reminders||[]).filter(function(r){return r.old;}),oldBody=el("div");oldBody.appendChild(v2RequestList(older));var oldRem=el("ul","v2-reminders");aged.forEach(function(r,i){oldRem.appendChild(remRow(r,"v2-old"+i));});oldBody.appendChild(oldRem);
- var old=compactBlock("v2-older",V2.now.older+" ("+nf.format(older.length+aged.length)+")","",oldBody,"v2-older");old.setAttribute("data-v2-section","older");app.appendChild(old);
- app.appendChild(v2Heading(V2.now.reminders,"clock"));var reminders=el("ul","v2-reminders");reminders.setAttribute("data-v2-section","reminders");(d.reminders||[]).filter(function(r){return !r.old;}).forEach(function(r,i){reminders.appendChild(remRow(r,"v2"+i));});app.appendChild(reminders);
+ app.appendChild(v2Heading(V2.now.requests,"list"));var requests=requestBoard(d,{omitOwner:true});requests.setAttribute("data-v2-section","requests");app.appendChild(requests);
  var answeredHere=Object.keys(answered);if(answeredHere.length){app.appendChild(v2Heading(V2.now.answers,"check"));answeredHere.forEach(function(id){app.appendChild(doneCard(answered[id].d,answered[id]));});}
  Object.keys(cardDone).forEach(function(id){app.appendChild(agentCard(cardDone[id].c,false));});
 }
@@ -189,11 +211,11 @@ function v2RadioArtwork(){if(!v2Enabled(last))return;var box=document.getElement
  if(row){row.insertBefore(v2Image("artwork","v2-radio-art"),row.firstChild);
   // Decoration only: the waveform and icon never change what the button does or announces.
   var wave=el("span","v2-wave");wave.setAttribute("aria-hidden","true");for(var i=0;i<23;i++)wave.appendChild(el("i"));row.insertBefore(wave,row.querySelector("button"));
-  var btn=row.querySelector("button");if(btn){var label=btn.textContent;btn.textContent="";btn.setAttribute("aria-label",label);btn.appendChild(icon(radioWanted?"v2pause":"v2play"));btn.appendChild(el("span","v2-play-label",label));}
+  var btn=row.querySelector("button");if(btn){var label=btn.textContent;btn.textContent="";btn.setAttribute("aria-label",label);btn.appendChild(icon(radioAudio&&!radioAudio.paused&&!radioAudio.ended&&!radioAudio.error?"v2pause":"v2play"));btn.appendChild(el("span","v2-play-label",label));}
   var live=row.querySelector(".pill.on");if(live)live.insertBefore(icon("v2radio"),live.firstChild);}
  // The Radio tool shows this same player; elsewhere it keeps its classic place and visibility.
  if(radioInfo&&radioInfo.enabled&&!targetClosed&&v2RadioHere(last))box.hidden=false;
- if("mediaSession" in navigator&&typeof MediaMetadata!=="undefined"){try{navigator.mediaSession.metadata=new MediaMetadata({title:"רדיו הצוות",artist:"Harnessgram",artwork:[{src:new URL(V2_ASSET+"artwork.webp",location.href).href,sizes:"512x512",type:"image/webp"}]});}catch(e){}}
+ if("mediaSession" in navigator&&typeof MediaMetadata!=="undefined"){try{navigator.mediaSession.metadata=new MediaMetadata({title:"שידורי הקוקפיט",artist:"HarnessGram",artwork:[{src:new URL(V2_ASSET+"artwork.webp",location.href).href,sizes:"512x512",type:"image/webp"}]});}catch(e){}}
 }
 ICONS.v2home="M3 11l9-8 9 8M5 10v11h5v-7h4v7h5V10";
 ICONS.v2folder="M3 7h7l2 2h9v11H3zM3 7V4h7l2 3";

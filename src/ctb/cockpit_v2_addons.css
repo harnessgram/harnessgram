@@ -1,4 +1,4 @@
-/* "What Harnessgram adds to your agents": built on the knowledge page's parts; logical properties only. */
+/* "What HarnessGram adds to your agents": built on the knowledge page's parts; logical properties only. */
 .cockpit-v2 .va-entry{margin-block-start:0}
 .cockpit-v2 .va-now{display:flex;align-items:center;justify-content:center;gap:8px;min-block-size:44px;margin-block:6px 12px;padding-inline:var(--v2-pad);border-radius:var(--v2-pill);background:var(--v2-success);border:1px solid #b8e6b0;color:#155a10;font-size:15px;font-weight:800}
 .cockpit-v2 .va-now svg{inline-size:20px;block-size:20px;flex:none}

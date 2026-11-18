@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from conftest import GOOD_TOKEN
-from ctb import panel, radio_podcast as P
+from ctb import panel, radio, radio_podcast as P
 from ctb.config import Config
 from test_panel import OWNER, signed
 from test_radio_podcast import FEED, rss, shared_checker  # noqa: F401 (the autouse checker stand-in)
@@ -17,6 +17,11 @@ sync_api = pytest.importorskip("playwright.sync_api", reason="playwright is not 
 
 TITLES = {"en": [("Alpha episode with a rather long title that must wrap inside the card on a phone", "ok"), ("Beta", "ok")],
           "he": [("פרק ראשון עם כותרת ארוכה מאוד שצריכה לעטוף בתוך הכרטיס בטלפון", "בסדר"), ("פרק שני", "בסדר")]}
+
+
+@pytest.fixture(autouse=True)
+def no_real_launchctl(monkeypatch):
+    monkeypatch.setattr(radio, "job_pid", lambda: None)
 
 
 @pytest.fixture

@@ -204,9 +204,12 @@ def test_pin_index_is_kept_per_group(rig):
 
 
 def test_an_account_move_is_answered_in_the_session_group(rig, monkeypatch):
-    from ctb import inbox as I
+    from ctb import accounts, inbox as I, usage
     bot, cfg = rig.bot, rig.cfg
     monkeypatch.setattr(I.time, "sleep", lambda s: None)
+    monkeypatch.setattr(usage, "limit_of", lambda s: {"id": "limit-place"})
+    monkeypatch.setattr(accounts, "fallback_plan", lambda s: {
+        "here": accounts.origin_account(s), "fresh": ["small"], "auto": True})
 
     def fake_move(cfg_, bot_, session, target, say, **kw):
         say("moving now")

@@ -156,9 +156,7 @@ def test_retry_429_and_parse_only(cfg, bot, tmp_path, monkeypatch):
     monkeypatch.setattr(mirror.time, "sleep", sleep)
     assert mirror.Mirror(cfg, bot, tm).send_reply("t", "s", "hello") == 0
     assert delays == [30, 30, 30] and bot.methods("sendMessage") == []
-    assert reply_outbox.drain(cfg, bot) == 0 and bot.methods("sendMessage") == []
-    clock[0] += 9
-    assert reply_outbox.drain(cfg, bot) == 1
+    assert reply_outbox.drain(cfg, bot) == 1 and delays[-1] == 9  # the gate's last 9 s are waited out
     assert reply_outbox.drain(cfg, bot) == 0 and len(bot.methods("sendMessage")) == 1
     failures.append(telegram.TelegramError("forbidden", 403))
     assert mirror.Mirror(cfg, bot, tm).send_reply("t", "s", "hello") == 0

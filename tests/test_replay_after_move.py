@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot
+from conftest import GOOD_TOKEN, FakeBot, signed_in
 from ctb import accounts, dashboard, hooks as H, i18n, inbox as I, mirror as M, progress, replay, topics as T, usage
 from ctb.config import Config, state_dir
 from ctb.topics import TopicMap, session_state
@@ -40,7 +40,7 @@ class Pane:
     def __call__(self, *args):
         self.calls.append(args)
         if args[0] == "send-keys":
-            if "-l" in args and args[-1].startswith("📩"):
+            if "-l" in args and args[-1].startswith(("📩", "continue:")):
                 self.nudge = args[-1]
             elif args[-1] in ("Enter", "C-u"):
                 self.nudge = ""
@@ -56,10 +56,13 @@ class Pane:
 
 @pytest.fixture
 def world(monkeypatch, tmp_path):
+    signed_in("main", "small")
     bot = FakeBot()
     thread = TopicMap(state_dir() / "topics.json", bot, OWNER).ensure(SID, "Replay")
     accounts.add("small")
     accounts.record(SID, "main")
+    monkeypatch.setattr(accounts, "fallback_plan", lambda s: {
+        "here": accounts.origin_account(s), "fresh": ["small"], "auto": accounts.auto_enabled()})
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "pane_for_session", lambda s: "%1")
     monkeypatch.setattr(I, "pane_runs_session", lambda *a, **k: True)  # the fake pane hosts the session

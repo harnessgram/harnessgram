@@ -199,9 +199,14 @@ def test_build_stays_fast_with_a_full_ledger_and_a_full_journal(tmp_path, bot):
     topic(bot, "sess-1", "studio: build")
     for n in range(60):
         said("sess-1", f"A late idea about the reports, take {n}")
-    started = time.monotonic()
-    text = recall.build(cfg, "sess-1", "resume")
-    assert time.monotonic() - started < 0.25
+    # Best of three runs: the hook budget is 250 ms, and one slow scheduler tick on a shared CI runner
+    # (252 ms seen on main) must not fail it, while a real slowdown fails all three.
+    best = float("inf")
+    for _ in range(3):
+        started = time.monotonic()
+        text = recall.build(cfg, "sess-1", "resume")
+        best = min(best, time.monotonic() - started)
+    assert best < 0.25
     assert "late idea" in text
 
 

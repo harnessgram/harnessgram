@@ -70,6 +70,15 @@ def test_stop_without_translate_mirrors_original_only(tmp_path, monkeypatch):
     assert out == {} and "--no-translate" in spawned[0]
 
 
+def test_failed_detached_spawn_removes_private_prompt_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(H, "spawn", lambda *a, **k: (_ for _ in ()).throw(OSError("no process")))
+    lines = [ev("user", "q"), ev("assistant", "Finished the requested work.", "a1")]
+    answer_to = {"chat": 1, "id": 9, "text": "private owner prompt"}
+    H.stop_output(stop_data(tmp_path, lines), lines, Config(bot_token="t", owner_chat_id=1),
+                  answer_to=answer_to)
+    assert not list((H.state_dir() / "tmp").glob("prompt-*.txt"))
+
+
 def test_stop_without_config_is_silent_and_does_not_spawn(tmp_path, monkeypatch):
     monkeypatch.setattr(H, "spawn", lambda *a, **k: (_ for _ in ()).throw(AssertionError("spawned")))
     lines = [ev("user", "q"), ev("assistant", "Summary: x", "a1")]

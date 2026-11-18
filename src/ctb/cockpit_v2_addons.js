@@ -1,4 +1,4 @@
-// "What Harnessgram adds to your agents" (addons.py): the second group of Settings in the new Cockpit.
+// "What HarnessGram adds to your agents" (addons.py): the second group of Settings in the new Cockpit.
 // The rows come from POST /api/addons (the same fresh owner login as every action), never from the state poll. The
 // bridge decides what is locked; this page only shows it. A switch takes effect at once and offers a one-tap undo.
 var vaData=null,vaLoading=false,vaError=0,vaOpen=false,vaSnack=null,vaBusy={};

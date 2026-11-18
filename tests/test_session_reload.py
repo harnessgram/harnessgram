@@ -54,6 +54,32 @@ def test_reload_only_stale_idle_bridge_sessions(sessions):
     assert not any(a[0] == "send-keys" for a in actions)  # never types into a pane
 
 
+def test_exit_command_uses_real_typing_path_under_reload_nudge_guard(tmp_path, monkeypatch):
+    """The reload already owns this guard; type_command must not flock a second descriptor."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    box = {"text": ""}
+    calls = []
+
+    def tmux(*args):
+        calls.append(args)
+        if args[0] == "send-keys" and "-l" in args:
+            box["text"] = args[-1]
+        elif args[0] == "send-keys" and args[-1] == "Enter":
+            box["text"] = ""
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(inbox, "_tmux", tmux)
+    monkeypatch.setattr(inbox, "input_box", lambda pane: (box["text"], True))
+    monkeypatch.setattr(inbox, "dismiss_tip", lambda pane: True)
+    monkeypatch.setattr(inbox, "typed_mark", lambda line: None)
+    monkeypatch.setattr(inbox, "_pane_from_process", lambda sid: "%1")
+    with inbox._nudge_guard("session"):
+        result = inbox.type_command("session", "%1", "/exit", settle=0,
+                                    verify_session=True, guard_held=True)
+    assert result == "sent"
+    assert any(call[0] == "send-keys" and call[-1] == "Enter" for call in calls)
+
+
 def test_dry_run_lists_without_touching_panes(sessions):
     cfg, actions, _ = sessions
     result = R.reload_sessions(cfg, dry_run=True)

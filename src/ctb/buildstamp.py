@@ -1,4 +1,4 @@
-"""Which Harnessgram code is installed, and which code each long-running service started with.
+"""Which HarnessGram code is installed, and which code each long-running service started with.
 
 Read-only by design: nothing here restarts, replaces or stops a process. `harnessgram install` restarts the
 services it manages; `harnessgram doctor` names any service that still runs older code.

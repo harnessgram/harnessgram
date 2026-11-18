@@ -1,4 +1,4 @@
-"""What Harnessgram adds to your agents (addons.py): the catalogue, its gates, locks, the endpoint and the page.
+"""What HarnessGram adds to your agents (addons.py): the catalogue, its gates, locks, the endpoint and the page.
 
 Every test runs on the isolated config and state directories from conftest; the real bridge config is never read."""
 import json
@@ -380,8 +380,8 @@ def run_page(body, lang="he", reply=None, status=200):
     from cockpit_v2_browser import sample_state
     view = addons.view(Config())
     script = (SRC / "cockpit_v2.js").read_text().replace("__V2_STRINGS__", json.dumps(panel_page.V2_STRINGS, ensure_ascii=False))
-    script = "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock",
-                                         "requestAction", "requestRow", "v2ModeRow", "settingsBox")) + script
+    script = 'var requestProject="",requestOwnerOnly=false;\n' + "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock",
+                                         "requestAction", "requestRow", "requestRank", "requestDetail", "requestList", "requestGroups", "requestText", "requestBoard", "v2ModeRow", "settingsBox")) + script
     for name in ("cockpit_v2_screens.js", "cockpit_v2_knowledge.js", "cockpit_v2_addons.js"):
         script += "\n" + (SRC / name).read_text()
     script += "\nvar view='settings';function render(){};vaData=%s;" % json.dumps(view, ensure_ascii=False)

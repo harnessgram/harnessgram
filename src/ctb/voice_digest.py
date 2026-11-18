@@ -173,7 +173,12 @@ def _tick(cfg, bot, now, live=False):
         records = []
         for path in sorted((folder() / "pending").glob("*.json")):
             record = read_map(path)
-            if not record or record.get("trivial", radio_talk.trivial(record.get("text", ""))):
+            # Re-check activity-only content because older producers could label a bare "still
+            # working" line non-trivial. Preserve explicit non-trivial outcome classifications.
+            content = record.get("say") or record.get("text", "") if record else ""
+            if (not record or record.get("trivial") is True
+                    or ("trivial" not in record and radio_talk.trivial(content))
+                    or radio_talk.working_only(content)):
                 path.unlink(missing_ok=True)
                 continue
             if cfg.voice_digest == "important" and not record.get("important"):

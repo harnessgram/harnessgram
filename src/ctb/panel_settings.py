@@ -7,8 +7,8 @@ from typing import Any, Callable, Dict, Tuple
 
 from .compact import AUTO_COMPACT_STEPS, auto_compact_limit, set_auto_compact_limit
 from .config import (ACTIVITY_LEVELS, AGENT_NOTICES, STATUS_REPOST, activity_level, set_activity_level,
-                     set_setting, setting_on)
-from . import cockpit_v2
+                     live_activity_in_cockpit, set_live_activity_in_cockpit, set_setting, setting_on)
+from . import accounts, auto_cards, cockpit_v2, day_assistant, voice_copilot
 
 
 def _general_off() -> str:
@@ -92,6 +92,12 @@ def _config_set(name: str, value: Any) -> None:
     save_changes({}, {name: value})
 
 
+def _compact_actions_set(value: bool) -> None:
+    _config_set("compact_actions", value)
+    from .progress import clear_compact_actions_overrides
+    clear_compact_actions_overrides()
+
+
 def _brief_get() -> bool:
     from . import brief
     return brief.on()
@@ -104,18 +110,30 @@ def _brief_set(on: bool) -> None:
 
 # name: (reader, writer, allowed values); a bool setting allows (False, True)
 SETTINGS: Dict[str, Tuple[Callable[[], Any], Callable[[Any], None], tuple]] = {
+    "default_effort": (accounts.effort_level, accounts.set_effort_level, accounts.EFFORT_LEVELS),
+    "auto_cards": (auto_cards.enabled, auto_cards.set_enabled, (False, True)),
     "ui_v2": (cockpit_v2.mode, cockpit_v2.set_mode, cockpit_v2.MODES),
+    **{name: (lambda n=name: cockpit_v2.app_switch(n),
+              lambda value, n=name: cockpit_v2.set_app_switch(n, value), (False, True))
+       for name, _json_key, _copy in cockpit_v2.APP_SWITCHES},
     **{name: (lambda n=name: _config_get(n), lambda value, n=name: _config_set(n, value), (False, True))
-       for name in ("auto_account_switch", "quota_auto_continue", "session_auto_revive", "progress", "progress_details", "auto_topic_names")},
+       for name in ("auto_account_switch", "quota_auto_continue", "emergency_credit", "session_auto_revive",
+                    "progress", "progress_details", "auto_topic_names", "state_emoji")},
+    "compact_actions": (lambda: _config_get("compact_actions"), _compact_actions_set, (False, True)),
     "voice_digest": (lambda: _config_get("voice_digest"), lambda v: _config_set("voice_digest", v),
                      ("off", "important", "hourly", "every_3_hours")),
     "voice_confirm": (_voice_get, _voice_set, (False, True)),
+    "voice_copilot": (voice_copilot.enabled, voice_copilot.set_enabled, (False, True)),
+    "day_briefing": (day_assistant.briefing_enabled, day_assistant.set_briefing_enabled, (False, True)),
+    "day_nudges": (day_assistant.nudges_enabled, day_assistant.set_nudges_enabled, (False, True)),
+    "day_auto_plan": (day_assistant.auto_plan_enabled, day_assistant.set_auto_plan_enabled, (False, True)),
     "delivery_end": (_delivery_get, _delivery_set, (False, True)),
     "auto_compact": (auto_compact_limit, set_auto_compact_limit, tuple(AUTO_COMPACT_STEPS)),
     "cold_compact": (lambda: _config_get("cold_compact"), lambda v: _config_set("cold_compact", v), ("on", "off")),
     "away": (_away_get, _away_set, (False, True)),
     # how much of an agent's work its topic shows while it works (config.activity_level)
     "activity": (activity_level, set_activity_level, ACTIVITY_LEVELS),
+    "live_activity_cockpit": (live_activity_in_cockpit, set_live_activity_in_cockpit, (False, True)),
     "status_repost": (lambda: setting_on(STATUS_REPOST), lambda on: set_setting(STATUS_REPOST, on), (False, True)),
     "agent_notices": (lambda: setting_on(AGENT_NOTICES), lambda on: set_setting(AGENT_NOTICES, on), (False, True)),
     "agents_topic": (lambda: setting_on(_agents_topic()), lambda on: set_setting(_agents_topic(), on), (False, True)),
@@ -124,6 +142,7 @@ SETTINGS: Dict[str, Tuple[Callable[[], Any], Callable[[Any], None], tuple]] = {
     "radio_every_reply": (_every_reply_get, _every_reply_set, (False, True)),
     # the radio's picture: the moving flight board instead of the summary card (radio_show.py); read each second
     "radio_board": (_board_get, _board_set, (False, True)),
+    "radio_music": (lambda: setting_on("radio_music"), lambda on: set_setting("radio_music", on), (False, True)),
     # the brainstorming room on the radio (radio_room.py); off by default, and off ends a live room
     "radio_room": (_room_get, _room_set, (False, True)),
     # the Cockpit's home becomes the Morning Brief (brief.py); off (the default): the classic home, untouched
@@ -151,8 +170,8 @@ def allowed(name, value) -> bool:
     return type(value) in (int, str) and value in choices
 
 
-def write(name: str, value) -> None:
+def write(name: str, value):
     """Change one setting; ValueError for an unknown name or a value it does not allow."""
     if not allowed(name, value):
         raise ValueError("unknown setting or value")
-    SETTINGS[name][1](value)
+    return SETTINGS[name][1](value)

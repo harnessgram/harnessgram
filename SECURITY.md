@@ -1,6 +1,6 @@
 # Security policy
 
-Harnessgram lets a Telegram account type into Claude Code sessions that can edit files and run commands on
+HarnessGram lets a Telegram account type into Claude Code sessions that can edit files and run commands on
 your computer. Treat it with the care you would give a remote shell.
 
 ## Reporting a vulnerability
@@ -12,7 +12,7 @@ include a real bot token, session string or other credential; a redacted example
 
 ## Response policy
 
-Harnessgram is a small open-source project, so these are intentions, not a contract.
+HarnessGram is a small open-source project, so these are intentions, not a contract.
 
 - We aim to acknowledge a report within about a week, and to say whether we can reproduce it soon after.
 - Fixes are released as soon as they are ready and reviewed; a serious problem that can be exploited remotely is

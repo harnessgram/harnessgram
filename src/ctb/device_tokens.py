@@ -1,4 +1,4 @@
-"""Widget device tokens: the Harnessgram iPhone app's home and lock-screen widgets read the Cockpit without Telegram.
+"""Widget device tokens: the HarnessGram iPhone app's home and lock-screen widgets read the Cockpit without Telegram.
 
 A widget cannot open the Mini App, so it has no Telegram `initData`. The app pairs once while the owner is signed in
 (`POST /api/device-pair`, behind the fresh owner login) and gets a random device token, valid TTL seconds. The token
@@ -126,12 +126,17 @@ def revoke(ident: object) -> bool:
     """Revoke one device; False when there is no such device."""
     if not isinstance(ident, str) or not DEVICE_ID.fullmatch(ident):
         return False
-    if not any(isinstance(r, dict) and r.get("id") == ident for r in read_map(_store()).get("devices", [])):
-        return False
     with locked_map(_store()) as data:
         before = len(data.get("devices", []))
         data["devices"] = [r for r in data.get("devices", []) if not (isinstance(r, dict) and r.get("id") == ident)]
-        return len(data["devices"]) < before
+        removed = len(data["devices"]) < before
+        if removed:
+            from . import apns
+            try:
+                apns.drop_device(ident)
+            except OSError:
+                pass
+    return removed
 
 
 def revoke_all() -> int:
@@ -139,6 +144,13 @@ def revoke_all() -> int:
     if not read_map(_store()).get("devices"):
         return 0
     with locked_map(_store()) as data:
+        identifiers = [r.get("id") for r in data.get("devices", []) if isinstance(r, dict)]
         count = sum(1 for r in data.get("devices", []) if _live(r, time.time()))
         data["devices"] = []
+        from . import apns
+        for ident in identifiers:
+            try:
+                apns.drop_device(ident)
+            except OSError:
+                pass
     return count

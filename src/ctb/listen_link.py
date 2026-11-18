@@ -99,11 +99,11 @@ def parse(path: str):
 # --- the page -------------------------------------------------------------------------------------------------
 
 TEXT = {
-    "he": {"station": "רדיו הצוות", "play": "האזנה", "pause": "השהיה", "idle": "מוכן להאזנה",
-           "live": "בשידור חי", "wait": "הרדיו כבוי, ממתין לשידור…", "again": "מתחבר מחדש…",
+    "he": {"station": "שידורי הקוקפיט", "play": "האזנה", "pause": "השהיה", "idle": "מוכן להאזנה",
+           "loading": "ממתין לשמע…", "error": "ההאזנה נעצרה. אפשר לנסות שוב", "live": "בשידור חי", "wait": "הרדיו כבוי, ממתין לשידור…", "again": "מתחבר מחדש…",
            "revoked": "הקישור בוטל. אפשר לבקש קישור חדש מהקוקפיט"},
     "en": {"station": "Team radio", "play": "Listen", "pause": "Pause", "idle": "Ready to listen",
-           "live": "Live", "wait": "The radio is off, waiting for it…", "again": "Reconnecting…",
+           "loading": "Waiting for audio…", "error": "Playback stopped. Try again", "live": "Live", "wait": "The radio is off, waiting for it…", "again": "Reconnecting…",
            "revoked": "This link was revoked. Ask the Cockpit for a new one"},
 }
 ARTWORK = ("data:image/svg+xml," + "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E"
@@ -135,34 +135,42 @@ color:#fff;padding:0 28px}}
 <script nonce="{nonce}">
 (function(){{
 var T={text},a=document.getElementById("au"),b=document.getElementById("btn"),s=document.getElementById("st");
-var base=location.pathname.replace(/\\/+$/,""),url=base+"/live.m3u8",want=false,dead=false,tries=0,timer=0,stall=0;
-var ms=("mediaSession" in navigator)?navigator.mediaSession:null;
-function say(t){{s.textContent=t;}}
-function paint(){{b.textContent=want?T.pause:T.play;b.setAttribute("aria-pressed",String(want));
- if(ms)ms.playbackState=want?"playing":"paused";}}
-function load(){{a.src=url+"?r="+Date.now();}}
-function play(){{if(dead)return;want=true;paint();if(!a.src)load();
- var p=a.play();if(p&&p.catch)p.catch(function(){{recover();}});}}
-function pause(){{want=false;clearTimeout(timer);clearTimeout(stall);a.pause();say(T.idle);paint();}}
-// Find out why the stream stopped: 403 means the link was revoked (stop for good), anything else is retried with a
-// growing pause, because the radio may simply be restarting.
+var base=location.pathname.replace(/\\/+$/,""),url=base+"/live.m3u8",want=false,dead=false,tries=0,timer=0,stall=0,epoch=0,serial=0,state="paused";
+var ms=("mediaSession" in navigator)?navigator.mediaSession:null,position=a.currentTime;
+function active(){{return !a.paused&&!a.ended&&!a.error;}}
+function paint(){{var running=active(),playing=running&&state==="playing";
+ b.textContent=running?T.pause:T.play;b.setAttribute("aria-pressed",String(playing));
+ s.textContent=dead?T.revoked:playing?T.live:state==="error"?T.error:running?T.loading:T.idle;
+ if(ms)ms.playbackState=playing?"playing":running?"none":"paused";}}
+function cancel(){{epoch++;clearTimeout(timer);clearTimeout(stall);}}
+function load(){{a.src=url+"?r="+Date.now()+"-"+(++serial);a.load();position=a.currentTime;}}
+function start(ticket){{if(ticket!==epoch||!want||dead)return;state="waiting";load();
+ var p=a.play();if(p&&p.catch)p.catch(function(){{if(ticket!==epoch||!want)return;state="error";paint();recover();}});paint();}}
+function play(){{if(dead)return;cancel();want=true;tries=0;start(epoch);}}
+function pause(){{want=false;cancel();a.pause();state="paused";paint();}}
+// Only failures/waiting while listening may retry. A Pause invalidates timers AND in-flight fetches/play promises.
 function recover(){{
- if(!want||dead)return;clearTimeout(timer);say(T.again);
+ if(!want||dead)return;clearTimeout(timer);var ticket=epoch;
  timer=setTimeout(function(){{
+  if(ticket!==epoch||!want||dead)return;
   fetch(url+"?r="+Date.now(),{{cache:"no-store"}}).then(function(r){{
-   if(r.status===403){{dead=true;want=false;a.pause();say(T.revoked);paint();return;}}
-   if(r.status!==200){{say(T.wait);tries++;recover();return;}}
-   tries=0;load();var p=a.play();if(p&&p.catch)p.catch(function(){{tries++;recover();}});
-  }}).catch(function(){{tries++;recover();}});
+   if(ticket!==epoch||!want||dead)return;
+   if(r.status===403){{dead=true;pause();return;}}
+   if(r.status!==200){{tries++;recover();return;}}
+   start(ticket);
+  }}).catch(function(){{if(ticket===epoch&&want){{tries++;recover();}}}});
  }},Math.min(15000,1000*Math.pow(2,Math.min(tries,4))));}}
-b.addEventListener("click",function(){{if(want)pause();else play();}});
-["error","ended","emptied","abort"].forEach(function(e){{a.addEventListener(e,recover);}});
-a.addEventListener("playing",function(){{tries=0;clearTimeout(timer);clearTimeout(stall);say(T.live);paint();}});
-a.addEventListener("waiting",function(){{clearTimeout(stall);stall=setTimeout(recover,10000);}});
-a.addEventListener("stalled",function(){{clearTimeout(stall);stall=setTimeout(recover,10000);}});
-a.addEventListener("pause",function(){{if(want&&!dead)recover();}});
-document.addEventListener("visibilitychange",function(){{if(want&&a.paused)recover();}});
-if(ms){{try{{ms.metadata=new MediaMetadata({{title:T.station,artist:"Harnessgram",
+b.addEventListener("click",function(){{if(active())pause();else play();}});
+a.addEventListener("play",function(){{state="waiting";paint();}});
+a.addEventListener("error",function(){{state="error";paint();recover();}});
+a.addEventListener("ended",function(){{want=false;cancel();state="paused";paint();}});
+function progressing(){{cancel();tries=0;state="playing";paint();}}
+a.addEventListener("playing",function(){{position=a.currentTime;if(active())progressing();}});
+a.addEventListener("timeupdate",function(){{var next=a.currentTime;if(next>position&&active())progressing();position=next;}});
+a.addEventListener("waiting",function(){{state="waiting";paint();position=a.currentTime;
+ clearTimeout(stall);if(want)stall=setTimeout(recover,10000);}});
+a.addEventListener("pause",function(){{if(a.paused){{want=false;cancel();state=a.error?"error":"paused";paint();}}}});
+if(ms){{try{{ms.metadata=new MediaMetadata({{title:T.station,artist:"HarnessGram",
  artwork:[{{src:{art_js},sizes:"512x512",type:"image/svg+xml"}}]}});
  ms.setActionHandler("play",play);ms.setActionHandler("pause",pause);ms.setActionHandler("stop",pause);}}catch(e){{}}}}
 paint();

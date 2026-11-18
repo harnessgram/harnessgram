@@ -155,7 +155,7 @@ const SCENE = (location.hash || '#ident').slice(1);
 const AMB = AMBER;
 if (SCENE === 'ident') {
   // the station ident: letters shuffle and land on the station name, a line draws under the board's name
-  word('רדיו הצוות', 640 + (10 * 73) / 2, 230, 70, 104, 66, AMB, 0.15, { step: 0.06, n: 6, noBlank: true });
+  word('שידורי הקוקפיט', 640 + (14 * 61) / 2, 230, 58, 104, 54, AMB, 0.15, { step: 0.06, n: 6, noBlank: true });
   text('לוח המראות', 240, 372, 800, 34, WHITE, 800, 1.1, { align: 'center' });
   box({ left: '640px', top: '426px', height: '3px', width: '0px', background: AMB, boxShadow: `0 0 14px ${AMB}` }, (e, t) => {
     const w = 500 * ease((t - 1.2) / 0.7); e.style.width = w + 'px'; e.style.left = (640 - w / 2) + 'px'; });

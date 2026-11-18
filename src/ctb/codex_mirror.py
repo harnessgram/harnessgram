@@ -30,8 +30,11 @@ def poll(cfg, bot) -> int:
     topics = TopicMap(state_dir() / "topics.json", bot, home_chat(cfg), cfg=cfg)
     adapters = registry(cfg=cfg)
     handled = 0
+    from .codex_bridge import managed
     for native_id in dict.fromkeys(cfg.codex_attached_sessions):
         try:
+            if cfg.codex_harness_enabled is True and managed(native_id):
+                continue  # the listener owns this thread's delivery
             ref = SessionRef("codex", "default", native_id)
             adapter, ref = adapters.resolve(ref)
             # Validate the full native ID before using it in a local filename.

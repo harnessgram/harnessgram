@@ -206,34 +206,62 @@ def at_prompt(pane: str) -> bool:
         return False
 
 
-def type_into(pane: str, text: str) -> None:
-    """Type the text and press Enter; raises when tmux refuses or the line was not sent, so no nudge is
-    recorded. A tip notice is closed first, and text that Enter did not send is taken out of the input box
-    again (only the typed text: four "📩 Telegram" once sat unsent in one box)."""
-    from .inbox import _tmux, dismiss_tip, input_box, submitted, take_back, typed_mark
+class NotTyped(OSError):
+    """The guarded preflight refused the pane before sending any keystrokes."""
+
+
+def type_into(pane: str, text: str, session: str) -> None:
+    """Submit text only while an empty, ready box still belongs to ``session``.
+
+    The process and exact input contents are checked again after the literal text is
+    inserted and immediately before Enter.  On a failed check, only an exact copy of
+    our text is eligible for removal.
+    """
+    from .inbox import _tmux, dismiss_tip, input_box, pane_runs_session, submitted, take_back, typed_mark
+    from .terminal_lock import locked
     clean = " ".join(text.split())
-    dismiss_tip(pane)
-    before, _ = input_box(pane)
-    if before:  # unsent text is never typed after (the owner's draft would be sent along with the line)
-        raise OSError("input box holds unsent text")
-    typed_mark(clean)
-    from .dialogs import tmux_text
-    first = _tmux("send-keys", "-t", pane, "-l", "--", tmux_text(clean))
-    if first.returncode:
-        raise OSError("tmux send-keys failed")
-    second = _tmux("send-keys", "-t", pane, "Enter")
-    if second.returncode:
-        try:
-            take_back(pane, clean)  # do not leave half a nudge in the input box
-        except Exception:
-            pass
-        raise OSError("tmux send-keys failed")
-    if not submitted(pane, clean, before):
-        try:
-            take_back(pane, clean)
-        except Exception:
-            pass
-        raise OSError("typed text was not sent")
+    terminal_guard = locked()
+    try:
+        terminal_guard.__enter__()
+    except OSError as exc:
+        raise NotTyped("terminal busy") from exc
+    try:
+        if not dismiss_tip(pane):
+            raise NotTyped("pane has an open dialog")
+        if not pane_runs_session(pane, session):
+            raise NotTyped("pane does not run session")
+        before, ready = input_box(pane)
+        if before != "" or not ready:
+            raise NotTyped("pane is not an empty ready session input")
+        typed_mark(clean)
+        from .dialogs import tmux_text
+        first = _tmux("send-keys", "-t", pane, "-l", "--", tmux_text(clean))
+        if first.returncode:
+            raise OSError("tmux send-keys failed")
+        owns_pane = pane_runs_session(pane, session)
+        after, ready = input_box(pane)  # final, exact read immediately before Enter
+        if after != clean or not ready or not owns_pane:
+            try:
+                if after == clean:
+                    take_back(pane, clean)
+            except Exception:
+                pass
+            raise OSError("pane changed before submit")
+        second = _tmux("send-keys", "-t", pane, "Enter")
+        if second.returncode:
+            try:
+                take_back(pane, clean)
+            except Exception:
+                pass
+            raise OSError("tmux send-keys failed")
+        if not submitted(pane, clean, before):
+            try:
+                take_back(pane, clean)
+            except Exception:
+                pass
+            raise OSError("typed text was not sent")
+    finally:
+        terminal_guard.__exit__(None, None, None)
 
 
 def _transcript_globs() -> list:
@@ -376,7 +404,7 @@ def _run_locked(cfg: Config, bot, dry_run: bool, now: Optional[float], idle_min:
                 if dry_run:
                     print(sid[:8], why)
                     continue
-                type_into(pane, prompt)
+                type_into(pane, prompt, sid)
         except Exception:
             continue  # nothing typed (or tmux failed): no nudge recorded, no note sent
 

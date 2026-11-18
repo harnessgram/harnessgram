@@ -60,7 +60,8 @@ def slow_gemini(monkeypatch):
 
 
 def test_a_new_step_is_on_the_card_before_any_translation_starts(slow_gemini):
-    bot, c = TimedBot(), he_cfg()
+    # This test exercises the full-detail translation path; compact cards intentionally hide commands.
+    bot, c = TimedBot(), he_cfg(compact_actions=False)
     TopicMap(state_dir() / "topics.json", bot, OWNER).ensure("s", "T")
     write_rows("s", [{"kind": "action", "t": 1.0, "l": "🧪 Run the focused tests", "tool": "Bash", "d": "pytest -q"}])
     bot.at.clear()
@@ -175,11 +176,13 @@ def test_the_second_model_runs_only_after_the_first_failed(monkeypatch):
         return ok("שלום מהשני")
     monkeypatch.setattr(T.urllib.request, "urlopen", urlopen)
     c = gem_cfg(gemini_fallback_model="gemini-3.5-flash-lite", gemini_thinking="low")
-    assert T.gemini("hello", c) == "שלום מהשני"
+    with T.owner_facing():  # owner-facing text starts on gemini_model (routine text: tests/test_gemini_cost.py)
+        assert T.gemini("hello", c) == "שלום מהשני"
     assert models == ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
     models.clear()
     monkeypatch.setattr(T.urllib.request, "urlopen", lambda req, timeout=None: models.append(1) or ok("שלום"))
-    assert T.gemini("hello", c) == "שלום" and models == [1]
+    with T.owner_facing():
+        assert T.gemini("hello", c) == "שלום" and models == [1]
 
 
 def test_translations_get_a_longer_budget_than_a_raw_ask(monkeypatch):

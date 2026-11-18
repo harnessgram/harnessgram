@@ -111,7 +111,7 @@ def test_quota_out_waiting_for_a_choice_rings_the_channel(bot):
     (accounts.profiles_dir() / "other").mkdir(parents=True)
     accounts.toggle_auto()  # automatic fallback off: the session waits for a choice
     text = "You've hit your 5-hour limit · resets 12:50pm (Asia/Jerusalem)"
-    assert mirror.limit_offer(cfg(), bot, "s", text, spawn_fn=lambda a: None)
+    assert mirror.limit_offer(cfg(), bot, "s", text, spawn_fn=lambda a: None, api_error=True)
     ring = [p["text"] for p in bot.methods("sendMessage") if p["chat_id"] == CHANNEL]
     assert ring == ["💬 Title\n⛽ Out of quota. The session is waiting for you to choose an account."]
 

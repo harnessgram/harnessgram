@@ -1,6 +1,6 @@
 # Codex and Antigravity harness adapters
 
-Research snapshot: 2026-11-12; Harnessgram (`ctb`), local revision `cc7fffb`.
+Research snapshot: 2026-11-12; HarnessGram (`ctb`), local revision `cc7fffb`.
 **Recommendation:** retain the Claude implementation behind an adapter; add Codex reply/progress observation plus native message queuing first, then an agy stream adapter. Use native control protocols for later approval support, rather than porting Claude's terminal parser.
 
 Scope: local source, installed help, selected non-secret configuration fields, and structural inspection of existing session records only. No model runs, authentication files, network research, installs, settings changes, or live message injection. HEAD equals the **cached** `origin/main`; remote freshness was not verified because this investigation is local-only. The usual worktree doctor was not run because its stale fetch cache would trigger a network fetch. Only this document is added.
@@ -11,7 +11,7 @@ The installed hook inventory is authoritative at `src/ctb/install.py:48-64`. Its
 
 Evidence labels below: **observed** = local help/configuration/record structure; **documented** = installed product documentation; **candidate** = compiled symbol or integration inference, not an exercised contract. “Not established” means this investigation found no sufficient contract, not proof the product lacks the feature. Local evidence references C1–C4 and A1–A4 are defined in section 2.
 
-| Claude hook | Harnessgram dependency and source | Codex equivalent | agy equivalent |
+| Claude hook | HarnessGram dependency and source | Codex equivalent | agy equivalent |
 | --- | --- | --- | --- |
 | `SessionStart` | Proves process ancestry, binds `TMUX_PANE`, refreshes on startup/resume/clear/compact (`src/ctb/wake.py:210-261`). | Candidate hook name in binary; use observed rollout `session_meta` or owned launcher for discovery. Hook payload unverified [C3,C4]. | Documented `SessionStart`, with `conversationId`, `transcriptPath`, `workspacePaths`, `modelName`; startup `injectSteps` [A2:152-179,269-293]. No Claude pane proof. |
 | `UserPromptSubmit` | Drains the inbox into `hookSpecificOutput.additionalContext`, adds reminders, distinguishes wake prompts (`src/ctb/hooks.py:881-918`). | Configured locally; installed consumer expects `session_id`, `turn_id`. Injection output still needs a compatibility test [C2]. | No event by this name documented. `PreInvocation` can inject a **user** message or terminate before a model call; it can run several times per user turn [A2:297-348]. |

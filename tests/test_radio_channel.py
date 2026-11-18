@@ -42,7 +42,7 @@ def test_a_rundown_is_one_silent_html_message_with_sections_in_order():
     print("\n--- rundown (he)\n" + body)
     plain = body.replace("\u2068", "").replace("\u2069", "")
     heads = [l for l in body.split("\n") if l.startswith("<b>")]
-    assert heads == ["<b>📻 רדיו הצוות · ⁨14:30⁩</b>", "<b>🔔 חדש שמחכה לך</b>", "<b>✅ הושלם</b>", "<b>👥 הצוות</b>",
+    assert heads == ["<b>📻 שידורי הקוקפיט · ⁨14:30⁩</b>", "<b>🔔 חדש שמחכה לך</b>", "<b>✅ הושלם</b>", "<b>👥 הצוות</b>",
                      "<b>⚠️ מכסות</b>"]
     assert "• החלטה בקוקפיט, אורה: מיזוג: שאלה חדשה 0?" in plain and "• ועוד שניים חדשים." in plain
     assert "<b>✅ הושלם</b>\n• מסלול: הסרטון עלה ללוח הטיסות.\n• מסלול: ב.\n• ועוד אחד." in plain
@@ -81,7 +81,7 @@ def test_a_news_update_and_a_reply_bulletin():
     assert P.post(make_cfg(), P.bulletin_report(records), "he", {}, bot=bot, clock=CLOCK)
     bulletin = sent(bot)[1]
     print("\n--- bulletin (he)\n" + bulletin)
-    assert bulletin == ("<b>📻 רדיו הצוות · ⁨14:30⁩</b>\n\n<b>💬 עדכונים מהצוות</b>\n"
+    assert bulletin == ("<b>📻 שידורי הקוקפיט · ⁨14:30⁩</b>\n\n<b>💬 עדכונים מהצוות</b>\n"
                         "• מסלול: מסך הבית: סיימתי את המסך ומחכה לאישור שלך.\n• אורה: המיזוג עבר בהצלחה.")
     assert P.post(make_cfg(), P.bulletin_report(records[:1]), "en", {}, bot=bot, clock=CLOCK)
     assert "<b>💬 Team replies</b>" in sent(bot)[2]
@@ -197,3 +197,57 @@ def test_a_secret_that_crosses_the_cut_is_redacted_before_it_is_shortened():
 
 def test_nothing_to_say_posts_nothing():
     assert P.render({"kind": "rundown"}, "he", CLOCK) == "" and P.render({"kind": "bulletin", "lines": []}, "he") == ""
+
+
+def test_bulletin_deduplicates_only_delivered_recent_replies_in_same_channel(monkeypatch):
+    from ctb import radio_dedupe
+    register()
+    cfg, bot = make_cfg(), FakeBot()
+    monkeypatch.setattr(radio_dedupe.time, 'time', lambda: 1000)
+    choose(replies='full')
+    assert A.send_reply(cfg, '📁 מסלול: ✨ המסך   מוכן', bot=bot)
+    rep = P.bulletin_report([{'name': 'מסלול', 'say': 'המסך מוכן'}, {'name': 'אורה', 'say': 'עוד חדש'}])
+    assert P.post(cfg, rep, 'he', {}, bot=bot, clock=CLOCK)
+    assert 'המסך מוכן' not in sent(bot)[-1] and 'עוד חדש' in sent(bot)[-1]
+    assert not P.post(cfg, P.bulletin_report([{'name': 'מסלול', 'say': 'המסך מוכן'}]), 'he', {}, bot=bot)
+    assert not radio_dedupe.duplicate(CHANNEL + 1, 'המסך מוכן', now=1000)
+    assert not radio_dedupe.duplicate(CHANNEL, 'המסך מוכן', now=1901)
+
+
+def test_brief_bulletin_deduplicates_by_delivered_reply_identity(monkeypatch):
+    from ctb import radio_dedupe, radio_talk
+    register()
+    cfg, bot = make_cfg(), FakeBot()
+    cfg.radio = {"project_names": {}}
+    choose(replies='full')
+    reply = "I rebuilt the home screen and ran the tests. The home screen is ready."
+    reply_id = radio_dedupe.reply_id(reply)
+    assert A.send_reply(cfg, reply, bot=bot, reply_id=reply_id)
+    record = radio_talk.on_reply(cfg, "session", "project", reply, radio_on=lambda: True,
+                                 translate=lambda text: text, ask=lambda prompt: "<<<בניתי מחדש את מסך הבית והבדיקות עברו.>>>")
+    assert record and record['reply_id'] == reply_id
+    assert record['say'] != reply
+    rep = P.bulletin_report([record])
+    assert not P.post(cfg, rep, 'en', {}, bot=bot, clock=CLOCK)
+    monkeypatch.setattr(A, 'channel', lambda: {'id': CHANNEL + 1})
+    assert P.post(cfg, rep, 'en', {}, bot=bot, clock=CLOCK, send=lambda *a, **k: True)
+
+
+def test_delivered_reply_identity_follows_mirror_into_channel(monkeypatch):
+    from types import SimpleNamespace
+    from ctb import mirror, radio_dedupe
+    register()
+    choose(replies='full')
+    cfg, bot = make_cfg(), FakeBot()
+    topics = SimpleNamespace(place_of=lambda session: None)
+    sender = mirror.Mirror(cfg, bot, topics)
+    monkeypatch.setattr(mirror.pins, 'update_index', lambda *args, **kwargs: None)
+    monkeypatch.setattr(sender, '_chat', lambda session: cfg.chat_id)
+    monkeypatch.setattr(mirror, 'voice_summary', lambda *args, **kwargs: None)
+    def deliver(*args, **kwargs):
+        sender.first_reply_id = 10
+        return 1
+    monkeypatch.setattr(sender, '_send_layout', deliver)
+    original = 'The screen is ready. The tests passed.'
+    assert sender.send_reply('project', 'session', original) == 1
+    assert radio_dedupe.duplicate(CHANNEL, 'a different short line', reply_id=radio_dedupe.reply_id(original))

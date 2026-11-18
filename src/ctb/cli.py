@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
@@ -20,7 +21,7 @@ def _knowledge(args) -> int:
     try:
         cfg = C.load()
     except C.ConfigError:
-        print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+        print("HarnessGram: the configuration could not be read.", file=sys.stderr)
         return 1
     action = args.knowledge_cmd
     try:
@@ -58,7 +59,7 @@ def _knowledge(args) -> int:
                         raise ValueError("too large")
                     data = json.loads(text)
                 except (OSError, ValueError):
-                    print("Harnessgram: the notes file could not be read as JSON.", file=sys.stderr)
+                    print("HarnessGram: the notes file could not be read as JSON.", file=sys.stderr)
                     return 2
                 counts = K.import_notes(cfg, data)
                 print(" ".join("%s=%d" % kv for kv in counts.items()))
@@ -79,17 +80,65 @@ def _knowledge(args) -> int:
                 for i in items:
                     print(i["id"], "|", i.get("title", ""))
     except K.KnowledgeError as exc:
-        print("Harnessgram: %s." % exc, file=sys.stderr)
+        print("HarnessGram: %s." % exc, file=sys.stderr)
         return 2
     return 0
 
 
+def _packs(args) -> int:
+    from . import packs
+    try:
+        cfg = C.load()
+        if args.packs_cmd == "list":
+            for row in packs.view(cfg)["packs"]:
+                print(row["id"], "|", row["name"], "|", row["status"])
+        elif args.packs_cmd == "show":
+            print(json.dumps(packs.show(cfg, args.id), ensure_ascii=False, indent=2))
+        elif args.packs_cmd == "suggest":
+            print(json.dumps(packs.suggestions(cfg), ensure_ascii=False, indent=2))
+        elif args.packs_cmd == "move":
+            print(json.dumps(packs.move(cfg, args.item, args.pack), ensure_ascii=False))
+        elif args.packs_cmd == "new":
+            print(json.dumps(packs.new_pack(args.id, args.name), ensure_ascii=False))
+        elif args.packs_cmd == "set":
+            on = args.state == "on"
+            result = packs.preview(cfg, args.id, on) if args.preview else packs.set_pack(cfg, args.id, on)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.packs_cmd == "undo":
+            print(json.dumps(packs.undo(cfg), ensure_ascii=False, indent=2))
+        elif args.packs_cmd == "export":
+            print(packs.export_pack(cfg, args.id, args.dir)["path"])
+        return 0
+    except C.ConfigError:
+        print("HarnessGram: the configuration could not be read.", file=sys.stderr)
+        return 1
+    except packs.PackError as exc:
+        print("HarnessGram: %s: %s" % (exc.code, getattr(args, "id", "")), file=sys.stderr)
+        return 2
+
+
 def _parser() -> "argparse.ArgumentParser":
     import argparse
-    p = argparse.ArgumentParser(prog="harnessgram", description="Harnessgram: Telegram remote control for Claude Code.",
+    p = argparse.ArgumentParser(prog="harnessgram", description="HarnessGram: Telegram remote control for Claude Code.",
                                 epilog="First run: harnessgram setup   (then: harnessgram doctor)")
-    p.add_argument("--version", action="version", version=f"Harnessgram {__version__}")
+    p.add_argument("--version", action="version", version=f"HarnessGram {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
+    codex = sub.add_parser("codex", help="manage first-class Codex app-server sessions")
+    codex_sub = codex.add_subparsers(dest="codex_cmd", required=True)
+    codex_start = codex_sub.add_parser("start", help="start the private app-server and open a Codex thread")
+    codex_start.add_argument("--cwd")
+    codex_start.add_argument("--model")
+    codex_start.add_argument("--effort")
+    command_topic = sub.add_parser("command-topic", help="bind a forum topic to a local command")
+    command_sub = command_topic.add_subparsers(dest="command_topic_cmd", required=True)
+    command_add = command_sub.add_parser("add")
+    command_add.add_argument("name")
+    command_add.add_argument("--cwd", required=True)
+    command_add.add_argument("--timeout-s", type=float, default=60)
+    command_sub.add_parser("list")
+    command_remove = command_sub.add_parser("remove")
+    command_remove.add_argument("name")
+    sub.add_parser("credit-key", help="renew credentials for an approved credit session below its daily cap")
     sessions = sub.add_parser("sessions", help="manage live bridge sessions")
     session_sub = sessions.add_subparsers(dest="sessions_cmd", required=True)
     reload = session_sub.add_parser("reload", help="reload hooks in stale, idle sessions; busy sessions are skipped")
@@ -109,6 +158,7 @@ def _parser() -> "argparse.ArgumentParser":
                                      "(stdin: hook JSON)")
     sub.add_parser("hook-ask", help="Claude Code PreToolUse hook for AskUserQuestion: record the question "
                                     "(stdin: hook JSON; never blocks)")
+    sub.add_parser("hook-bash", help="Claude Code PreToolUse hook: advise on long foreground Bash calls")
     sub.add_parser("hook-notify", help="Claude Code Notification hook: ring the phone when the session needs you "
                                        "(stdin: hook JSON)")
     sub.add_parser("hook-permission", help="Claude Code PermissionRequest hook: the owner answers the permission "
@@ -139,6 +189,24 @@ def _parser() -> "argparse.ArgumentParser":
     sl.add_argument("session")
     sl.add_argument("--all", action="store_true", help="the whole session, not only what is new since the last log")
     sub.add_parser("serve", help="run the Telegram listener (long-poll) in the foreground")
+    mcp = sub.add_parser("mcp", help="local MCP connector")
+    mcps = mcp.add_subparsers(dest="mcp_cmd", required=True)
+    mcp_serve = mcps.add_parser("serve", help="serve MCP over stdio or authenticated loopback HTTP")
+    transport = mcp_serve.add_mutually_exclusive_group()
+    transport.add_argument("--stdio", action="store_true", help="use standard input/output (default)")
+    transport.add_argument("--http", action="store_true", help="use authenticated loopback HTTP")
+    mcp_serve.add_argument("--port", type=int, default=8765)
+    mcp_token = mcps.add_parser("token", help="manage the HTTP bearer token")
+    mcp_token.add_argument("--rotate", action="store_true", required=True, help="replace the Keychain token")
+    mcps.add_parser("header", help="print the Keychain-backed HTTP authorization header for headersHelper")
+    demo = sub.add_parser("demo", help="isolated App Store review bridge")
+    demo_sub = demo.add_subparsers(dest="demo_cmd", required=True, metavar="action")
+    demo_serve = demo_sub.add_parser("serve", help="serve fixed demo data without bridge configuration")
+    demo_serve.add_argument("--host", default="127.0.0.1")
+    demo_serve.add_argument("--port", type=int, default=8080)
+    runner = sub.add_parser("runner", help="run one API-key Claude session without a terminal")
+    runner.add_argument("session")
+    runner.add_argument("--dry-run", action="store_true", help="check switches and API-key authentication only")
     share = sub.add_parser("share-serve", help="serve shared files on loopback")
     share.add_argument("--port", type=int, required=True)
     panel = sub.add_parser("panel", help="the control panel (Telegram Mini App)")
@@ -152,13 +220,36 @@ def _parser() -> "argparse.ArgumentParser":
     rds = rd.add_subparsers(dest="radio_cmd", required=True, metavar="action")
     rds.add_parser("start", help="open the group's live stream and start the radio").add_argument(
         "--play", action="store_true", help=argparse.SUPPRESS)  # started by pressing Play (radio_play.py)
-    rds.add_parser("stop", help="stop the radio and end the live stream").add_argument(
-        "--play", action="store_true", help=argparse.SUPPRESS)  # the idle stop of a Play-started station
+    rstop = rds.add_parser("stop", help="stop the radio and end the live stream")
+    rstop.add_argument("--play", action="store_true", help=argparse.SUPPRESS)
+    rstop.add_argument("--idle-since", type=float, default=0, help=argparse.SUPPRESS)
+    rstop.add_argument("--idle-run", type=int, default=0, help=argparse.SUPPRESS)
     rst = rds.add_parser("status", help="print the radio's state as JSON")
     rst.add_argument("--live", action="store_true", help="also ask Telegram about the live stream")
     rds.add_parser("say", help="speak one line on the radio now").add_argument("text")
     rds.add_parser("run", help=argparse.SUPPRESS)  # the launchd job
     rds.add_parser("diag-report", help="summarize a radio diagnostic capture").add_argument("json_file")
+    music = rds.add_parser("music", help="manage the private music library")
+    music_sub = music.add_subparsers(dest="music_cmd", required=True)
+    music_add = music_sub.add_parser("add")
+    music_add.add_argument("file")
+    music_add.add_argument("--title", default="")
+    music_add.add_argument("--artist", default="")
+    music_sub.add_parser("list")
+    music_sub.add_parser("on")
+    music_sub.add_parser("off")
+    for action in ("like", "skip"):
+        music_sub.add_parser(action).add_argument("id")
+    podcast = rds.add_parser("podcast", help="choose private gap-filler RSS feeds")
+    podcast_sub = podcast.add_subparsers(dest="podcast_cmd", required=True)
+    podcast_sub.add_parser("list")
+    for action in ("add", "remove"):
+        podcast_sub.add_parser(action).add_argument("url")
+    queue_file = rds.add_parser("queue-file", help="put an audio or video file you made in the owner's radio queue")
+    queue_file.add_argument("path", help="a file under the home folder (audio or video, at most 500 MB)")
+    queue_file.add_argument("--title", required=True, help="what the radio announces")
+    queue_file.add_argument("--session", default=None, help="session id (default: the calling session)")
+    queue_file.add_argument("--text-file", default=None, help="transcript or captions; without them the owner is asked")
     rpm = rds.add_parser("prepare-motion", help="render the flight board's ident and 'landed' sting once (needs "
                                                 "node, puppeteer-core and Chrome)")
     rpm.add_argument("--modules", default="", help="a folder that holds node_modules/puppeteer-core")
@@ -190,10 +281,15 @@ def _parser() -> "argparse.ArgumentParser":
     m.add_argument("--delete-text-file", action="store_true", help="remove --text-file after reading it")
     m.add_argument("--file", help="send this file (photo, playable audio/video, or document) instead of text")
     m.add_argument("--caption", default="", help="file caption")
+    m.add_argument("--radio-auto", action="store_true", help="also queue suitable audio/video while car mode is on or the owner listens")
+    m.add_argument("--radio-text-file", default=None, help="transcript or captions of --file, for the radio")
     m.add_argument("--audio-title", help="audio player title (default: cleaned file name)")
     m.add_argument("--performer", help="audio player performer")
     m.add_argument("--reply-chat", type=int, help="chat of the message this turn answers")
     m.add_argument("--reply-to", type=int, help="message this turn answers in --reply-chat")
+    m.add_argument("--reply-text-file", help=argparse.SUPPRESS)
+    m.add_argument("--reply-source", choices=("owner", "team"), help=argparse.SUPPRESS)
+    m.add_argument("--delete-reply-text-file", action="store_true", help=argparse.SUPPRESS)
     m.add_argument("--translate", dest="translate", action="store_true", default=None,
                    help="translate to target_language (default: follow the config)")
     m.add_argument("--no-translate", dest="translate", action="store_false")
@@ -237,10 +333,29 @@ def _parser() -> "argparse.ArgumentParser":
     cp.add_argument("--note", default="", help="one line: what the summary must keep")
     cp.add_argument("--cancel", action="store_true", help="take the request back")
     cp.add_argument("--session", default="", help="session id (defaults to CLAUDE_CODE_SESSION_ID)")
-    ad = sub.add_parser("addons", help="what Harnessgram adds to your agents: list the add-ons, switch one, or print "
+    ad = sub.add_parser("addons", help="what HarnessGram adds to your agents: list the add-ons, switch one, or print "
                                        "docs/addons.md")
     ad.add_argument("action", nargs="?", default="list", choices=("list", "docs", "on", "off"))
     ad.add_argument("key", nargs="?", default="")
+    pk = sub.add_parser("packs", help="curated owner-local bundles and their computed transparency cards")
+    pks = pk.add_subparsers(dest="packs_cmd", required=True, metavar="action")
+    pks.add_parser("list", help="list installed packs")
+    ps = pks.add_parser("show", help="show a pack and its transparency card"); ps.add_argument("id")
+    art = sub.add_parser("art", help="the owner's own picture for a Cockpit project tile (set, clear, or list the projects "
+                                     "that have none)")
+    arts = art.add_subparsers(dest="art_cmd", required=True, metavar="action")
+    a_set = arts.add_parser("set", help="use an image file (webp, png or jpeg, at most 1 MB) as a project's picture")
+    a_set.add_argument("project")
+    a_set.add_argument("file")
+    arts.add_parser("clear", help="go back to the automatic picture").add_argument("project")
+    a_miss = arts.add_parser("missing", help="list the configured projects that have no custom picture")
+    a_miss.add_argument("--json", action="store_true", help="print a JSON list of {project, key}")
+    pm = pks.add_parser("move", help="move an item to an owner pack"); pm.add_argument("item"); pm.add_argument("pack")
+    pn = pks.add_parser("new", help="create an owner pack"); pn.add_argument("id"); pn.add_argument("name")
+    pks.add_parser("suggest", help="print the deterministic suggested grouping without saving it")
+    pt = pks.add_parser("set", help="switch all switchable members"); pt.add_argument("id"); pt.add_argument("state", choices=("on", "off")); pt.add_argument("--preview", action="store_true")
+    pks.add_parser("undo", help="restore the most recent pack switch")
+    pe = pks.add_parser("export", help="export a Claude Code plugin folder"); pe.add_argument("id"); pe.add_argument("dir")
     il = sub.add_parser("idle-lines", help="open team items of the owner ledger that did not move for hours "
                                           "(the bridge's idle-lines nudge asks the lead session to run this)")
     il.add_argument("--project", default="", help="only this ledger project")
@@ -316,7 +431,7 @@ def _parser() -> "argparse.ArgumentParser":
     pp.add_argument("name")
 
     i = sub.add_parser("install", help="install the listener and the scheduled jobs and merge the hooks into ~/.claude/settings.json")
-    i.add_argument("--wire-statusline", action="store_true", help="replace the Claude Code status line with the Harnessgram status line")
+    i.add_argument("--wire-statusline", action="store_true", help="replace the Claude Code status line with the HarnessGram status line")
     i.add_argument("--dry-run", action="store_true", help="show what would change; write nothing")
     i.add_argument("--no-service", action="store_true", help="hooks only; do not write the listener service")
     i.add_argument("--no-schedules", action="store_true", help="listener only; skip the dashboard, heartbeat and "
@@ -371,6 +486,10 @@ def _parser() -> "argparse.ArgumentParser":
 
     sub.add_parser("statusline", help="Claude Code statusLine command: saves quota and model/thinking level "
                                       "per session and account (stdin: status JSON)")
+    fp = sub.add_parser("filter-policy", help="publish or show the committee filter policy")
+    fps = fp.add_subparsers(dest="filter_policy_cmd", required=True)
+    fps.add_parser("publish", help="store a signed policy document").add_argument("file")
+    fps.add_parser("show", help="show the stored policy")
     ac = sub.add_parser("account", help=argparse.SUPPRESS)
     acs = ac.add_subparsers(dest="account_cmd", required=True)
     am_ = acs.add_parser("auto-move", help="move a session to another Claude account after a quota limit (used by the mirror)")
@@ -414,6 +533,7 @@ def _parser() -> "argparse.ArgumentParser":
     br = bds.add_parser("remind", parents=[where], help="add something waiting on the owner")
     br.add_argument("text")
     br.add_argument("--due", default="", help='short text such as "until 18:00"')
+    br.add_argument("--ledger", default="", help="ledger project#id or exact https item link")
     for name, text in (("done", "tick a check item or clear a reminder"), ("remove", "take an item off the board")):
         bds.add_parser(name, parents=[where], help=text).add_argument("n", type=int, help="the item number")
     bds.add_parser("list", parents=[where], help="print the board's items with their numbers")
@@ -431,6 +551,8 @@ def _parser() -> "argparse.ArgumentParser":
                          "deletion, publication, accounts, production or store steps")
     dcs.add_parser("list", help="print this session's open decisions")
     dcs.add_parser("cancel", help="withdraw one of this session's open decisions").add_argument("id")
+    dcs.add_parser("public-key", help="print the base64 Ed25519 public key that signs the owner's answers "
+                                      "(creates the key in the Keychain on first use; needs the 'sign' extra)")
     bk = sub.add_parser("bank", help="the reset bank: saved quota resets per provider, shown in the control "
                                      "panel and told to agents")
     bks = bk.add_subparsers(dest="bank_cmd", metavar="action")
@@ -515,10 +637,10 @@ def _cmd_mirror(args) -> int:
     try:
         cfg = C.load()
     except C.ConfigError as e:
-        print(f"Harnessgram: {e}", file=sys.stderr)
+        print(f"HarnessGram: {e}", file=sys.stderr)
         return 1
     if not cfg.ready:
-        print("Harnessgram: bot_token / owner_chat_id missing in the config", file=sys.stderr)
+        print("HarnessGram: bot_token / owner_chat_id missing in the config", file=sys.stderr)
         return 1
     session = args.session or args.title
     if args.file:
@@ -529,12 +651,25 @@ def _cmd_mirror(args) -> int:
             try:
                 session = decisions.caller_session()
             except decisions.DecisionError as e:
-                print(f"Harnessgram: {e.reason}; pass --session <id> to say which topic", file=sys.stderr)
+                print(f"HarnessGram: {e.reason}; pass --session <id> to say which topic", file=sys.stderr)
                 return 1
-        return mirror.run_file(cfg, args.title, session, args.file, args.caption, args.audio_title, args.performer)
+        return mirror.run_file(cfg, args.title, session, args.file, args.caption, args.audio_title, args.performer,
+                               radio_text_file=args.radio_text_file, radio_auto=args.radio_auto)
     translate = cfg.translate if args.translate is None else args.translate
+    answer_text = ""
+    if args.reply_text_file:
+        try:
+            try:
+                answer_text = Path(args.reply_text_file).read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                # The prompt is useful context, not a prerequisite for delivering the reply.
+                answer_text = ""
+        finally:
+            if args.delete_reply_text_file:
+                Path(args.reply_text_file).unlink(missing_ok=True)
     return mirror.run_reply(cfg, args.title, session, _read_text(args), translate, args.transcript,
-                            answer_to={"chat": args.reply_chat, "id": args.reply_to})
+                            answer_to={"chat": args.reply_chat, "id": args.reply_to, "text": answer_text,
+                                       "source": args.reply_source})
 
 
 def _cmd_helper(args) -> int:
@@ -587,7 +722,7 @@ def _cmd_dispatcher(args) -> int:
         else:
             print("cleared" if dispatcher.clear_dispatcher() else "(none was set)")
     except C.ConfigError as e:
-        print(f"Harnessgram: {e}", file=sys.stderr)
+        print(f"HarnessGram: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -619,7 +754,7 @@ def _cmd_team(args) -> int:
         elif args.team_cmd == "unshare":
             print(team.unshare(args.session))
     except C.ConfigError as e:
-        print(f"Harnessgram: {e}", file=sys.stderr)
+        print(f"HarnessGram: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -645,7 +780,7 @@ def _cmd_project(args) -> int:
                 raise C.ConfigError(e.description) from None
             print(projects.pair(cfg, bot, args.name, **rules) + " Restart the listener: harnessgram install.")
     except C.ConfigError as e:
-        print(f"Harnessgram: {e}", file=sys.stderr)
+        print(f"HarnessGram: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -674,10 +809,10 @@ def _cmd_pair_group() -> int:
         raw = json.loads(path.read_text(encoding="utf-8"))
         cfg = C.load(path)
     except (OSError, ValueError, C.ConfigError):
-        print("Harnessgram: pair the private chat first (harnessgram setup or harnessgram pair).", file=sys.stderr)
+        print("HarnessGram: pair the private chat first (harnessgram setup or harnessgram pair).", file=sys.stderr)
         return 1
     if not cfg.owner_chat_id:
-        print("Harnessgram: pair the private chat first (harnessgram pair).", file=sys.stderr)
+        print("HarnessGram: pair the private chat first (harnessgram pair).", file=sys.stderr)
         return 1
     try:
         bot = Bot.from_config(cfg, strict=True)
@@ -685,19 +820,19 @@ def _cmd_pair_group() -> int:
         print(f"In the group, with your own account, send (waiting up to 3 minutes):\n\n    /start@{me.get('username')}\n")
         found = pairing.wait_for_group_start(bot, me.get("username") or "", time.time(), cfg.owner_chat_id)
         if not found:
-            print("Harnessgram: no /start from you in a group; nothing saved.", file=sys.stderr)
+            print("HarnessGram: no /start from you in a group; nothing saved.", file=sys.stderr)
             return 1
         group = found["chat"]["id"]
         chat = bot.call("getChat", {"chat_id": group})
         mem = bot.call("getChatMember", {"chat_id": group, "user_id": me["id"]})
     except TelegramError as e:
-        print(f"Harnessgram: {e.description}", file=sys.stderr)
+        print(f"HarnessGram: {e.description}", file=sys.stderr)
         return 1
     if not chat.get("is_forum"):
-        print("Harnessgram: turn on Topics in the group's settings, then run this again.", file=sys.stderr)
+        print("HarnessGram: turn on Topics in the group's settings, then run this again.", file=sys.stderr)
         return 1
     if not (mem.get("status") == "creator" or (mem.get("status") == "administrator" and mem.get("can_manage_topics"))):
-        print("Harnessgram: make the bot an admin of the group with 'Manage topics', then run this again.",
+        print("HarnessGram: make the bot an admin of the group with 'Manage topics', then run this again.",
               file=sys.stderr)
         return 1
     if raw.get("chat_id") != group:
@@ -713,7 +848,7 @@ def _cmd_pair_private() -> int:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        print("Harnessgram: no config yet.", file=sys.stderr)
+        print("HarnessGram: no config yet.", file=sys.stderr)
         return 1
     before = dict(raw)
     if raw.pop("chat_id", None):
@@ -744,10 +879,10 @@ def _cmd_pair() -> int:
               f"(waiting up to 3 minutes):\n\n    /start {code}\n")
         found = pairing.wait_for_start(bot, code, started)
     except TelegramError as e:
-        print(f"Harnessgram: {e.description}", file=sys.stderr)
+        print(f"HarnessGram: {e.description}", file=sys.stderr)
         return 1
     if not found:
-        print("Harnessgram: no matching /start received; nothing saved.", file=sys.stderr)
+        print("HarnessGram: no matching /start received; nothing saved.", file=sys.stderr)
         return 1
     who = found.get("from") or {}
     name = " ".join(x for x in (who.get("first_name"), who.get("last_name")) if x) or "?"
@@ -789,12 +924,12 @@ def _cmd_schedule(args) -> int:
     try:
         cfg = C.load()
     except C.ConfigError as e:
-        print(f"Harnessgram: {e}", file=sys.stderr)
+        print(f"HarnessGram: {e}", file=sys.stderr)
         return 1
     try:
         lines = google_calendar.setup_info(cfg, args.keychain_service)
     except google_calendar.CalendarError:
-        print("Harnessgram: --keychain-service may hold letters, digits, spaces and . _ @ + : - only.", file=sys.stderr)
+        print("HarnessGram: --keychain-service may hold letters, digits, spaces and . _ @ + : - only.", file=sys.stderr)
         return 2
     print("\n".join(lines))
     return 0
@@ -811,10 +946,49 @@ def _cmd_tasks(args) -> int:
             print(f"{name}\t{'muted' if entry['muted'] else 'on'}\t{where}")
         return 0
     if not scheduled.valid_name(args.name):
-        print("Harnessgram: give the task's name (letters, digits, . _ -; at most 64).", file=sys.stderr)
+        print("HarnessGram: give the task's name (letters, digits, . _ -; at most 64).", file=sys.stderr)
         return 2
     scheduled.set_muted(args.name, args.action == "mute")
     print(f"{args.name}: {'muted' if args.action == 'mute' else 'on'}")
+    return 0
+
+
+def _art(args) -> int:
+    from . import cockpit_v2, project_art
+    if args.art_cmd == "missing":
+        try:
+            cfg = C.load()
+        except C.ConfigError:
+            print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+            return 1
+        rows = cockpit_v2.missing_art(cfg)
+        if args.json:
+            print(json.dumps([{"project": name, "key": key} for key, name in rows], ensure_ascii=False))
+        else:
+            for _key, name in rows:
+                print(name)
+        return 0
+    if not project_art.name_for(args.project):
+        print("Harnessgram: give the project's name.", file=sys.stderr)
+        return 2
+    if args.art_cmd == "clear":
+        print(f"{args.project}: {'automatic picture' if project_art.clear(args.project) else 'no custom picture'}")
+        return 0
+    try:
+        with open(args.file, "rb") as f:
+            data = f.read(project_art.MAX_BYTES + 1)
+    except OSError:
+        print("Harnessgram: the image file could not be read.", file=sys.stderr)
+        return 1
+    try:
+        project_art.store(args.project, data)
+    except project_art.ArtError as exc:
+        why = {"type": "not a webp, png or jpeg image", "size": "larger than 1 MB",
+               "needs_pillow": "png and jpeg need Pillow (pip install Pillow) or macOS sips; a webp works without them",
+               "decode": "the image could not be decoded"}.get(exc.code, "not a usable image")
+        print(f"Harnessgram: {why}.", file=sys.stderr)
+        return 2
+    print(f"{args.project}: custom picture saved")
     return 0
 
 
@@ -834,7 +1008,7 @@ def _addons(args) -> int:
     try:
         cfg = C.load()
     except C.ConfigError:
-        print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+        print("HarnessGram: the configuration could not be read.", file=sys.stderr)
         return 1
     if args.action == "list":
         print(addons.listing(cfg))
@@ -842,23 +1016,48 @@ def _addons(args) -> int:
     try:
         out = addons.set_on(cfg, args.key, args.action == "on")
     except addons.AddonError as exc:
-        print(f"Harnessgram: {exc.code}: {args.key or '(no key)'}", file=sys.stderr)
+        print(f"HarnessGram: {exc.code}: {args.key or '(no key)'}", file=sys.stderr)
         return 2
     print(f"{out['key']}: {'on' if out['on'] else 'off'}")
     return 0
 
 
 # Commands that work while mirroring is off: they set the bridge up or only read and change local files.
-LOCAL_ONLY = {"addons", "idle-lines", "recall", "knowledge", "doctor", "setup", "install", "uninstall", "pair", "project", "team", "bank", "dispatcher",
+LOCAL_ONLY = {"credit-key", "mcp", "runner", "filter-policy", "addons", "packs", "art", "idle-lines", "recall", "knowledge", "doctor", "setup", "install", "uninstall", "pair", "project", "team", "bank", "dispatcher", "demo",
               "wait-idle", "statusline", "compact", "tasks", "studio", "outbox", "schedule"}
 # Long-running services: they start either way and check the switch at every round or request themselves.
 SERVICES = {"serve", "heartbeat", "panel", "share-serve", "radio"}
 # Everything else talks to Telegram, the relay, an outside model or a session's queue: nothing while off.
-GUARDED = {"account", "auto-compact", "autopilot", "block", "board", "bot-api", "card", "dashboard", "decide", "delivered",
-           "direct-note", "finish-stop", "hook-ask", "hook-lifecycle", "hook-notify", "hook-permission", "hook-post", "hook-prompt",
+GUARDED = {"account", "auto-compact", "autopilot", "block", "board", "bot-api", "card", "codex", "command-topic", "dashboard", "decide", "delivered",
+           "direct-note", "finish-stop", "hook-ask", "hook-bash", "hook-lifecycle", "hook-notify", "hook-permission", "hook-post", "hook-prompt",
            "hook-start", "hook-stop", "hook-stop-failure", "hook-wake", "lifecycle", "mirror", "notify",
            "progress", "prompt-mirror", "refresh-status", "session-log", "session-state", "take", "topic-icons",
            "topic-names", "topic-rename", "translate-warm", "typing", "widget", "sessions"}
+
+
+def _cmd_codex(args) -> int:
+    from .codex_app_server import CodexServer, ProtocolError
+    from .codex_bridge import register
+    try:
+        cfg = C.load()
+        if cfg.codex_harness_enabled is not True:
+            print("Codex harness is disabled; set codex_harness_enabled first.", file=sys.stderr)
+            return 1
+        server = CodexServer()
+        endpoint = server.ensure_started()
+        protocol = server.connect()
+        try:
+            thread_id = protocol.start_thread(cwd=args.cwd, model=args.model, effort=args.effort)
+            register(server, protocol.threads[thread_id])
+        finally:
+            protocol.close()
+        import shlex
+        attach = shlex.join(["codex", "--remote", endpoint, "resume", thread_id])
+        print(f"Codex thread {thread_id} ready. Attach with: {attach}")
+        return 0
+    except (C.ConfigError, OSError, ValueError, ProtocolError, KeyError, TypeError):
+        print("Harnessgram: Codex start failed.", file=sys.stderr)
+        return 1
 
 
 def _off(args) -> Optional[int]:
@@ -866,13 +1065,19 @@ def _off(args) -> Optional[int]:
     output (no message taken from the queue, no state changed); any other command says so locally."""
     from . import policy
     cmd = args.cmd
+    if cmd == "demo":
+        from .demo import serve
+        serve(args.host, args.port)
+        return 0
     if cmd == "pair" or (cmd == "project" and getattr(args, "project_cmd", "") == "pair"):
         # pairing reads (and so consumes) the bot's waiting messages: never while the config says off
         if policy.explicitly_off():
             print(policy.PAIR_OFF_NOTICE, file=sys.stderr)
             return 1
         return None
-    guarded = cmd in GUARDED or (cmd == "radio" and getattr(args, "radio_cmd", "") in ("start", "say")) or (
+    if cmd == "decide" and getattr(args, "decide_cmd", "") == "public-key":
+        return None  # only reads (or creates) the local signing key: no Telegram, no session
+    guarded = cmd in GUARDED or (cmd == "radio" and getattr(args, "radio_cmd", "") in ("start", "say", "queue-file")) or (
         cmd == "radio" and getattr(args, "radio_cmd", "") == "youtube" and getattr(args, "youtube_cmd", "") == "start")
     if not guarded or policy.on():
         return None
@@ -906,11 +1111,68 @@ def main(argv: Optional[List[str]] = None) -> int:
     if raw[:1] == ["assistant-exec"]:  # the launch of an assistant session (assistant.py); the rest is claude's
         from .assistant import exec_main
         return exec_main(raw[1:])
-    args = _quick_args(raw) or _parser().parse_args(argv)
+    command_argv = None
+    if raw[:2] == ["command-topic", "add"] and "--" in raw:
+        separator = raw.index("--")
+        command_argv, raw = raw[separator + 1:], raw[:separator]
+    args = _quick_args(raw) or _parser().parse_args(raw)
+    if args.cmd == "command-topic" and args.command_topic_cmd == "add":
+        args.argv = command_argv or []
     off = _off(args)
     if off is not None:
         return off
     cmd = args.cmd
+    if cmd == "mcp":
+        from . import mcp_server
+        try:
+            if args.mcp_cmd == "token":
+                mcp_server.rotate_token()
+                print("Token rotated in the Keychain.")
+                print("claude mcp add-json harnessgram "
+                      "'{\"type\":\"http\",\"url\":\"http://127.0.0.1:8765/mcp\","
+                      "\"headersHelper\":\"ctb mcp header\"}'")
+            elif args.mcp_cmd == "header":
+                print(json.dumps(mcp_server.authorization_header()))
+            else:
+                cfg = C.load()
+                mcp_server.serve(http=args.http, port=args.port, cfg=cfg)
+            return 0
+        except (mcp_server.MCPError, C.ConfigError) as exc:
+            print(f"Harnessgram MCP: {exc}", file=sys.stderr)
+            return 1
+    if cmd == "codex":
+        return _cmd_codex(args)
+    if cmd == "runner":
+        from .runner import cli
+        return cli(args.session, dry_run=args.dry_run)
+    if cmd == "command-topic":
+        from . import command_topic
+        return command_topic.cli(args)
+    if cmd == "credit-key":
+        # Credential gating is local and must work without loading bridge config.
+        from .credit_mode import key_main
+        return key_main()
+    if cmd == "filter-policy":
+        from . import filter_policy as F
+        if args.filter_policy_cmd == "publish":
+            try:
+                with open(args.file, encoding="utf-8") as f:
+                    doc = json.load(f, object_pairs_hook=F._object)
+                stored = F.publish(doc, F.committee_key())
+                data = F._validate({k: stored[k] for k in ("payload", "signature", "publicKey")})
+                print("Published filter policy version %d." % data["version"])
+                return 0
+            except (OSError, ValueError, UnicodeError) as exc:
+                print("Filter policy: %s" % exc, file=sys.stderr)
+                return 1
+        stored = F.current()
+        if stored is None:
+            print("No valid filter policy stored.")
+            return 1
+        data = F._validate({k: stored[k] for k in ("payload", "signature", "publicKey")})
+        off = ", ".join(sorted(k for k, v in data["rules"].items() if not v)) or "none"
+        print("version: %d, locked: %s, off: %s" % (data["version"], str(data["locked"]).lower(), off))
+        return 0
     if cmd == "sessions":
         from .session_reload import reload_sessions
         try:
@@ -939,7 +1201,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             widgets.send_sample(cfg, Bot.from_config(cfg))
             return 0
         except (C.ConfigError, OSError, ValueError, TelegramError) as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
     if cmd in SEND_ONLY_HELPERS and getattr(args, "session", ""):
         from .scheduled import suppressed
@@ -954,7 +1216,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             folder = studio_install()
         except InstallError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         print(f"Studio installed: {folder} (reopen the panel to see its tab)")
         return 0
@@ -1016,25 +1278,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         sent = send_log(cfg, args.session, everything=args.all)
         print("sent" if sent else "nothing to send")
         return 0 if sent else 1
     if cmd == "heartbeat":
         from .heartbeat import run as heartbeat_run
+        from .listener_service import heartbeat_check as listener_heartbeat_check
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
-        return heartbeat_run(cfg, every=max(args.every, 3.0), once=args.once)
+        return heartbeat_run(cfg, every=max(args.every, 3.0), once=args.once,
+                             listener_check=listener_heartbeat_check)
     if cmd == "topic-icons":
         from . import topic_icons
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         print(topic_icons.run(cfg))
         return 0
@@ -1059,10 +1323,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         if not cfg.ready:
-            print("Harnessgram: bot_token / owner_chat_id missing in the config (run `harnessgram pair`)", file=sys.stderr)
+            print("HarnessGram: bot_token / owner_chat_id missing in the config (run `harnessgram pair`)", file=sys.stderr)
             return 1
         return serve(cfg)
     if cmd == "panel":
@@ -1070,10 +1334,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         if not cfg.ready:
-            print("Harnessgram: bot_token / owner_chat_id missing in the config (run `harnessgram pair`)", file=sys.stderr)
+            print("HarnessGram: bot_token / owner_chat_id missing in the config (run `harnessgram pair`)", file=sys.stderr)
             return 1
         return panel_serve(cfg, args.port if args.port is not None else cfg.panel_port)
     if cmd == "radio":
@@ -1089,8 +1353,63 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
+        if args.radio_cmd == "music":
+            from . import radio_music
+            try:
+                if args.music_cmd == "add":
+                    result = radio_music.add(args.file, args.title, args.artist, cfg=cfg)
+                elif args.music_cmd == "list":
+                    result = radio_music.listing()
+                elif args.music_cmd in ("on", "off"):
+                    result = radio_music.set_enabled(args.music_cmd == "on")
+                else:
+                    result = getattr(radio_music, args.music_cmd)(args.id)
+                print(json.dumps(result, ensure_ascii=False))
+                return 1 if isinstance(result, dict) and result.get("checked_ok") is False else 0
+            except (OSError, ValueError) as e:
+                print(str(e), file=sys.stderr)
+                return 1
+        if args.radio_cmd == "podcast":
+            from . import radio_podcast as P
+            try:
+                result = (P.feeds(cfg) if args.podcast_cmd == "list" else
+                          P.set_feed(cfg, args.url, args.podcast_cmd == "add"))
+                print(json.dumps(result, ensure_ascii=False))
+                return 0
+            except (P.PodcastError, OSError) as e:
+                print(str(e), file=sys.stderr)
+                return 1
+        if args.radio_cmd == "queue-file":
+            from . import decisions, radio_agent
+            session = args.session
+            if not session:
+                try:
+                    session = decisions.caller_session()
+                except decisions.DecisionError as exc:
+                    print(f"HarnessGram: {exc.reason}; pass --session <id> to say which topic", file=sys.stderr)
+                    return 1
+            try:
+                text = radio_agent.read_text(args.text_file)
+                item = radio_agent.queue_file(cfg, args.path, args.title, session, text)
+            except radio_agent.AgentMediaError as exc:
+                if exc.kind == "notext":
+                    try:
+                        real = radio_agent.check_file(cfg, args.path)
+                    except radio_agent.AgentMediaError as check_exc:
+                        print(f"HarnessGram: not queued on the radio ({check_exc.kind})", file=sys.stderr)
+                        return 1
+                    title = radio_agent.clean_title(args.title, real)
+                    if radio_agent.ask_owner(cfg, session, real, title):
+                        print("HarnessGram: no text to check; the owner was asked and only their tap queues it")
+                        return 0
+                    print("HarnessGram: the owner could not be asked", file=sys.stderr)
+                    return 1
+                print(f"HarnessGram: not queued on the radio ({exc.kind})", file=sys.stderr)
+                return 1
+            print(f"queued on the radio: {item['title']}")
+            return 0
         if args.radio_cmd == "prepare-motion":
             from .radio import prepare_motion
             return prepare_motion(cfg, args.modules, args.chrome, args.node)
@@ -1099,7 +1418,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return youtube_cli(cfg, args.youtube_cmd, live=getattr(args, "live", False),
                                request=getattr(args, "request", None), mirror=getattr(args, "mirror", None))
         return radio_cli(cfg, args.radio_cmd, text=getattr(args, "text", ""), live=getattr(args, "live", False),
-                         play=getattr(args, "play", False))
+                         play=getattr(args, "play", False), idle_since=getattr(args, "idle_since", 0),
+                         idle_run=getattr(args, "idle_run", 0))
     if cmd == "share-serve":
         from .share import serve
         serve(args.port)
@@ -1130,6 +1450,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if cmd == "hook-ask":
         from .hooks import hook_ask
         return hook_ask(sys.stdin.read())
+    if cmd == "hook-bash":
+        from .hooks import hook_bash
+        return hook_bash(sys.stdin.read())
     if cmd == "hook-permission":
         from .permission_request import run_hook
         return run_hook(sys.stdin.read())
@@ -1210,10 +1533,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
             if not cfg.ready or not (accounts.valid_name(args.target) or args.target == accounts.MAIN):
+                print("Account move failed: unknown target account.", file=sys.stderr)
                 return 1
-            return 0 if auto_move(cfg, Bot.from_config(cfg), args.session, args.thread, args.target,
-                                  idle=getattr(args, "idle", False)) else 1
-        except (C.ConfigError, OSError):
+            if accounts.config_dir(args.target) is None:
+                print("Account move failed: unknown target account.", file=sys.stderr)
+                return 1
+            if not accounts.session_known(args.session):
+                print("Account move failed: unknown session.", file=sys.stderr)
+                return 1
+            if not accounts.eligible_target(args.target):
+                print("Account move failed: target account is not signed in.", file=sys.stderr)
+                return 1
+            if accounts.origin_account(args.session) == args.target:
+                print("Account move failed: session is already on that account.", file=sys.stderr)
+                return 1
+            moved = auto_move(cfg, Bot.from_config(cfg), args.session, args.thread, args.target,
+                              idle=getattr(args, "idle", False))
+            print(("Session moved to " + args.target + ".") if moved
+                  else "Account move failed: session is unknown or is not currently movable.",
+                  file=sys.stdout if moved else sys.stderr)
+            return 0 if moved else 1
+        except (C.ConfigError, OSError) as exc:
+            print(f"Account move failed: {type(exc).__name__}.", file=sys.stderr)
             return 1
     if cmd == "take":
         from .inbox import default_inbox
@@ -1224,7 +1565,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         return autopilot.run_autopilot(cfg, dry_run=args.dry_run)
     if cmd == "topic-rename":
@@ -1232,7 +1573,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         return topic_rename(cfg, args.name, args.session)
     if cmd == "topic-names":
@@ -1241,7 +1582,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         if args.unlock:
             from .topics import TopicMap
@@ -1265,12 +1606,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         from . import recall
         session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
         if not session:
-            print("Harnessgram: no session (run this inside a Claude Code session, or pass --session)", file=sys.stderr)
+            print("HarnessGram: no session (run this inside a Claude Code session, or pass --session)", file=sys.stderr)
             return 1
         try:
             cfg = C.load()
         except C.ConfigError:
-            print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+            print("HarnessGram: the configuration could not be read.", file=sys.stderr)
             return 1
         print(recall.build(cfg, session, args.source)
               or "Nothing to recall for this session.")
@@ -1280,20 +1621,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError:
-            print("Harnessgram: the configuration could not be read.", file=sys.stderr)
+            print("HarnessGram: the configuration could not be read.", file=sys.stderr)
             return 1
         print(idle_lines.listing(idle_lines.read_items(cfg, time.time()), args.project))
         return 0
     if cmd == "addons":
         return _addons(args)
+    if cmd == "packs":
+        return _packs(args)
+    if cmd == "art":
+        return _art(args)
     if cmd == "compact":
         from . import compact
         session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
         if not session:
-            print("Harnessgram: no session (run this inside a Claude Code session, or pass --session)", file=sys.stderr)
+            print("HarnessGram: no session (run this inside a Claude Code session, or pass --session)", file=sys.stderr)
             return 1
         if not args.cancel and not _compact_helper_on():
-            print("Harnessgram: the owner switched agent-requested compaction off in the Cockpit; nothing was asked.",
+            print("HarnessGram: the owner switched agent-requested compaction off in the Cockpit; nothing was asked.",
                   file=sys.stderr)
             return 1
         if args.cancel:
@@ -1312,10 +1657,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         return board_run(cfg, args.board_cmd, session=args.session, text=getattr(args, "text", ""),
-                         url=getattr(args, "url", ""), due=getattr(args, "due", ""), n=getattr(args, "n", 0))
+                         url=getattr(args, "url", ""), due=getattr(args, "due", ""), n=getattr(args, "n", 0),
+                         ledger=getattr(args, "ledger", ""))
     if cmd == "bank":
         from .bank import run as bank_run
         return bank_run(args.bank_cmd or "list", name=getattr(args, "provider", ""), n=getattr(args, "n", 0),
@@ -1325,7 +1671,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         kind = args.card_cmd
         fields = {"progress": {"steps": getattr(args, "step", None), "at": getattr(args, "at", None),
@@ -1340,15 +1686,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         return block_run(cfg, args.block_cmd, source=getattr(args, "source", "-"), ident=getattr(args, "id", ""))
+    if cmd == "decide" and args.decide_cmd == "public-key":
+        from .decision_sign import print_public_key
+        return print_public_key()
     if cmd == "decide":
         from .decisions import run as decide_run
         try:
             cfg = C.load()
         except C.ConfigError as e:
-            print(f"Harnessgram: {e}", file=sys.stderr)
+            print(f"HarnessGram: {e}", file=sys.stderr)
             return 1
         return decide_run(cfg, args.decide_cmd, title=getattr(args, "title", ""),
                           detail=getattr(args, "detail", ""), yes=getattr(args, "yes", ""),

@@ -93,7 +93,7 @@ def _allowed_leaf(sn, path):
 
 def test_empty_allowlist_says_only_the_station_id():
     script, card = outputs(snap(), prof())
-    assert script.startswith("רדיו הצוות, השעה ")
+    assert script.startswith("שידורי הקוקפיט, השעה ")
     assert "אין עדכונים חדשים" in script and "בפרויקט" not in script
     for word in SECRET_WORDS + ["הוספנו", "אלפא", "alpha"]:
         assert word not in script and word not in card
@@ -357,6 +357,23 @@ def test_start_creates_an_unlisted_broadcast_and_keeps_the_key_in_the_store():
     assert STREAM_KEY not in text and REFRESH_TOKEN not in text and "ingest.example" not in text
 
 
+def test_find_stream_accepts_both_titles_and_prefers_the_persisted_title():
+    titles = ["HarnessGram staff radio", Y.STREAM_TITLE]
+
+    def google(method, url, **kwargs):
+        assert method == "GET" and url.endswith("/liveStreams?part=id%2Csnippet%2Ccdn%2CcontentDetails&mine=true&maxResults=50")
+        return 200, {"items": [
+            {"id": title, "snippet": {"title": title}, "contentDetails": {"isReusable": True}}
+            for title in titles
+        ]}
+
+    youtube = Y.YouTube(lambda: "sample-access-token", google)
+    assert youtube.find_stream()["id"] == Y.STREAM_TITLE
+
+    titles[:] = ["HarnessGram staff radio"]
+    assert youtube.find_stream()["id"] == "HarnessGram staff radio"
+
+
 def test_a_failed_bind_leaves_nothing_behind():
     g = FakeGoogle(fail={"/liveBroadcasts/bind"})
     with pytest.raises(Y.YouTubeError):
@@ -443,9 +460,8 @@ def test_keychain_secret_goes_on_stdin_never_argv():
         return type("R", (), {"returncode": 0, "stdout": ""})()
     Y.KeychainStore("sample.service", runner).set(Y.STREAM_KEY, STREAM_KEY)
     assert all(STREAM_KEY not in " ".join(argv) for argv, _ in seen)
-    assert STREAM_KEY in seen[0][1] and seen[0][0] == ["security", "-i"]
-    with pytest.raises(Y.YouTubeError):
-        Y.KeychainStore("sample.service", runner).set(Y.STREAM_KEY, 'bad" -w "x')
+    assert STREAM_KEY not in seen[0][1] and STREAM_KEY.encode().hex() in seen[0][1]
+    assert seen[0][0] == ["security", "-i"]
 
 
 @pytest.mark.new_install

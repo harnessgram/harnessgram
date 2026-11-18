@@ -775,3 +775,58 @@ def test_slow_translation_releases_queued_original_before_its_hold_ends(rig, mon
     assert "hold_until" not in entries[0]
     heartbeat.run_once(cfg, bot, find=lambda _: None)
     assert queue() == [] and EN_TEXT in mirror._plain(bot.delivered[0]["text"])
+
+
+def _fake_clock(monkeypatch, moves=True):
+    clock = [1000.0]
+    slept = []
+
+    def sleep(delay):
+        slept.append(delay)
+        if moves:
+            clock[0] += delay
+    monkeypatch.setattr(mirror.time, "time", lambda: clock[0])
+    monkeypatch.setattr(mirror.time, "sleep", sleep)
+    return clock, slept
+
+
+def test_drain_waits_out_a_short_closed_gate(rig, monkeypatch):
+    # Optional traffic and other replies close the group's gate about once a minute; a drain that gave up
+    # whenever it found the gate closed left owner replies queued for most of an hour.
+    from ctb import flood
+    cfg, bot, sender = rig
+    clock, slept = _fake_clock(monkeypatch)
+    flood.record_429(123, 20)
+    sender._post(123, sender.topics, "sess-1", "Test", "first")
+    sender._post(123, sender.topics, "sess-1", "Test", "second")
+    assert bot.attempts == [] and len(queue()) == 2
+    assert reply_outbox.drain(cfg, bot) == 2
+    assert slept == [20.0]
+    assert [p["text"] for p in bot.delivered] == ["(delayed)\nfirst", "(delayed)\nsecond"]
+    assert queue() == []
+
+
+def test_drain_leaves_a_long_closed_gate_for_a_later_round(rig, monkeypatch):
+    from ctb import flood
+    cfg, bot, sender = rig
+    clock, slept = _fake_clock(monkeypatch)
+    flood.record_429(123, reply_outbox.GATE_WAIT + 15)
+    sender._post(123, sender.topics, "sess-1", "Test", "answer")
+    saved = queue()
+    assert reply_outbox.drain(cfg, bot) == 0
+    assert slept == [] and bot.attempts == [] and queue() == saved
+    clock[0] += 16  # the next round finds a short gate left and waits it out
+    assert reply_outbox.drain(cfg, bot) == 1 and slept == [reply_outbox.GATE_WAIT - 1]
+    assert queue() == []
+
+
+def test_drain_gate_waits_are_bounded_per_round(rig, monkeypatch):
+    # A gate that keeps re-closing (here: a clock that never moves) must not hold the heartbeat forever.
+    from ctb import flood
+    cfg, bot, sender = rig
+    clock, slept = _fake_clock(monkeypatch, moves=False)
+    flood.record_429(123, 20)
+    sender._post(123, sender.topics, "sess-1", "Test", "answer")
+    assert reply_outbox.drain(cfg, bot) == 0
+    assert slept and sum(slept) <= reply_outbox.GATE_WAIT_TOTAL
+    assert bot.attempts == [] and len(queue()) == 1 and "failures" not in queue()[0]

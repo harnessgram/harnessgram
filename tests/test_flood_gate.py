@@ -304,3 +304,15 @@ def test_step_end_makes_one_last_attempt_to_show_a_pending_card():
     edits = end(gate_closed=False, spent=True)  # budget spent: the final edit ignores it
     assert len(edits) == 1 and edits[0]["message_id"] == 55 and "step 2" in edits[0]["text"]
     assert end(gate_closed=True) == []  # a closed gate still means no call
+
+
+def test_optional_sends_yield_while_an_owner_reply_waits_for_that_chat():
+    from ctb import flood
+    from ctb.config import private_dir, state_dir
+    outbox = private_dir(state_dir()) / "reply-outbox.json"
+    assert flood.allow_optional(-100777, now=1000.0)
+    outbox.write_text(json.dumps([{"session": "s", "chat": -100777, "text": "x", "created": 1000.0}]), encoding="utf-8")
+    assert not flood.allow_optional(-100777, now=1001.0)
+    assert flood.allow_optional(-100888, now=1001.0)  # another chat keeps its budget
+    outbox.write_text("[]", encoding="utf-8")
+    assert flood.allow_optional(-100777, now=1002.0)

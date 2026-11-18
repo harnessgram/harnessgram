@@ -12,6 +12,10 @@ GROUP = -1001234567890
 REAL_ACTIVE = panel_pin._active
 
 
+def test_removed_legacy_button_api_is_not_exported():
+    assert not hasattr(panel_pin, "button")
+
+
 class Bot(FakeBot):
     def __init__(self):
         super().__init__()
@@ -149,6 +153,7 @@ def test_a_button_telegram_refuses_to_edit_for_good_is_left_as_it_is():
     (state_dir() / "panel-pins.json").write_text(json.dumps({f"{GROUP}:{threads[0]}": {"id": 55, "pinned": True}}))
     bot.fail["editMessageText"], bot.codes["editMessageText"] = "Bad Request: message can't be edited", 400
     panel_pin.run(cfg, bot, topics, now=1000)
+    assert panel_pin.pin_message(GROUP, threads[0]) == 0
     bot.calls.clear()
     assert panel_pin.run(cfg, bot, topics, now=1000 + panel_pin.RETRY + 1) == 0 and not bot.calls
 
@@ -192,6 +197,16 @@ def test_the_fixed_keyboard_has_the_panel_button_in_both_languages():
     he, en = both_langs("fixed_btn_panel")
     assert {"text": he} in mirror.KEYBOARD["keyboard"][-1] and {"text": en} in mirror.KEYBOARD_EN["keyboard"][-1]
     assert _keyboard_word(he) and _keyboard_word(en)  # a tap is never read as an answer to a dialog
+
+
+def test_panel_taps_accept_only_the_complete_label_with_an_optional_count():
+    from ctb.i18n import both_langs
+    from ctb.inbox import _keyboard_word, _panel_button
+    for label in both_langs("fixed_btn_panel"):
+        for text in (label, label + " · 3", label.replace("🎛", "🎛️") + " · 12"):
+            assert _panel_button(text) and _keyboard_word(text)
+        for text in (label + " · 0", label + " · 3 extra", label + " please"):
+            assert not _panel_button(text) and not _keyboard_word(text)
 
 
 def test_the_panel_message_previews_what_waits_in_the_topic(monkeypatch):
@@ -246,102 +261,82 @@ def _index(cfg, bot, thread, mid=55):
     return pins
 
 
-def test_the_pinned_replies_index_carries_the_panel_button():
-    """The owner: several messages are pinned and the panel one, the oldest, is never the one in the pinned bar."""
+def test_the_pinned_replies_index_does_not_duplicate_the_cockpit_button():
     cfg, bot, topics, (thread,) = setup(1)
     panel_pin.run(cfg, bot, topics, now=1000)        # the listener learns the bot's name
     panel_pin._username.clear()                      # a reply's hook is another process: no Telegram call for it
     bot.calls.clear()
-    pins = _index(cfg, bot, thread)
+    _index(cfg, bot, thread)
     (sent,) = bot.methods("sendMessage")
-    assert sent["reply_markup"]["inline_keyboard"] == [[{
-        "text": panel_pin.t("panel_pin_button", lang="en"),
-        "url": f"https://t.me/DemoBot?startapp={panel.topic_param(GROUP, thread)}"}]]
-    assert not bot.methods("getMe") and pins.carries_button(GROUP, thread)
-    _index(cfg, bot, thread, mid=56)                 # every later edit keeps the button
-    assert bot.methods("editMessageText")[-1]["reply_markup"] == sent["reply_markup"]
+    assert "reply_markup" not in sent and not bot.methods("getMe")
+    _index(cfg, bot, thread, mid=56)
+    assert "reply_markup" not in bot.methods("editMessageText")[-1]
 
 
-def test_the_old_panel_pin_is_unpinned_once_the_index_carries_the_button():
+def test_the_panel_pin_stays_when_the_index_is_updated():
     cfg, bot, topics, (thread,) = setup(1)
     panel_pin.run(cfg, bot, topics, now=1000)
-    old = json.loads((state_dir() / "panel-pins.json").read_text())[f"{GROUP}:{thread}"]["id"]
+    old = panel_pin.pin_message(GROUP, thread)
     _index(cfg, bot, thread)
     bot.calls.clear()
-    assert panel_pin.run(cfg, bot, topics, now=2000) == 1
-    assert bot.methods("unpinChatMessage") == [{"chat_id": GROUP, "message_id": old}]
-    assert not bot.methods("sendMessage") and not bot.methods("deleteMessage")   # its message stays in the topic
-    bot.calls.clear()
-    assert panel_pin.run(cfg, bot, topics, now=3000) == 0 and not bot.calls
-
-
-def test_a_topic_whose_index_has_the_button_gets_no_panel_message_of_its_own():
-    cfg, bot, topics, (thread,) = setup(1)
-    panel_pin._bot_name(cfg, bot)
-    _index(cfg, bot, thread)
-    bot.calls.clear()
-    assert panel_pin.run(cfg, bot, topics, now=2000) == 1
-    assert not bot.methods("sendMessage") and not bot.methods("pinChatMessage") and not bot.methods("unpinChatMessage")
-
-
-def test_without_a_known_bot_name_the_index_has_no_button_and_the_panel_pin_stays():
-    cfg, bot, topics, (thread,) = setup(1)
-    pins = _index(cfg, bot, thread)
-    assert "reply_markup" not in bot.methods("sendMessage")[-1] and not pins.carries_button(GROUP, thread)
-    bot.calls.clear()
-    assert panel_pin.run(cfg, bot, topics, now=2000) == 1 and len(bot.methods("pinChatMessage")) == 1
-
-
-def test_a_closed_gate_leaves_the_old_pin_for_the_next_round():
-    cfg, bot, topics, (thread,) = setup(1)
-    panel_pin.run(cfg, bot, topics, now=1000)
-    _index(cfg, bot, thread)
-    bot.fail["unpinChatMessage"], bot.codes["unpinChatMessage"] = "Too Many Requests", 429
     assert panel_pin.run(cfg, bot, topics, now=2000) == 0
-    assert not json.loads((state_dir() / "panel-pins.json").read_text())[f"{GROUP}:{thread}"].get("folded")
-    assert panel_pin.run(cfg, bot, topics, now=2060) == 1
+    assert panel_pin.pin_message(GROUP, thread) == old
+    assert not bot.methods("unpinChatMessage")
 
 
-def _index_lost(cfg, bot, thread, pin_fails=False):
-    """The pinned index is deleted in Telegram; the next reply finds it gone and its replacement fails to send (or,
-    with `pin_fails`, is sent but cannot be pinned)."""
-    from ctb import pins
-    bot.fail["editMessageText"], bot.codes["editMessageText"] = "Bad Request: message to edit not found", 400
-    if pin_fails:
-        bot.fail["pinChatMessage"], bot.codes["pinChatMessage"] = "Bad Request: not enough rights", 400
-    else:
-        bot.fail["sendMessage"], bot.codes["sendMessage"] = "Bad Request: message thread not found", 400
-    pins.update_index(cfg, bot, thread, 57, "another reply", now=2500.0)
-    assert not pins.carries_button(GROUP, thread)
-
-
-
-@pytest.mark.parametrize("pin_fails", [False, True])
-def test_the_panel_pin_comes_back_when_the_index_that_carried_the_button_is_gone(pin_fails):
-    """After the fold the record looked current for good: a deleted index (or a new one that could not be pinned)
-    left the topic without any control-panel button."""
+def test_the_cockpit_pin_is_re_pinned_after_the_index():
     cfg, bot, topics, (thread,) = setup(1)
     panel_pin.run(cfg, bot, topics, now=1000)
-    old = json.loads((state_dir() / "panel-pins.json").read_text())[f"{GROUP}:{thread}"]["id"]
+    old = panel_pin.pin_message(GROUP, thread)
+    bot.calls.clear()
     _index(cfg, bot, thread)
-    assert panel_pin.run(cfg, bot, topics, now=2000) == 1  # folded into the index
-    _index_lost(cfg, bot, thread, pin_fails=pin_fails)
-    bot.calls.clear()
-    assert panel_pin.run(cfg, bot, topics, now=3000) == 1
-    assert bot.methods("pinChatMessage") == [{"chat_id": GROUP, "message_id": old, "disable_notification": True}]
-    rec = json.loads((state_dir() / "panel-pins.json").read_text())[f"{GROUP}:{thread}"]
-    assert rec.get("pinned") and not rec.get("folded")
-    bot.calls.clear()
-    assert panel_pin.run(cfg, bot, topics, now=4000) == 0 and not bot.calls  # restored once, not every round
+    assert [p["message_id"] for p in bot.methods("pinChatMessage")][-1] == old
+    assert len(bot.methods("pinChatMessage")) == 2
 
 
-def test_a_folded_topic_without_its_own_panel_message_gets_a_new_one_when_the_index_is_gone():
+def test_a_v2_folded_pin_is_restored():
     cfg, bot, topics, (thread,) = setup(1)
-    panel_pin._bot_name(cfg, bot)
-    _index(cfg, bot, thread)
-    assert panel_pin.run(cfg, bot, topics, now=2000) == 1  # folded: no panel message of its own
-    _index_lost(cfg, bot, thread)
+    panel_pin.run(cfg, bot, topics, now=1000)
+    key = f"{GROUP}:{thread}"
+    state = json.loads((state_dir() / "panel-pins.json").read_text())
+    old = state[key]["id"]
+    state[key].update(v=2, folded=True)
+    (state_dir() / "panel-pins.json").write_text(json.dumps(state))
     bot.calls.clear()
-    assert panel_pin.run(cfg, bot, topics, now=3000) == 1
-    (sent,) = bot.methods("sendMessage")
-    assert sent["message_thread_id"] == thread and len(bot.methods("pinChatMessage")) == 1
+    assert panel_pin.run(cfg, bot, topics, now=2000) == 1
+    assert bot.methods("editMessageText")[-1]["message_id"] == old
+    assert bot.methods("pinChatMessage")[-1]["message_id"] == old
+    assert panel_pin.pin_message(GROUP, thread) == old
+
+
+def test_old_board_migrates_only_after_it_is_shown_on_the_cockpit_pin():
+    from ctb import board
+    from ctb.config import write_private
+    cfg, bot, topics, (thread,) = setup(1)
+    panel_pin.run(cfg, bot, topics, now=1000)
+    pin = panel_pin.pin_message(GROUP, thread)
+    row = board._blank()
+    row.update(id=77, pinned=True, onpin=False, next=2,
+               items=[{"k": "check", "i": 1, "s": "Ship it", "at": 1.0, "x": False}])
+    write_private(state_dir() / board.STATE_FILE, json.dumps({f"{GROUP}:{thread}": row}))
+    bot.calls.clear()
+    assert panel_pin.run(cfg, bot, topics, now=2000) == 0
+    assert not bot.methods("unpinChatMessage")
+
+    row["onpin"] = True
+    write_private(state_dir() / board.STATE_FILE, json.dumps({f"{GROUP}:{thread}": row}))
+    assert panel_pin.run(cfg, bot, topics, now=3000) == 0
+    moved = [p for p in bot.methods("editMessageText") if p["message_id"] == 77][-1]
+    assert f"/{thread}/{pin}" in moved["text"]
+    assert bot.methods("unpinChatMessage")[-1]["message_id"] == 77
+    assert board.board_message(GROUP, thread) == 0
+
+
+def test_existing_idle_pin_refreshes_but_no_new_pin_is_posted(monkeypatch):
+    from ctb import waiting
+    cfg, bot, topics, threads = setup(2)
+    monkeypatch.setattr(waiting, 'waiting_count', lambda cfg: 2)
+    monkeypatch.setattr(panel_pin, '_active', lambda *a: set())
+    (state_dir() / 'panel-pins.json').write_text(json.dumps({f'{GROUP}:{threads[0]}': {'id': 55, 'pinned': True, 'v': panel_pin.VERSION, 'count': 1}}))
+    assert panel_pin.run(cfg, bot, topics, now=1000) == 1
+    assert len(bot.methods('editMessageText')) == 1 and not bot.methods('sendMessage')

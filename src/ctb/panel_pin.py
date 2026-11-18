@@ -12,21 +12,23 @@ into every old topic made long-dead sessions jump up. An old topic gets it when 
 `flood.optional_call`; a skipped or failed call is retried in a later round, a topic Telegram refuses
 (closed, deleted, no pin right) is retried after RETRY seconds, and a transient failure (a 5xx or no answer)
 after TRANSIENT_RETRY, with nothing marked done: an old button is marked current only once its edit
-succeeded or Telegram refused it for good. A topic whose pinned replies index carries the button needs no
-pin of its own (its old one is unpinned); every round checks that the index still does, and when it is gone the
-topic's own pin comes back. The message ids per topic live in a small
-private state file guarded by a file lock.
+succeeded or Telegram refused it for good. The Cockpit pin also carries the topic board. A v2 pin folded
+into the replies index is restored during migration, and pinning the replies index re-pins the Cockpit
+carrier so it remains the topic's visible pin. The message ids per topic live in a small private state file
+guarded by a file lock.
 """
 from __future__ import annotations
 
 import fcntl
 import json
+import logging
+import threading
 import re
 import time
 from pathlib import Path
 from typing import Optional
 
-from . import flood, pins
+from . import flood, waiting
 from .panel import topic_param
 from .config import Config, state_dir, write_private
 from .i18n import t
@@ -36,7 +38,9 @@ PER_ROUND = 3  # new topics handled per round, so a backfill never spends the wh
 RETRY = 24 * 3600
 TRANSIENT_RETRY = 10 * 60  # a Telegram server error or no answer: soon, and nothing is marked done
 ACTIVE_AGE = 6 * 3600
-VERSION = 2  # 1 = one shared startapp=panel link; 2 = a link per topic
+VERSION = 3  # 1 = shared link; 2 = per-topic link/folding; 3 = board rides on the Cockpit pin
+_menu_lock = threading.Lock()
+_menu_state = {}  # token and owner -> last attempted time and last successful label
 _username = {}  # bot token -> username, read once per process
 
 
@@ -81,20 +85,56 @@ def known_name(cfg: Config) -> str:
     return name if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_]{3,64}", name) else ""
 
 
-def button(cfg: Config, chat: int, thread) -> Optional[dict]:
-    """The control-panel button for another pinned message of this topic (the replies index), or None while
-    the panel is not set up or the bot's name is not known yet."""
-    try:
-        name = known_name(cfg) if enabled(cfg) else ""
-        return _markup(cfg, name, chat, thread) if name and type(thread) is int else None
-    except Exception:
-        return None
+def app_url(cfg: Config, start_param: str) -> str:
+    """A no-I/O deep link to this bot's Main App, or ``""`` until its username is known."""
+    name = known_name(cfg)
+    if not name or not isinstance(start_param, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", start_param):
+        return ""
+    return f"https://t.me/{name}?startapp={start_param}"
 
 
-def _markup(cfg: Config, name: str, chat: int, thread: Optional[int]) -> dict:
+def _markup(cfg: Config, name: str, chat: int, thread: Optional[int], count=None) -> dict:
     """The URL button that opens the Main App on this topic (a topic without a session opens the overview)."""
     url = f"https://t.me/{name}?startapp=" + (topic_param(chat, thread) if type(thread) is int else "panel")
-    return {"inline_keyboard": [[{"text": t("panel_pin_button", lang=cfg.ui_language), "url": url}]]}
+    count = waiting.waiting_count(cfg) if count is None else count
+    key = "panel_pin_button_count" if count else "panel_pin_button"
+    return {"inline_keyboard": [[{"text": t(key, lang=cfg.ui_language, count=count), "url": url}]]}
+
+
+def base_content(cfg: Config, chat: int, thread: int, count=None):
+    name = known_name(cfg)
+    if not name:
+        return None
+    return (t("panel_pin_text", lang=cfg.ui_language),
+            _markup(cfg, name, chat, thread, count)["inline_keyboard"])
+
+
+def _content(cfg: Config, name: str, chat: int, thread: int, count=None):
+    from . import board
+    topic = board.view(chat, thread)
+    base = t("panel_pin_text", lang=cfg.ui_language)
+    rows = _markup(cfg, name, chat, thread, count)["inline_keyboard"]
+    return board.pin_content(cfg, chat, thread, base, rows, topic), topic["items"]
+
+
+def pin_message(chat: int, thread) -> int:
+    rec = _load().get(f"{chat}:{thread}") or {}
+    mid = rec.get("id")
+    if not (rec.get("pinned") is True and not rec.get("folded") and not rec.get("frozen")
+            and type(mid) is int and mid > 0):
+        return 0
+    from . import board
+    return 0 if board.gone_id(chat, thread) == mid else mid
+
+
+def repin(bot, chat: int, thread) -> None:
+    mid = pin_message(chat, thread)
+    if mid:
+        try:
+            flood.optional_call(bot, "pinChatMessage", {"chat_id": chat, "message_id": mid,
+                                                        "disable_notification": True})
+        except Exception:
+            pass
 
 
 def _load() -> dict:
@@ -124,6 +164,28 @@ def enabled(cfg: Config) -> bool:
     return (Path.home() / "Library" / "LaunchAgents" / f"{PANEL_JOB}.plist").exists()
 
 
+def _refresh_menu(cfg, bot, count, now):
+    """Update only the paired private chat; failed attempts are throttled too."""
+    owner = getattr(cfg, "owner_chat_id", None)
+    url = getattr(cfg, "panel_base_url", "")
+    if type(owner) is not int or owner <= 0 or not url.startswith("https://"):
+        return
+    label = t("panel_menu_count" if count else "panel_menu", lang=cfg.ui_language, count=count)
+    key = (_token_mark(cfg), owner)
+    with _menu_lock:
+        last, sent = _menu_state.get(key, (float("-inf"), None))
+        if sent == (label, url) or now - last < 60:
+            return
+        _menu_state[key] = (now, sent)
+        try:
+            flood.optional_call(bot, "setChatMenuButton", {"chat_id": owner, "menu_button": {
+                "type": "web_app", "text": label, "web_app": {"url": url}}}, timeout=5)
+        except Exception:
+            logging.getLogger(__name__).warning("Could not update Cockpit menu button")
+        else:
+            _menu_state[key] = (now, (label, url))
+
+
 def run(cfg: Config, bot, topics, now: Optional[float] = None) -> int:
     """Place the panel button in up to PER_ROUND topics that lack it. Returns how many were placed.
     Never raises; does nothing while the panel is not set up (enabled)."""
@@ -131,6 +193,8 @@ def run(cfg: Config, bot, topics, now: Optional[float] = None) -> int:
     if not enabled(cfg):
         return 0
     try:
+        count = waiting.waiting_count(cfg)
+        _refresh_menu(cfg, bot, count, time.monotonic())
         name = _bot_name(cfg, bot)
         if not name:
             return 0
@@ -139,73 +203,74 @@ def run(cfg: Config, bot, topics, now: Optional[float] = None) -> int:
         with open(lock_path, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             state, placed = _load(), 0
-            text = t("panel_pin_text", lang=cfg.ui_language)
+            from . import board
+            old_boards = board.old_pins()
             active = _active(topics, now)
-            for entry in topics.all_places().values():
+            # Failed topics retain their retry timestamp, so untouched topics get a turn even
+            # when rounds are farther apart than the retry delay.
+            def retry_order(entry):
+                key = f"{entry.get('chat')}:{entry.get('thread')}"
+                retry = (state.get(key) or {}).get("retry_at", 0)
+                return retry if isinstance(retry, (int, float)) else 0
+
+            for entry in sorted(topics.all_places().values(), key=retry_order):
                 chat, thread = entry.get("chat"), entry.get("thread")
                 if type(chat) is not int or type(thread) is not int:
                     continue
                 key = f"{chat}:{thread}"
-                if key not in active:
-                    continue
                 rec = state.get(key) or {}
-                carried = pins.carries_button(chat, thread)
-                if rec.get("folded") and not carried:
-                    # The index that carried the button is gone (deleted, or a new one could not be sent or
-                    # pinned): this topic's own panel pin comes back, its old message re-pinned or a new one posted.
-                    rec = {k: v for k, v in rec.items() if k not in ("folded", "pinned", "retry_at")}
-                if not rec.get("folded") and carried:
-                    # The pinned replies index now carries the button: this topic needs no panel pin of its own,
-                    # and an older one is unpinned (its message stays) so the pinned bar shows one message.
-                    if placed >= PER_ROUND:
-                        break
-                    try:
-                        if rec.get("pinned") and rec.get("id"):
-                            try:
-                                flood.optional_call(bot, "unpinChatMessage", {"chat_id": chat, "message_id": rec["id"]})
-                            except TelegramError as e:
-                                if getattr(e, "skipped", False) or e.code == 429 or e.code is None or e.code >= 500:
-                                    raise
-                                # refused for good (already unpinned, deleted): nothing left to fold
-                    except TelegramError:
-                        break  # the gate is closed or Telegram is down: next round
-                    state[key] = dict(rec, folded=True, pinned=True, v=VERSION)
-                    write_private(_path(), json.dumps(state))
-                    placed += 1
+                if key not in active and not (rec.get("pinned") and rec.get("id")):
                     continue
-                current = rec.get("pinned") and rec.get("v") == VERSION
+                # v2 could be folded into the replies index. v3 restores that message as the
+                # sole Cockpit/board carrier; a deleted carrier is posted anew.
+                restoring = rec.get("folded") is True
+                if restoring:
+                    rec = {k: v for k, v in rec.items() if k not in ("folded", "pinned", "retry_at")}
+                if rec.get("id") and board.gone_id(chat, thread) == rec["id"]:
+                    rec = {}
+                status_digest = board.status_digest(cfg, chat, thread, now)
+                current = (rec.get("pinned") and rec.get("v") == VERSION
+                           and (rec.get("frozen") or (rec.get("count") == count
+                                                     and rec.get("status_digest", "") == status_digest)))
+                if current and key in old_boards:
+                    board.migrate_old(cfg, bot, chat, thread, rec["id"], now)
                 if current or now < rec.get("retry_at", 0):
                     continue
                 if placed >= PER_ROUND:
                     break
-                markup = _markup(cfg, name, chat, thread)
+                content, shown = _content(cfg, name, chat, thread, count)
                 try:
-                    if rec.get("pinned") and rec.get("id"):
+                    if (rec.get("pinned") or restoring) and rec.get("id"):
                         try:
-                            flood.optional_call(bot, "editMessageText", {
-                                "chat_id": chat, "message_id": rec["id"], "text": text, "reply_markup": markup})
+                            flood.optional_call(bot, "editMessageText",
+                                                dict(content, chat_id=chat, message_id=rec["id"]))
                         except TelegramError as e:
                             if "not modified" not in e.description.lower():
                                 raise
-                        rec = dict(rec, v=VERSION)
+                        board.settle(chat, thread, shown)
+                        rec = dict(rec, v=VERSION, count=count, status_digest=status_digest)
                         rec.pop("retry_at", None)
+                        if restoring:
+                            flood.optional_call(bot, "pinChatMessage", {
+                                "chat_id": chat, "message_id": rec["id"], "disable_notification": True})
+                            rec["pinned"] = True
                         placed += 1
                         state[key] = rec
                         write_private(_path(), json.dumps(state))
                         continue
                     if not rec.get("id"):
-                        sent = flood.optional_call(bot, "sendMessage", {
-                            "chat_id": chat, "message_thread_id": thread, "disable_notification": True,
-                            "text": text, "reply_markup": markup})
+                        sent = flood.optional_call(bot, "sendMessage", dict(
+                            content, chat_id=chat, message_thread_id=thread, disable_notification=True))
                         mid = sent.get("message_id") if isinstance(sent, dict) else None
                         if type(mid) is not int:
                             continue
-                        rec = {"id": mid, "v": VERSION}
+                        rec = {"id": mid, "v": VERSION, "count": count, "status_digest": status_digest}
                         state[key] = rec
                         write_private(_path(), json.dumps(state))
                     flood.optional_call(bot, "pinChatMessage", {"chat_id": chat, "message_id": rec["id"],
                                                                 "disable_notification": True})
                     rec["pinned"] = True
+                    board.settle(chat, thread, shown)
                     placed += 1
                 except TelegramError as e:
                     if getattr(e, "skipped", False) or e.code == 429:
@@ -220,7 +285,7 @@ def run(cfg: Config, bot, topics, now: Optional[float] = None) -> int:
                     if e.code == 400 and "not found" in e.description.lower():
                         rec = {"retry_at": rec["retry_at"]}  # the message or topic is gone: post a new one later
                     elif rec.get("pinned"):
-                        rec["v"] = VERSION  # an old button that cannot be edited stays as it is
+                        rec["v"], rec["frozen"] = VERSION, True  # an old button that cannot be edited stays as it is (no count)
                     placed += 1
                 state[key] = rec
                 write_private(_path(), json.dumps(state))
@@ -309,6 +374,13 @@ def send_link(cfg: Config, bot, chat: int, thread: Optional[int], topics=None) -
                 return True  # no pin right or the gate is closed: the round in run() may still place one
             state[key] = {"id": mid, "v": VERSION, "pinned": True}
             write_private(_path(), json.dumps(state))
+        try:
+            content, shown = _content(cfg, name, chat, thread)
+            flood.optional_call(bot, "editMessageText", dict(content, chat_id=chat, message_id=mid))
+            from . import board
+            board.settle(chat, thread, shown)
+        except TelegramError:
+            pass
         return True
     except Exception:
         return False

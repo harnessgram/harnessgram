@@ -47,5 +47,5 @@ def explicitly_off() -> bool:
 
 _on_from_file = on  # the real reader (tests replace `on` and restore it)
 
-OFF_NOTICE = 'Harnessgram: mirroring is off ("mirror": false in the config); nothing was done.'
-PAIR_OFF_NOTICE = 'Harnessgram: the bridge is off; turn mirror on first ("mirror": true in the config).'
+OFF_NOTICE = 'HarnessGram: mirroring is off ("mirror": false in the config); nothing was done.'
+PAIR_OFF_NOTICE = 'HarnessGram: the bridge is off; turn mirror on first ("mirror": true in the config).'

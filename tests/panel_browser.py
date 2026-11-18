@@ -5,6 +5,7 @@ import json
 import os
 import pwd
 import sys
+import warnings
 from pathlib import Path
 
 STUB = r"""
@@ -65,9 +66,17 @@ def prepare_env():
 
 def launch(playwright):
     """A headless Chromium, or None when none is installed here."""
+    from playwright.sync_api import Error
+
     try:
         return playwright.chromium.launch()
-    except Exception:  # no browser binary on this machine
+    except Error as exc:
+        message = f"Headless Chromium could not start. See tests/README.md for setup.\n{exc}"
+        if os.environ.get("CTB_REQUIRE_BROWSER") == "1":
+            import pytest
+
+            pytest.fail(message, pytrace=False)
+        warnings.warn(message, stacklevel=2)
         return None
 
 

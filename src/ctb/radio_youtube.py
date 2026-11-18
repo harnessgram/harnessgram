@@ -63,7 +63,8 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 API = "https://www.googleapis.com/youtube/v3"
-STREAM_TITLE = "Harnessgram staff radio"   # the reusable ingest stream this radio owns (its title marks it)
+STREAM_TITLE = "Harnessgram staff radio"   # persisted identity of the reusable ingest stream this radio owns
+STREAM_TITLES = (STREAM_TITLE, "HarnessGram staff radio")
 MAX_HOURS = 11            # YouTube archives a stream only when it is shorter than 12 hours
 POLL = 30
 MAX_FAILURES = 5
@@ -343,48 +344,46 @@ def _locked():
         os.close(fd)
 
 
+@contextmanager
+def try_control_lock():
+    """Yield True while holding the start/stop lock, False at once if a start or stop holds it.
+    A radio restart takes it so no mirror can go live between its safety check and the restart."""
+    fd = os.open(str(folder() / "control.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
 # --- secrets (macOS Keychain) ------------------------------------------------------------------------
 
 class KeychainStore:
     """Generic passwords under one service. Values reach `security` on stdin only (`security -i`)."""
 
     def __init__(self, service: str = SERVICE, runner: Callable = subprocess.run):
-        self.service, self.run = service, runner
+        from .keychain import Keychain
+        self.service, self.run, self._store = service, runner, Keychain(runner)
 
     def get(self, name: str) -> Optional[str]:
-        try:
-            r = self.run(["security", "find-generic-password", "-s", self.service, "-a", name, "-w"],
-                         capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        value = (r.stdout or "").strip()
-        return value if r.returncode == 0 and value else None
+        return self._store.get((self.service, name))
 
     def has(self, name: str) -> bool:
         """Whether the item exists, without reading its secret."""
-        try:
-            return self.run(["security", "find-generic-password", "-s", self.service, "-a", name],
-                            capture_output=True, timeout=10, stdin=subprocess.DEVNULL).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            return False
+        return self._store.has((self.service, name))
 
     def set(self, name: str, value: str) -> None:
         if not _SAFE_SECRET.fullmatch(value or ""):
             raise YouTubeError("youtube_secret_store_failed")
-        line = f'add-generic-password -U -s "{self.service}" -a "{name}" -w "{value}"\n'
-        try:
-            r = self.run(["security", "-i"], input=line, capture_output=True, text=True, timeout=15)
-        except (OSError, subprocess.SubprocessError):
-            raise YouTubeError("youtube_secret_store_failed") from None
-        if r.returncode or not self.has(name):
+        if not self._store.set((self.service, name), value, label=self.service):
             raise YouTubeError("youtube_secret_store_failed")
 
     def delete(self, name: str) -> None:
-        try:
-            self.run(["security", "delete-generic-password", "-s", self.service, "-a", name],
-                     capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        self._store.delete((self.service, name))
 
 
 # --- HTTP, OAuth and the YouTube Live API ----------------------------------------------------------
@@ -526,10 +525,11 @@ class YouTube:
     def find_stream(self) -> Optional[dict]:
         out = self._call("GET", "/liveStreams", {"part": "id,snippet,cdn,contentDetails", "mine": "true",
                                                  "maxResults": "50"})
-        for item in out.get("items") or []:
-            if (item.get("snippet") or {}).get("title") == STREAM_TITLE and \
-                    (item.get("contentDetails") or {}).get("isReusable") is True:
-                return item
+        reusable = {((item.get("snippet") or {}).get("title")): item for item in out.get("items") or []
+                    if (item.get("contentDetails") or {}).get("isReusable") is True}
+        for title in STREAM_TITLES:
+            if title in reusable:
+                return reusable[title]
         return None
 
     def insert_stream(self) -> dict:
@@ -1003,15 +1003,13 @@ def mirror_started() -> bool:
 
 
 def mirror_playlist() -> Path:
-    return radio.folder() / "hls" / "live.m3u8"
+    return radio.folder() / "public-hls" / "live.m3u8"
 
 
 def mirror_ready(cfg: Config) -> bool:
     """A live, local home feed, not a leftover playlist. Missing/off is a quiet wait, never publication."""
     if not radio.wanted() or not radio.settings(cfg)["radio_player"]:
         return False
-    if radio.private_audio_on():
-        return False  # home-only audio is on the air: the mirror holds, it never carries it
     try:
         path = mirror_playlist()
         if path.is_symlink() or path.parent.is_symlink() or not 0 <= time.time() - path.stat().st_mtime < 15:
@@ -1832,6 +1830,12 @@ class MirrorStation(StaffStation):
                 except Exception:
                     # No exception body or external response can reach the log (credentials stay in memory).
                     log("mirror: pipeline unavailable; retrying")
+                    # Restarting the home radio briefly retires or empties the input before its first atomic
+                    # playlist publication.  That is feed availability, not a broken YouTube encoder: the loop
+                    # head polls for a fresh feed (bounded by MIRROR_WAIT) without using the failure budget.
+                    if self.allowed() and not mirror_ready(self.cfg):
+                        self._status(pipeline="waiting", ffmpeg_pid=None)
+                        continue
                 count = self.note_failure()
                 self._status(pipeline="restarting", failures=count)
                 if count >= MAX_FAILURES:

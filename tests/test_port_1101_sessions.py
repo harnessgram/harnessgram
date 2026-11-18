@@ -307,6 +307,7 @@ def test_project_chosen_new_clean(tmp_path, bot, monkeypatch):
         worker.join(timeout=15)
 
     new_sess = next(call for call in tmux_calls if call[0] == "new-session")
+    assert new_sess[new_sess.index("-x"):new_sess.index("-x") + 4] == ("-x", "200", "-y", "60")
     full_cmd = new_sess[-1].split(GUARD_END, 1)[-1]  # the session's own line, after the launch preamble
     # one && chain, no -p: Claude never starts unless the new folder was made and entered
     assert "mkdir -p" not in full_cmd
@@ -320,7 +321,7 @@ def test_project_chosen_new_clean(tmp_path, bot, monkeypatch):
 def test_fixed_keyboard_layout():
     assert any(b["text"] == "🎚️ חשיבה" for row in M.KEYBOARD["keyboard"] for b in row)
     assert any(b["text"] == "🧠 מודל" for row in M.KEYBOARD["keyboard"] for b in row)
-    assert any(b["text"] == "🎚️ Thinking" for row in M.KEYBOARD_EN["keyboard"] for b in row)
+    assert any(b["text"] == "🎚️ Think" for row in M.KEYBOARD_EN["keyboard"] for b in row)
     assert any(b["text"] == "🧠 Model" for row in M.KEYBOARD_EN["keyboard"] for b in row)
 
     more = I.more_markup()
@@ -338,7 +339,7 @@ def test_live_keyboard_model_and_thinking_values(tmp_path):
 
     kb = M.live_keyboard("הקשר 10 אלף · Claude 20%", thread=501)
     all_texts = [b["text"] for row in kb["keyboard"] for b in row]
-    assert any("🧠 Sonnet 3.5" in t for t in all_texts)
+    assert "🧠 Sonnet" in all_texts
     assert any("🎚️ גבוהה" in t for t in all_texts)
 
 
@@ -355,8 +356,8 @@ def test_live_keyboard_account_button(tmp_path, monkeypatch):
     info_row = kb["keyboard"][0]
     acct_btn = next((b for b in info_row if b["text"].startswith("👤 ")), None)
     assert acct_btn is not None
-    # 👤 superdeve… (truncated to 10 chars with ellipsis)
-    assert len(acct_btn["text"][2:]) <= 10
+    assert acct_btn["text"] == "👤 super-a"
+    assert len(M.graphemes(acct_btn["text"])) <= M.KEYBOARD_LABEL_MAX
 
 
 def test_live_keyboard_quota_short_footer():

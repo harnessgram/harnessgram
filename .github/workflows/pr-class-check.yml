@@ -1,0 +1,28 @@
+name: PR CI class check
+# Light, hosted-runner check for edits to a pull request description. `edited`
+# was removed from tests.yml because every title/body edit cancelled the heavy
+# run on the shared self-hosted runner (29 of 35 runs cancelled, 8 timeouts).
+# This job only validates the "CI class: ..." line, needs no checkout, and never
+# touches the self-hosted fleet. The heavy tests re-run on the next push.
+on:
+  pull_request:
+    types: [edited]
+permissions: {}
+concurrency:
+  group: pr-class-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  class:
+    # Only body edits on ready PRs matter; title edits and drafts do nothing.
+    if: ${{ !github.event.pull_request.draft && github.event.changes.body != null }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require a CI class and rationale
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! printf '%s\n' "$PR_BODY" | grep -Eq '^CI class:[[:space:]]*(Low|Medium|High)[[:space:]]*([-—:]|\()[[:space:]]*[^[:space:]].+'; then
+            echo 'Ready pull requests need "CI class: Low / Medium / High — <one-sentence reason>".' >&2
+            exit 1
+          fi

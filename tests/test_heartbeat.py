@@ -11,6 +11,13 @@ def cfg(translate=True):
                   engines=["gemini", "google", "mlx", "nllb"])
 
 
+def test_live_activity_drain_failure_is_reported(monkeypatch, capsys):
+    from ctb import apns
+    monkeypatch.setattr(apns, "drain", lambda *args: (_ for _ in ()).throw(RuntimeError("offline")))
+    H._drain_live_activity(cfg(), 100)
+    assert "live activity drain failed: offline" in capsys.readouterr().err
+
+
 def test_hebrew_status_and_caching(monkeypatch):
     H.WORDS.clear()
     monkeypatch.setattr("ctb.translate.ask", lambda prompt, c: "דועך")
@@ -223,3 +230,17 @@ def test_working_pane_without_spinner_falls_back_to_transcript(monkeypatch):
 
     monkeypatch.setattr(H, "last_activity", lambda path: 920.0)  # 80s ago > ACTIVE (45s)
     assert H.working("sess-1", now=now, find=lambda sid: "/fake/transcript.jsonl") is False
+
+
+def test_heartbeat_drains_live_activity_without_the_app_or_telegram(monkeypatch):
+    # The lock screen updates while the phone app is closed: every heartbeat round drains the queue,
+    # even before Telegram is configured, and a failing optional step never skips it.
+    from ctb import apns, auto_cards, radio_upgrade
+    drained = []
+    monkeypatch.setattr(apns, "drain", lambda c, now: drained.append(now))
+    monkeypatch.setattr(auto_cards, "start", lambda *a: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(H, "_check_funnel", lambda *a: None)
+    monkeypatch.setattr(radio_upgrade, "check", lambda *a: None)
+    assert H.run_once(Config(), now=100) == 0
+    assert H.run_once(Config(), now=105) == 0
+    assert drained == [100, 105]

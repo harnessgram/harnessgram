@@ -210,10 +210,10 @@ def run(action: str, name: str = "", n: int = 0, expires: str = "") -> int:
         elif action == "expire":
             set_expiry(name.lower(), None if expires.lower() == "none" else expires)
         elif action == "forget" and not forget(name.lower()):
-            print(f"Harnessgram: no saved count for {name}", file=sys.stderr)
+            print(f"HarnessGram: no saved count for {name}", file=sys.stderr)
             return 1
     except (ValueError, TimeoutError) as e:
-        print(f"Harnessgram: {e}", file=sys.stderr)
+        print(f"HarnessGram: {e}", file=sys.stderr)
         return 1
     rows = [f"{label(r['name'])}: {'not set' if r['n'] is None else r['n']}{when(r['expires'], r['days'])}"
             for r in view()]

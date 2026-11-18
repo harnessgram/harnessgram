@@ -9,11 +9,11 @@ from ctb import hooks, inbox, revive
 from conftest import GOOD_TOKEN
 from ctb.config import Config
 
-HOSTILE = 'it\'s "quoted" $(touch /tmp/pwned) `id` ; & | > x\nsecond line \\ [Harnessgram: y] -- --flag'
+HOSTILE = 'it\'s "quoted" $(touch /tmp/pwned) `id` ; & | > x\nsecond line \\ [HarnessGram: y] -- --flag'
 
 
 def test_wake_text_is_a_harnessgram_bracket():
-    assert revive.WAKE_TEXT.startswith("[Harnessgram: ") and revive.WAKE_TEXT.endswith("]")
+    assert revive.WAKE_TEXT.startswith("[HarnessGram: ") and revive.WAKE_TEXT.endswith("]")
     assert "continue" in revive.WAKE_TEXT and "Do not redo" in revive.WAKE_TEXT
 
 

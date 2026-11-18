@@ -66,10 +66,15 @@ def test_many_tool_calls_or_a_background_task_make_a_long_task_before_the_clock(
     assert hooks.launches_background({"tool_name": "Bash", "tool_input": {"command": "x", "run_in_background": True}})
 
 
-def test_a_live_card_of_its_own_suppresses_the_reminder_but_an_automatic_one_does_not():
+def test_fresh_auto_cards_replace_card_commands_with_a_task_list_reminder():
     hooks.turn_started(S, now=1000.0, background=1)
     cards.sync_auto(S, -100, 7, "Topic", [{"content": "step", "status": "in_progress"}], now=1000.0)
-    assert hooks.progress_nudge(S, now=1001.0) == hooks.PROGRESS_NUDGE    # the bridge's card is not the agent's
+    reminder = hooks.progress_nudge(S, now=1001.0)
+    assert reminder == hooks.TASK_LIST_NUDGE
+    assert "TaskCreate/TaskUpdate" in reminder and "TodoWrite" in reminder
+    assert "ctb card progress" not in reminder and "\n" not in reminder
+    assert hooks.progress_nudge(S, now=1002.0) == ""  # the replacement nudge is rate limited too
+    assert hooks.progress_nudge(S, now=1001.0 + hooks.PROGRESS_EVERY) == hooks.PROGRESS_NUDGE
     other = "a1b2c3d4-0000-4000-8000-000000000002"
     hooks.turn_started(other, now=1000.0, background=1)
     cards.publish(other, -100, 8, "progress", "Build", steps=["a", "b"], at=0, percent=5, now=1000.0)

@@ -19,6 +19,7 @@ import hashlib
 import re
 import threading
 import time
+import unicodedata
 from typing import Callable, Dict, Optional
 
 from . import lang as L
@@ -29,10 +30,35 @@ WORKERS = 2
 MEMO = 600  # translations kept in memory (also covers translate_cache off)
 QUEUE = 200  # texts waiting at most; more are asked again on a later refresh
 RETRY_AFTER = 600  # seconds before a text whose translation failed is tried again
-MAX_CHARS = 1600  # a decision detail is at most 1500
+MAX_CHARS = 1600  # maximum per engine call, never a reason to drop a field
 
 
-_WORD = re.compile(r"\b[A-Za-z]{2,}\b")
+# Names explicitly preserved by translate.HEBREW_STYLE.
+_PROTECTED_NAMES = {"Codex", "Claude", "GitHub", "Gemini", "main"}
+
+
+def _needs_translation(text: str) -> bool:
+    # A Hebrew majority must not hide English sentences in the same field. Ignore
+    # code/URLs/paths and bare hashes, but support non-Latin source languages too.
+    prose = L.strip_noise(text)
+    if re.fullmatch(r"\s*[a-fA-F0-9]{7,64}\s*", prose):
+        return False
+    return any(unicodedata.category(c).startswith("L") and not "\u0590" <= c <= "\u05ff"
+               for c in prose)
+
+
+def _pieces(text: str):
+    """Bound requests without losing whitespace, paragraphs or an unbroken word."""
+    while len(text) > MAX_CHARS:
+        # Prefer a paragraph/word boundary, with a hard cut for long tokens.
+        cut = text.rfind("\n", 0, MAX_CHARS + 1)
+        if cut < MAX_CHARS // 2:
+            cut = text.rfind(" ", 0, MAX_CHARS + 1)
+        cut = cut if cut >= MAX_CHARS // 2 else MAX_CHARS
+        yield text[:cut]
+        text = text[cut:]
+    if text:
+        yield text
 
 
 def _key(text: str) -> str:
@@ -76,9 +102,9 @@ class Translator:
     # --- reading -------------------------------------------------------------------------------
 
     def he(self, text) -> Optional[str]:
-        if not self.enabled or not isinstance(text, str) or not text.strip() or len(text) > MAX_CHARS:
+        if not self.enabled or not isinstance(text, str) or not text.strip():
             return ""
-        if not L.needs_translation(text, "he") or not _WORD.search(text):
+        if not _needs_translation(text):
             return ""  # already Hebrew, or only ids and numbers (a commit hash is not English)
         key = _key(text)
         with self._lock:
@@ -141,9 +167,25 @@ class Translator:
             self._wake.notify()
 
     def _translate(self, text: str) -> str:
-        if self._fn is not None:
-            return self._fn(text)
-        return translate.translate_text(text, self.cfg)
+        done = []
+        changed = False
+        for piece in _pieces(text):
+            if not _needs_translation(piece):
+                done.append(piece)
+                continue
+            out = self._fn(piece) if self._fn is not None else translate.translate_text(piece, self.cfg)
+            # Do not cache a partly translated field as success: a failed piece
+            # must go through the normal retry policy on a subsequent refresh.
+            if not out or not out.strip():
+                return ""
+            if out.strip() == piece.strip():
+                done.append(piece)
+                continue
+            changed = True
+            leading = piece[:len(piece) - len(piece.lstrip())]
+            trailing = piece[len(piece.rstrip()):]
+            done.append(leading + out.strip() + trailing)
+        return "".join(done) if changed or text.strip() in _PROTECTED_NAMES else ""
 
     def _work(self) -> None:
         while True:
@@ -159,7 +201,7 @@ class Translator:
                 out = (self._translate(text) or "").strip()
             except Exception:
                 out = ""
-            if out and out != text.strip():
+            if out and (out != text.strip() or text.strip() in _PROTECTED_NAMES):
                 self._remember(key, out)
             else:
                 with self._lock:

@@ -41,7 +41,6 @@ import json
 import logging
 import re
 import secrets
-import subprocess
 import threading
 import time
 import urllib.error
@@ -51,6 +50,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import schedule
+from .keychain import Keychain
 
 log = logging.getLogger("ctb.google_calendar")
 
@@ -125,49 +125,6 @@ def settings(cfg) -> Optional[dict]:
 
 def redirect_uri(base: str) -> str:
     return base.rstrip("/") + CALLBACK_PATH
-
-
-# --- the macOS Keychain ---------------------------------------------------------------------------------------------
-
-class Keychain:
-    """Generic passwords, each named by (service, account). A secret reaches `security` on stdin only."""
-
-    def __init__(self, runner: Callable = subprocess.run):
-        self.run = runner
-
-    def get(self, item: Tuple[str, str]) -> Optional[str]:
-        try:
-            r = self.run(["security", "find-generic-password", "-s", item[0], "-a", item[1], "-w"],
-                         capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        value = (r.stdout or "").strip()
-        return value if r.returncode == 0 and value else None
-
-    def has(self, item: Tuple[str, str]) -> bool:
-        """Whether the item exists, without reading its secret."""
-        try:
-            return self.run(["security", "find-generic-password", "-s", item[0], "-a", item[1]],
-                            capture_output=True, timeout=10, stdin=subprocess.DEVNULL).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            return False
-
-    def set(self, item: Tuple[str, str], value: str) -> bool:
-        if not _SECRET.fullmatch(value or "") or not all(_ITEM.fullmatch(v) for v in item):
-            return False
-        line = f'add-generic-password -U -s "{item[0]}" -a "{item[1]}" -w "{value}"\n'
-        try:
-            r = self.run(["security", "-i"], input=line, capture_output=True, text=True, timeout=15)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return r.returncode == 0 and self.has(item)
-
-    def delete(self, item: Tuple[str, str]) -> None:
-        try:
-            self.run(["security", "delete-generic-password", "-s", item[0], "-a", item[1]],
-                     capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError):
-            pass
 
 
 def http(method: str, url: str, form: Optional[dict] = None, token: str = "",
@@ -504,8 +461,19 @@ def map_events(items, cfg, first: date, last: date) -> List[schedule.Event]:
                     day += timedelta(days=1)
             elif isinstance(start.get("dateTime"), str):
                 local = _moment(start["dateTime"], start.get("timeZone"), tz).astimezone(tz)
-                if first <= local.date() <= last:
-                    out.append(schedule.Event(title, local.date().isoformat(), local.strftime("%H:%M")))
+                start_utc = local.astimezone(timezone.utc)
+                finish = (_moment(end["dateTime"], end.get("timeZone"), tz).astimezone(tz)
+                          if isinstance(end, dict) and isinstance(end.get("dateTime"), str)
+                          else (start_utc + timedelta(hours=1)).astimezone(tz))
+                finish_utc = finish.astimezone(timezone.utc)
+                if finish_utc <= start_utc or (finish_utc - start_utc).days > MAX_SPAN_DAYS:
+                    continue
+                day = max(first, local.date())
+                while day <= last and day <= finish.date():
+                    beginning = local if day == local.date() else datetime.combine(day, datetime.min.time(), tzinfo=tz)
+                    if beginning.astimezone(timezone.utc) < finish_utc:
+                        out.append(schedule.Event(title, day.isoformat(), beginning.strftime("%H:%M"), finish, beginning))
+                    day += timedelta(days=1)
         except (ValueError, TypeError, KeyError, OverflowError):
             continue
     return out

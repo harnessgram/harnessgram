@@ -1,6 +1,7 @@
 """The radio's voice: text to 48 kHz mono 16-bit PCM.
 
-Route 1, Gemini TTS on Vertex (the config's gemini_vertex_project and gemini_token_command, the same
+The default route is the configured offline engine, with the system voice as its fallback. Cloud mode is an
+explicit opt-in. Its first route is Gemini TTS on Vertex (the config's gemini_vertex_project and token command, the same
 credentials the translator uses): billed speech, so every clip is cached on disk by its exact text, model, voice
 and style, and a daily cap (radio.tts_daily_minutes) stops it for the rest of the day.
 
@@ -12,8 +13,9 @@ requests, and text that does not fit what is left of the day goes to the free vo
 the reservation is settled to what was actually billed (the response's audio token count, or the audio length,
 whichever is more); a request whose outcome is unknown (a timeout, a broken response) keeps its whole
 reservation and blocks further paid requests that day. Only a provider-enforced billing limit can provide an absolute ceiling (docs/radio.md).
-Route 2, the system voice (macOS `say`, a Hebrew voice such as Carmit): local and free; used when Vertex is not
-configured, fails, or the cap is reached.
+The next cloud routes are Google Cloud TTS Chirp3-HD and WaveNet, with deliberately lower hard monthly character
+caps in a separate locked ledger. A failed or capped cloud request falls back to the offline engine and then the
+system voice (macOS `say`, a Hebrew voice such as Carmit).
 Credentials go only into a request header; nothing secret is logged.
 """
 from __future__ import annotations
@@ -54,6 +56,7 @@ RESERVE_FACTOR, RESERVE_EXTRA = 2.0, 5.0   # seconds reserved per request: estim
 MIN_RESERVE_FACTOR = 1.3                   # ... or what is left today, when that still covers 1.3 x the estimate
 DEFAULT_STYLE = ("A warm, calm adult male radio host giving a short team status update: clear, friendly, a natural "
                  "conversational pace, short pauses between sentences, natural intonation, never shouting.")
+_local_busy = threading.Lock()
 
 
 def seconds_of(pcm: bytes) -> float:
@@ -204,7 +207,11 @@ class Usage:
         return cap_minutes > 0 and self.today(now) + seconds <= cap_minutes * 60
 
     def _left(self, data: dict, day: str, cap_minutes: float, room_cap_minutes: Optional[float]) -> Optional[float]:
-        """Seconds that may still be reserved now, or None when paid speech is blocked (same rules as reserve)."""
+        """Seconds that may still be reserved now, or None when paid speech is blocked (same rules as reserve).
+
+        ``pending`` is deliberately not scoped to ``day``: midnight resets settled daily usage, but cannot make
+        an earlier request with an unknown billing outcome safe to overlap with a new paid request.
+        """
         if cap_minutes <= 0 or (self.room and (room_cap_minutes is None or room_cap_minutes <= 0)):
             return None
         if (data.get("unreadable") or data["blocked"] or
@@ -226,7 +233,8 @@ class Usage:
             return self._left(self._ledger(), self._day(now), cap_minutes, room_cap_minutes)
 
     def reserve(self, estimate: float, cap_minutes: float, now: Optional[float] = None,
-                room_cap_minutes: Optional[float] = None) -> Optional[Tuple[float, str, str]]:
+                room_cap_minutes: Optional[float] = None, *,
+                max_seconds: Optional[float] = None) -> Optional[Tuple[float, str, str]]:
         """Reserve against the shared cap AND, for room speech, its sub-cap, under one lock."""
         if cap_minutes <= 0 or (self.room and (room_cap_minutes is None or room_cap_minutes <= 0)):
             return None
@@ -237,6 +245,8 @@ class Usage:
             if left is None:
                 return None
             want = min(estimate * RESERVE_FACTOR + RESERVE_EXTRA, left)
+            if max_seconds is not None:
+                want = min(want, max_seconds)
             # Only reserve whole audio tokens, rounding down so the request fits BOTH remaining totals.
             want = math.floor(want * AUDIO_TOKENS_PER_SECOND) / AUDIO_TOKENS_PER_SECOND
             if want < estimate * MIN_RESERVE_FACTOR or want <= 0:
@@ -269,6 +279,128 @@ class Usage:
 def paid_usage(directory: Path) -> Usage:
     """The shared ledger, including usage recorded by the room before the shared-budget upgrade."""
     return Usage(directory / "tts-usage.json", legacy_room=directory / "room" / "tts-usage.json")
+
+
+class NewsUsage:
+    """Reserve news speech against both the station total and its own small ledger."""
+    room = True
+
+    def __init__(self, shared: Usage, news: Usage):
+        self.shared, self.news, self.path = shared, news, shared.path
+        self._reservations = {}
+
+    def today(self, now=None):
+        return self.news.today(now)
+
+    def available(self, cap_minutes, now=None, room_cap_minutes=None):
+        total = self.shared.available(cap_minutes, now)
+        news = self.news.available(room_cap_minutes or 0, now)
+        return None if total is None or news is None else min(total, news)
+
+    def reserve(self, estimate, cap_minutes, now=None, room_cap_minutes=None):
+        news = self.news.reserve(estimate, room_cap_minutes or 0, now)
+        if news is None:
+            return None
+        shared = None
+        keep = False
+        try:
+            shared = self.shared.reserve(estimate, cap_minutes, now, max_seconds=news[0])
+            if shared is None:
+                return None
+            nonce = uuid.uuid4().hex
+            seconds = min(shared[0], news[0])
+            self._reservations[nonce] = (shared, news)
+            keep = True
+            return seconds, shared[1], nonce
+        finally:
+            if not keep:
+                if shared is not None:
+                    self.shared.settle(shared, 0, now)
+                self.news.settle(news, 0, now)
+
+    def settle(self, reserved, billed, now=None, *, overrun=False):
+        pair = self._reservations.pop(reserved[2], None)
+        if pair is None:
+            return
+        shared, news = pair
+        try:
+            self.shared.settle(shared, billed, now, overrun=overrun)
+        finally:
+            self.news.settle(news, billed, now, overrun=overrun)
+
+
+FREE_TTS_CAPS = {"chirp": 900_000, "wavenet": 3_800_000}
+
+
+class FreeUsage:
+    """Locked UTC-month character ledger for the two Cloud TTS free tiers.
+
+    Characters are reserved permanently before a request. This is intentionally conservative: a timeout cannot
+    make a later request cross the hard local ceiling. Any malformed existing ledger is left untouched and makes
+    both tiers unavailable.
+    """
+
+    KEEP_MONTHS = 14
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    @staticmethod
+    def _month(now: Optional[float]) -> str:
+        return time.strftime("%Y-%m", time.gmtime(now))
+
+    @contextlib.contextmanager
+    def _locked(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(self.path) + ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    def _read(self) -> Optional[dict]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"months": {}}
+        except (OSError, ValueError, RecursionError):
+            return None
+        try:
+            months = data["months"]
+            if set(data) != {"months"} or not isinstance(months, dict):
+                raise ValueError
+            for month, used in months.items():
+                if (not isinstance(month, str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month) or
+                        not isinstance(used, dict) or set(used) - set(FREE_TTS_CAPS)):
+                    raise ValueError
+                if any(type(value) is not int or value < 0 or value > FREE_TTS_CAPS[tier]
+                       for tier, value in used.items()):
+                    raise ValueError
+        except (KeyError, TypeError, ValueError):
+            return None
+        return data
+
+    def reserve(self, tier: str, characters: int, now: Optional[float] = None) -> bool:
+        if tier not in FREE_TTS_CAPS or type(characters) is not int or characters <= 0:
+            return False
+        with self._locked():
+            data = self._read()
+            if data is None:
+                return False
+            month = self._month(time.time() if now is None else now)
+            months = data["months"]
+            if months and month < max(months):
+                return False
+            used = months.setdefault(month, {})
+            if used.get(tier, 0) + characters > FREE_TTS_CAPS[tier]:
+                return False
+            used[tier] = used.get(tier, 0) + characters
+            data["months"] = dict(sorted(months.items())[-self.KEEP_MONTHS:])
+            write_private(self.path, json.dumps(data))
+            return True
+
+
+def free_usage(directory: Path) -> FreeUsage:
+    """The free-tier ledger lives beside, but never inside, the paid-speech ledger."""
+    return FreeUsage(directory / "tts-free-usage.json")
 
 
 TOKEN_TIMEOUT = 90.0     # gcloud can take 20-40 s to print a token on a loaded Mac (17 s measured at load 36)
@@ -321,6 +453,45 @@ def access_token(cfg: Config, why: Optional[list] = None) -> str:
 def forget_token(cfg: Config) -> None:
     with _tokens_lock:
         _tokens.pop(tuple(cfg.gemini_token_command or ()), None)
+
+
+def cloud_tts(text: str, cfg: Config, voice: str, timeout: float = 120.0,
+              why: Optional[list] = None) -> bytes:
+    """Google Cloud Text-to-Speech v1 -> 48 kHz mono PCM, using the Vertex project's credentials."""
+    from .creds import for_outside
+    project = cfg.gemini_vertex_project or ""
+    if not project:
+        _why(why, "no gemini_vertex_project configured")
+        return b""
+    token = access_token(cfg, why)
+    if not token:
+        return b""
+    body = {"input": {"text": for_outside(text, getattr(cfg, "redact_outgoing", True))},
+            "voice": {"languageCode": "he-IL", "name": voice},
+            "audioConfig": {"audioEncoding": "LINEAR16"}}
+    req = urllib.request.Request(
+        "https://texttospeech.googleapis.com/v1/text:synthesize",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + token,
+                 "x-goog-user-project": project},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.load(resp)
+        raw = base64.b64decode(result["audioContent"], validate=True)
+    except urllib.error.HTTPError as e:
+        _why(why, f"Cloud TTS {voice} returned HTTP {e.code}")
+        if e.code == 401:
+            forget_token(cfg)
+        e.close()
+        return b""
+    except Exception as e:
+        _why(why, f"Cloud TTS {voice} failed ({e.__class__.__name__})")
+        return b""
+    pcm = to_pcm(raw, [])
+    if not pcm:
+        _why(why, f"Cloud TTS {voice} audio could not be converted")
+    return pcm
 
 
 # Models that refused maxOutputTokens (remembered while the process runs): they are asked without it, and the
@@ -475,7 +646,8 @@ def clean_for_voice(text: str) -> str:
     return for_outside(for_voice(for_outside(strip_invisible(text))))
 
 
-def spoken_log(path: Path, route: str, text: str, now: Optional[float] = None) -> None:
+def spoken_log(path: Path, route: str, text: str, now: Optional[float] = None,
+               length: Optional[int] = None) -> None:
     """One private line per spoken text, exactly as the voice was given it (after `for_voice`, through the one
     outbound sanitizer, so no credential or owner-only link): the next "it cut a word" report can be matched
     against what was really fed in. Rotated and size-capped; never raises."""
@@ -487,7 +659,10 @@ def spoken_log(path: Path, route: str, text: str, now: Optional[float] = None) -
             path.replace(path.with_name(path.name + ".1"))
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
-            f.write(f"{stamp} [{route or '-'}] {len(line)} chars: {line}\n")
+            if length is None:
+                f.write(f"{stamp} [{route or '-'}] {len(line)} chars: {line}\n")
+            else:
+                f.write(f"{stamp} [{route or '-'}] {length} chars\n")
         os.chmod(path, 0o600)
     except Exception:  # noqa: BLE001 - a log line must never stop the radio
         pass
@@ -533,6 +708,61 @@ def _cache_put(path: Path, pcm: bytes) -> None:
         tmp.replace(path)
     except OSError:
         pass
+
+
+def _local(text: str, cfg: Config, cache: Path) -> bytes:
+    """Run the configured offline engine sentence-by-sentence and return radio PCM.
+
+    The shared engine runner suppresses all child output, owns the process group, enforces its timeout, and accepts
+    only OggS output. The lock keeps this CPU-heavy engine to one synthesis at a time across radio callers.
+    """
+    from .listen import run_engine
+    engine = list(getattr(cfg, "tts_command", None) or [])
+    voice = getattr(cfg, "tts_voice", "") or ""
+    if not engine:
+        return b""
+    key = json.dumps(engine, ensure_ascii=False, separators=(",", ":"))
+    whole = cache / f"{_cache_key('local', key, voice, text)}.pcm"
+    try:
+        hit = whole.read_bytes()
+        if hit:
+            return hit
+    except OSError:
+        pass
+    with _local_busy:
+        # Another caller may have filled it while this caller waited.
+        try:
+            hit = whole.read_bytes()
+            if hit:
+                return hit
+        except OSError:
+            pass
+        parts = []
+        for piece in split_text(text):
+            path = cache / f"{_cache_key('local', key, voice, piece)}.pcm"
+            try:
+                pcm = path.read_bytes()
+            except OSError:
+                pcm = b""
+            if not pcm:
+                ogg = run_engine(cfg, piece)
+                pcm = to_pcm(ogg, []) if ogg else b""
+                if not pcm:
+                    return b""
+                _cache_put(path, pcm)
+            parts.append(pcm)
+        pcm = b"".join(parts)
+        if pcm:
+            _cache_put(whole, pcm)
+        return pcm
+
+
+def _local_or_system(text: str, cfg: Config, settings: dict, cache: Path) -> Tuple[bytes, str]:
+    pcm = _local(text, cfg, cache)
+    if pcm:
+        return pcm, "local"
+    pcm = system_voice(text, settings.get("say_voice", ""))
+    return (pcm, "say") if pcm else (b"", "")
 
 
 def _paid_piece(piece: str, cfg: Config, settings: dict, cache: Path, usage: Usage, now: Optional[float],
@@ -586,7 +816,7 @@ def _paid_piece(piece: str, cfg: Config, settings: dict, cache: Path, usage: Usa
 
 def speak(text: str, cfg: Config, settings: dict, cache: Path, usage: Usage,
           now: Optional[float] = None) -> Tuple[bytes, str]:
-    """(PCM, route) with route "cache", "vertex", "say" or "" when nothing could speak. Why the paid voice was
+    """(PCM, route) with route "local", "cache", "vertex", "chirp", "wavenet", "say" or "" when nothing could speak. Why the paid voice was
     not used is kept in `last_reason` (for the log; never a secret).
 
     The paid voice is length-controlled by the text: it is split into requests of at most MAX_REQUEST_SECONDS of
@@ -597,10 +827,11 @@ def speak(text: str, cfg: Config, settings: dict, cache: Path, usage: Usage,
     last_reason, last_cap_out = "", False
     why: list = []
     text = clean_for_voice(text)  # the voice reads the text verbatim: no symbols or unsayable Latin tokens reach it
+    if settings.get("voice_route", "local") != "cloud":
+        return _local_or_system(text, cfg, settings, cache)
     if settings.get("tts_force_system"):
-        last_reason = "no listener detected; using the free system voice"
-        pcm = system_voice(text, settings.get("say_voice", ""))
-        return (pcm, "say") if pcm else (b"", "")
+        last_reason = "no listener detected; using a local voice"
+        return _local_or_system(text, cfg, settings, cache)
     model, voice = settings["tts_model"], settings["voice"]
     style = settings.get("style") or DEFAULT_STYLE
     path = cache / f"{_cache_key(model, voice, style, text)}.pcm"
@@ -642,8 +873,21 @@ def speak(text: str, cfg: Config, settings: dict, cache: Path, usage: Usage,
             _cache_put(path, paid)
         return paid, "vertex"
     last_reason = "; ".join(why) or "the paid voice gave no audio"
-    pcm = system_voice(text, settings.get("say_voice", ""))
-    return (pcm, "say") if pcm else (b"", "")
+    ledger = free_usage(usage.path.parent)
+    radio_voice = settings.get("voice") or "Sadaltager"
+    free_routes = (("chirp", f"he-IL-Chirp3-HD-{radio_voice}"), ("wavenet", "he-IL-Wavenet-B"))
+    # Do not consume the local allowance when credentials are known to be unavailable.
+    for tier, cloud_voice in free_routes if cfg.gemini_vertex_project and cfg.gemini_token_command else ():
+        try:
+            allowed = ledger.reserve(tier, len(text), now)
+        except OSError:
+            allowed = False
+        if not allowed:
+            continue
+        pcm = cloud_tts(text, cfg, cloud_voice, why=why)
+        if pcm:
+            return pcm, tier
+    return _local_or_system(text, cfg, settings, cache)
 
 
 last_reason = ""

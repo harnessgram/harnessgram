@@ -5,18 +5,24 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot
+from conftest import GOOD_TOKEN, FakeBot, signed_in
 from ctb import accounts, inbox as I, recover, statusline, usage
 from ctb.config import Config, state_dir, write_private
 from ctb.topics import TopicMap
 
 SID = "sess-truth-1"
 NOW = 2_000_000.0
+
+
+@pytest.fixture(autouse=True)
+def finished_logins(isolated):
+    signed_in("main", "small", "spare", "a", "b", "c", "other", "dflt")
 
 
 def cfg():
@@ -51,6 +57,7 @@ class StuckPane:
 @pytest.fixture
 def stuck(monkeypatch):
     accounts.add("small")
+    accounts.add("spare")
     accounts.record(SID, "main")
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "pane_for_session", lambda s: "%1")
@@ -110,10 +117,16 @@ def test_background_work_on_screen_stops_a_limit_move_before_any_key_is_typed(st
     assert "/exit" in stuck.keys()
 
 
-def test_a_manual_move_that_is_refused_posts_one_message(stuck):
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_a_manual_move_that_is_refused_is_saved_for_retry(stuck, monkeypatch, confirmed):
+    monkeypatch.setattr(I, "session_busy", lambda s: confirmed)
+    monkeypatch.setattr(usage, "limit_of", lambda s: None)
     said = Said()
-    assert I.account_move(cfg(), FakeBot(), SID, "small", said) is False
-    assert len(said) == 1 and accounts.deferred_move(SID) is None
+    I.account_command(cfg(), FakeBot(), {"message_thread_id": 5}, SID,
+                      "move small" + (" now" if confirmed else ""), said)
+    wait = accounts.deferred_move(SID)
+    assert len(said) == 1 and wait["manual"] is True and wait["target"] == "small"
+    assert accounts.account_for(SID) == "main" and not marker().exists()
 
 
 def test_the_limit_loop_retries_a_deferred_move_when_quiet_and_not_more_than_once_a_minute(bot, monkeypatch):
@@ -193,8 +206,9 @@ def test_two_accounts_do_not_end_up_with_identical_numbers():
 
 # --- 3b/4. unknown 5-hour reset, exhausted group ---------------------------------------------------
 
-def write_usage(name, five, five_reset, weekly=10, weekly_reset=NOW + 86400):
-    data = {"five_hour": five, "weekly": weekly, "weekly_resets": weekly_reset, "at": "2026-11-01T00:00:00Z"}
+def write_usage(name, five, five_reset, weekly=10, weekly_reset=NOW + 86400, now=NOW):
+    data = {"five_hour": five, "weekly": weekly, "weekly_resets": weekly_reset,
+            "at": datetime.fromtimestamp(now, timezone.utc).isoformat()}
     if five_reset is not None:
         data["five_hour_resets"] = five_reset
     write_private(accounts.usage_path(name), json.dumps(data))
@@ -218,17 +232,17 @@ def test_accounts_that_ran_out_together_are_one_group():
     accounts.record(SID, "main")
     reset = NOW + 3600
     write_usage("main", 100, reset)
-    write_usage("b", 30, reset)                                     # looks free, but shares main's reset
-    write_usage("c", 30, NOW + 7200)
+    write_usage("b", 30, reset, now=NOW + 70)                        # looks free, but shares main's reset
+    write_usage("c", 30, NOW + 7200, now=NOW + 70)
     accounts.note_limit("main", NOW)
     accounts.note_limit("b", NOW + 3)
     accounts.note_limit("c", NOW + 3)
-    plan = accounts.fallback_plan(SID, NOW + 5)
+    plan = accounts.fallback_plan(SID, NOW + 70)
     assert "b" not in plan["fresh"] and plan["fresh"] == ["c"]
     # limits hit minutes apart are not a group
     accounts.note_limit("b", NOW - 600)
     write_usage("b", 40, reset)
-    assert "b" in accounts.fallback_plan(SID, NOW + 5)["fresh"]
+    assert "b" in accounts.fallback_plan(SID, NOW + 70)["fresh"]
 
 
 # --- 4. the announcement does not race the move ----------------------------------------------------
@@ -449,8 +463,8 @@ def test_grouping_needs_a_reset_still_in_the_future():
     accounts.record(SID, "main")
     write_usage("main", 100, NOW - 10)
     write_usage("b", 30, NOW - 10)
-    accounts.note_limit("main", NOW)
-    accounts.note_limit("b", NOW + 2)
+    accounts.note_limit("main", NOW - 30)
+    accounts.note_limit("b", NOW - 28)
     assert "b" in accounts.fallback_plan(SID, NOW + 5)["fresh"]
 
 
@@ -462,12 +476,17 @@ def test_the_limit_offer_notes_this_limit_before_it_groups_accounts(bot, monkeyp
     accounts.record(SID, "main")
     TopicMap(state_dir() / "topics.json", bot, 7).ensure(SID, "T")
     reset = _t.time() + 3600
-    write_usage("main", 100, reset)
-    write_usage("b", 30, reset)                                     # shares main's reset and was noted just now
-    write_usage("c", 30, reset + 3600)
+    write_usage("main", 100, reset, now=_t.time())
+    write_usage("b", 30, reset, now=_t.time())                       # shares main's reset and was noted just now
+    write_usage("c", 30, reset + 3600, now=_t.time())
     accounts.note_limit("b")
     spawned = []
-    assert mirror.limit_offer(cfg(), bot, SID, "You've hit your usage limit", spawn_fn=spawned.append)
+    # Exercise a real StopFailure signal: unverified assistant prose must not
+    # exhaust a fresh session's account or trigger a switch.
+    assert not mirror.limit_offer(cfg(), bot, SID, "You've hit your usage limit", spawn_fn=spawned.append)
+    assert not spawned
+    assert mirror.limit_offer(cfg(), bot, SID, "You've hit your usage limit", spawn_fn=spawned.append,
+                              api_error=True)
     assert spawned and "--target=c" in spawned[0][-1]
 
 
@@ -830,13 +849,10 @@ def test_the_limit_check_passes_the_pid_read_before_exit_to_the_pane_check(monke
 
 def test_a_plain_window_is_this_sessions_by_the_pid_read_earlier(monkeypatch):
     def tmux(*args):
-        return SimpleNamespace(returncode=0, stdout="900 work\n")  # pane process 900, not a bridge window
-
-    def run(cmd, **kw):
-        return SimpleNamespace(stdout="900\n" if "4242" in cmd else "1\n", returncode=0)  # parent of 4242 is 900
+        return SimpleNamespace(returncode=0, stdout="900\n")  # pane process 900, not a bridge window
 
     monkeypatch.setattr(I, "_tmux", tmux)
-    monkeypatch.setattr(I.subprocess, "run", run)
+    monkeypatch.setattr(I, "_pane_claude_targets", lambda pane: [(4242, "start")])
     monkeypatch.setattr(I, "session_pid", lambda s: None)
     assert I.pane_runs_session("%1", SID) is False
     assert I.pane_runs_session("%1", SID, known_pid=4242) is True

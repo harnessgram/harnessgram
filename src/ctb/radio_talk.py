@@ -127,6 +127,14 @@ def _name(title: str, names: dict) -> str:
 
 TRIVIAL = re.compile(r"^(?:ok(?:ay)?|done|got it|thanks?|sure|on it|working on it|still working|continuing|"
                      r"will do|noted|understood|קיבלתי|בסדר|תודה|ממשיך|עובד על זה|עדיין עובד)\W*$", re.I)
+WORKING_ONLY = re.compile(r"^(?:(?:session\s+\S+\s+is\s+)?(?:still\s+)?working(?:\s+on\s+it)?|"
+                          r"work\s+(?:continues|is\s+in\s+progress)|in\s+progress|"
+                          r"עדיין\s+עובד|עובד\s+על\s+זה|העבודה\s+נמשכת)\W*$", re.I)
+
+
+def working_only(text: str) -> bool:
+    """Whether a digest item reports activity but no result, decision, wait, or number."""
+    return bool(WORKING_ONLY.fullmatch(" ".join((text or "").split())))
 
 
 def trivial(reply: str) -> bool:
@@ -224,7 +232,8 @@ def on_reply(cfg: Config, session: str, title: str, reply: str, now: Optional[fl
 
         def translate(text: str) -> str:
             return translate_text(text, cfg, fast=True)
-    from . import radio_privacy, voice_digest
+    from . import radio_dedupe, radio_privacy, voice_digest
+    reply_identity = radio_dedupe.reply_id(reply)
     important = voice_digest.important(reply)
     # Learn identifiers from the full source before formatting, shortening or any outside call.
     sources = (title, reply, session, mark, cfg.gemini_vertex_account)
@@ -247,6 +256,7 @@ def on_reply(cfg: Config, session: str, title: str, reply: str, now: Optional[fl
               "sent_at": stamp("sent_at"), "queued_at": stamp("queued_at"), "taken_at": stamp("taken_at"), "replied_at": now,
               "line_secs": round(time.time() - started, 2), "important": important, "trivial": False}
     record = radio_privacy.scrub(record, *sources, identifiers=identifiers)
+    record["reply_id"] = reply_identity
     from .radio_suitability import suitable
     if not suitable(record["text"]):
         return None

@@ -167,12 +167,13 @@ def clear_all(session: str) -> int:
 def turn_ended(session: str, text: str, at: Optional[float] = None, transcript: Optional[str] = None) -> None:
     """A turn ended with `text` as its last reply: the limit text marks (see mark_limited), anything
     else, including no text at all, clears."""
-    from .accounts import QUOTA_HIT
+    from . import accounts
     text = (text or "").strip()
     try:
-        if QUOTA_HIT.search(text):
+        if accounts.QUOTA_HIT.search(text):
             mark_limited(session, transcript, at)
         else:
+            accounts.clear_limit_after_success(accounts.origin_account(session), at)
             clear_answered(session, at)
     except OSError:
         pass

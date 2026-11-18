@@ -78,9 +78,9 @@ def go_settings(page):
 
 
 def go_knowledge(page):
-    if not page.locator(".vk-entry").count():
+    if not page.locator("[data-v2-section=knowledge-entry]").count():
         go_settings(page)
-    page.locator(".vk-entry").click()
+    page.locator("[data-v2-section=knowledge-entry]").click()
     page.locator(".vk-tiles").wait_for()
 
 

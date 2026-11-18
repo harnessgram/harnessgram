@@ -176,11 +176,18 @@ def parse_line(out: str) -> dict:
 
 
 def interpret(code: Optional[int], out: str) -> dict:
-    """The exit code decides the state; the JSON line only adds the app's name, the reason and the end time."""
+    """Interpret the exit code and delivery-aware statuses without changing legacy output."""
     data = parse_line(out)
     state = STATES.get(code, "error") if code is not None else "error"
     result = {"state": state, "app": _clean(data.get("app"), 120), "bundle": _clean(data.get("bundle"), 160),
               "reason": _clean(data.get("reason"), 400), "until": _until(data.get("until"))}
+    # The exit code alone decides approved/denied/error; status and delivered only refine an approval. An explicit
+    # delivered=false always wins, and pending_device is never shown as open.
+    if state == "approved":
+        if "delivered" in data:
+            result["delivered"] = data["delivered"] is True and data.get("status") != "pending_device"
+        elif data.get("status") in ("pending_device", "open"):
+            result["delivered"] = data["status"] == "open"
     if state not in ("approved",):
         result["until"] = ""
     return result
@@ -272,14 +279,17 @@ def telegram_lines(result: dict, lang: str, tz=None) -> List[str]:
     state = result.get("state")
     lines: List[str] = []
     if state == "approved":
-        stamp = ""
-        if result.get("until"):
-            try:
-                when = datetime.fromisoformat(result["until"].replace("Z", "+00:00"))
-                stamp = when.astimezone(tz).strftime("%H:%M") if tz else when.astimezone().strftime("%H:%M")
-            except ValueError:
-                stamp = ""
-        lines.append(t("app_request_approved_until" if stamp else "app_request_approved", lang=lang, time=stamp))
+        if "delivered" in result and result["delivered"] is not True:
+            lines.append(t("app_request_waiting_device", lang=lang))
+        else:
+            stamp = ""
+            if result.get("until"):
+                try:
+                    when = datetime.fromisoformat(result["until"].replace("Z", "+00:00"))
+                    stamp = when.astimezone(tz).strftime("%H:%M") if tz else when.astimezone().strftime("%H:%M")
+                except ValueError:
+                    stamp = ""
+            lines.append(t("app_request_approved_until" if stamp else "app_request_approved", lang=lang, time=stamp))
     else:
         lines.append(t("app_request_" + (state if state in ("denied", "review", "pending") else "error"), lang=lang))
     if result.get("app"):

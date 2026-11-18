@@ -155,7 +155,7 @@ def run_card(ctb: List[str], argv: List[str], session: str) -> str:
         p = subprocess.run(ctb + argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            timeout=CARD_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
-        return "Harnessgram: cards are not available"
+        return "HarnessGram: cards are not available"
     out = "\n".join(s.strip() for s in (p.stdout, p.stderr) if s and s.strip())
     return (out or f"ctb exited {p.returncode}")[:2000]
 
@@ -165,7 +165,7 @@ def deny_json(reason: str) -> str:
                                               "permissionDecisionReason": reason}}, ensure_ascii=False)
 
 
-NOTE = ("Harnessgram assistant session: refused ({why}). This session reads, drafts and publishes cards "
+NOTE = ("HarnessGram assistant session: refused ({why}). This session reads, drafts and publishes cards "
         "(`ctb card ask 'Text'`); a send, post or change outside is prepared as a draft or wa_prepare and put "
         "on a card, and the owner does it himself.")
 
@@ -202,7 +202,7 @@ def main(argv=None) -> int:
         if ctb is None or not isinstance(session, str) or not SESSION_RE.fullmatch(session):
             why = "a card command, but cards are not available here"
         else:
-            sys.stdout.write(deny_json("Harnessgram ran this card command for you outside the sandbox (the shell "
+            sys.stdout.write(deny_json("HarnessGram ran this card command for you outside the sandbox (the shell "
                                        "did not run it). ctb answered: " + run_card(ctb, card, session)) + "\n")
             return 0
     if why is None:

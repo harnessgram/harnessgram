@@ -60,7 +60,7 @@ def test_autopilot_quota_back_continue(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append((p, t)))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append((p, t)))
 
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.run_autopilot(cfg, bot=bot, now=now)
@@ -103,7 +103,7 @@ def test_autopilot_quota_back_reset_passed(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append((p, t)))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append((p, t)))
 
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.run_autopilot(cfg, bot=bot, now=now)
@@ -132,7 +132,7 @@ def test_autopilot_quota_back_blocked_when_full(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append((p, t)))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append((p, t)))
 
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.run_autopilot(cfg, bot=bot, now=now)
@@ -160,7 +160,7 @@ def test_autopilot_away_mode(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append((p, t)))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append((p, t)))
 
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.run_autopilot(cfg, bot=bot, now=now)
@@ -193,7 +193,7 @@ def test_autopilot_away_mode_stops_on_idle(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append((p, t)))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append((p, t)))
 
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.run_autopilot(cfg, bot=bot, now=now)
@@ -221,7 +221,7 @@ def test_autopilot_away_mode_max_25_nudges(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append((p, t)))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append((p, t)))
 
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.run_autopilot(cfg, bot=bot, now=now)
@@ -252,7 +252,7 @@ def test_autopilot_only_at_prompt(monkeypatch, bot):
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     # Pane is NOT at prompt (busy running code)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: False)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append((p, t)))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append((p, t)))
 
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.run_autopilot(cfg, bot=bot, now=now)
@@ -276,7 +276,7 @@ def test_autopilot_dry_run(monkeypatch, bot, capsys):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append((p, t)))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append((p, t)))
 
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.run_autopilot(cfg, bot=bot, dry_run=True, now=now)
@@ -554,7 +554,7 @@ def test_autopilot_blocked_by_full_weekly_window(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 1)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append(t))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append(t))
     autopilot.run_autopilot(Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True), bot=bot, now=now)
     assert typed == []
 
@@ -571,7 +571,7 @@ def test_quota_prompt_says_window_at_percent(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 1)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append(t))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append(t))
     autopilot.run_autopilot(Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True), bot=bot, now=now)
     assert len(typed) == 1 and "(window at 62%)" in typed[0]
 
@@ -763,17 +763,47 @@ def test_type_into_failure_records_no_nudge_and_sends_no_note(monkeypatch, bot):
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="no pane")
     monkeypatch.setattr(inbox, "_tmux", fake_tmux)
     autopilot.run_autopilot(Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True), bot=bot, now=now)
-    keys = [a for a in sent if a[0] == "send-keys"]  # the screen is read first (a tip notice is closed)
-    assert keys and keys[0][:4] == ("send-keys", "-t", "%1", "-l")
+    keys = [a for a in sent if a[0] == "send-keys"]
+    assert not any(a[-1] == "Enter" for a in keys)
     assert not bot.methods("sendMessage")
     assert autopilot.load_memory().get(session, {}).get("last") is None
 
 
 def test_type_into_raises_when_enter_fails(monkeypatch):
+    boxes = iter([("", True), ("hello", True), ("hello", True)])
+    monkeypatch.setattr(inbox, "input_box", lambda pane: next(boxes))
+    monkeypatch.setattr(inbox, "pane_runs_session", lambda pane, session: True)
     monkeypatch.setattr(inbox, "_tmux", lambda *a: subprocess.CompletedProcess(
         a, 1 if a[-1] == "Enter" else 0, stdout=""))  # the text goes in, Enter fails
     with pytest.raises(OSError):
-        autopilot.type_into("%1", "hello")
+        autopilot.type_into("%1", "hello", "session")
+
+
+def test_type_into_rechecks_exact_box_and_process_before_enter(monkeypatch):
+    boxes = iter([("", True), ("hello plus owner text", True)])
+    monkeypatch.setattr(inbox, "input_box", lambda pane: next(boxes))
+    monkeypatch.setattr(inbox, "pane_runs_session", lambda pane, session: True)
+    monkeypatch.setattr(inbox, "dismiss_tip", lambda pane: True)
+    sent = []
+    monkeypatch.setattr(inbox, "_tmux", lambda *args: sent.append(args) or subprocess.CompletedProcess(args, 0))
+    with pytest.raises(OSError, match="pane changed"):
+        autopilot.type_into("%1", "hello", "session")
+    assert not any(args[-1] == "Enter" for args in sent)
+    assert not any("BSpace" in args for args in sent)  # mixed text is never claimed as ours
+
+
+def test_type_into_removes_exact_own_text_when_process_changes(monkeypatch):
+    boxes = iter([("", True), ("hello", True), ("hello", True)])
+    ownership = iter([True, False])
+    monkeypatch.setattr(inbox, "input_box", lambda pane: next(boxes))
+    monkeypatch.setattr(inbox, "pane_runs_session", lambda pane, session: next(ownership))
+    monkeypatch.setattr(inbox, "dismiss_tip", lambda pane: True)
+    sent = []
+    monkeypatch.setattr(inbox, "_tmux", lambda *args: sent.append(args) or subprocess.CompletedProcess(args, 0))
+    with pytest.raises(OSError, match="pane changed"):
+        autopilot.type_into("%1", "hello", "session")
+    assert not any(args[-1] == "Enter" for args in sent)
+    assert any("BSpace" in args for args in sent)
 
 
 # --- quota nudges are bounded ---------------------------------------------------------------------------
@@ -793,7 +823,7 @@ def test_quota_nudges_limited_to_three_per_five_hours(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 1)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append(t))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append(t))
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     autopilot.save_memory({"sess-qn": {"quota_nudges": [now - 100, now - 200, now - 300]}})
     autopilot.run_autopilot(cfg, bot=bot, now=now)
@@ -812,7 +842,7 @@ def test_quota_nudge_needs_room_under_70(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 1)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append(t))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append(t))
     autopilot.run_autopilot(Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True), bot=bot, now=now)
     assert typed == []
 
@@ -881,7 +911,7 @@ def test_overlapping_pass_does_nothing(monkeypatch, bot):
     typed = []
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 1)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append(t))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append(t))
     cfg = Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True)
     with open(state_dir() / "autopilot.lock", "a") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
@@ -950,7 +980,7 @@ def test_away_mode_never_wakes_a_session_left_behind_long_before_the_owner_left(
     monkeypatch.setattr(autopilot, "session_pid", lambda s: 12345)
     monkeypatch.setattr(autopilot, "pane_for_session", lambda s: "pane-" + s)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: typed.append(p))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, *_: typed.append(p))
     autopilot.run_autopilot(Config(bot_token="tok", owner_chat_id=1, quota_auto_continue=True), bot=bot, now=now)
     assert typed == ["pane-sess-fresh"]
     assert autopilot.in_away_scope(now - 3600, now) and not autopilot.in_away_scope(now - 7 * 3600, now)

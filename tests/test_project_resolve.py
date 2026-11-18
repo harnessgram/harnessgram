@@ -200,7 +200,7 @@ def test_add_validates_like_the_settings(settings, capsys):
                  ("remove", "Nobody")):
         assert run_cli(*argv) == 1, argv
         assert settings.read_bytes() == before
-    assert capsys.readouterr().err.count("Harnessgram:") == 5
+    assert capsys.readouterr().err.count("HarnessGram:") == 5
     assert run_cli("add", "Orbit", "--chat", str(ORBIT)) == 0
     assert run_cli("add", "ORBIT", "--chat", str(PANTRY)) == 1     # same name
     assert run_cli("add", "Other", "--chat", str(ORBIT)) == 1      # same group

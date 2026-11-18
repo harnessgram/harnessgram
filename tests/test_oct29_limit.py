@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+from conftest import signed_in
 from ctb import inbox as I, usage
 from test_inbox import TextMedia, cfg, setup, update
 
@@ -65,6 +66,7 @@ def test_limit_ignored_after_a_restart_on_an_account_with_room(tmp_path, monkeyp
     started = {"sessionId": "sess-1", "startedAt": 1_793_268_060_000}
     monkeypatch.setattr(accounts, "live_session_records", lambda: [started])
     monkeypatch.setattr(accounts, "account_for", lambda s=None: "spare")
+    monkeypatch.setattr(accounts, "reading_fresh", lambda name, now=None: True)
     monkeypatch.setattr(accounts, "spent", lambda name, now=None: False)
     assert usage.limit_of("sess-1") is None
     monkeypatch.setattr(accounts, "spent", lambda name, now=None: True)   # restarted on a spent account
@@ -78,6 +80,7 @@ def test_a_manual_account_move_clears_the_limit_hold(tmp_path, monkeypatch, bot)
     """Regression: a limited session moved by hand (account menu); only the automatic move wrote
     the limit-cleared marker, so every later message was still "saved until 21:40"."""
     from ctb import accounts
+    signed_in("main", "spare")
     transcript(tmp_path, monkeypatch, [limit_row()])
     monkeypatch.setattr(I.time, "time", lambda: 1_793_268_100.0)
     # The move's resume runs in a daemon thread that can outlive this test and type into tmux after the suite.
@@ -229,16 +232,16 @@ def test_running_rows_of_claude_code_are_recognised():
 
 def test_pane_runs_session_rejects_a_reused_pane_id(monkeypatch):
     from types import SimpleNamespace
-    out = ["4000 other"]
+    out = ["4000"]
     monkeypatch.setattr(I, "_tmux", lambda *a: SimpleNamespace(returncode=0, stdout=out[0], stderr=""))
     monkeypatch.setattr(I, "session_pid", lambda s: 4100)
-    parents = {"4100": "4000"}
-    monkeypatch.setattr(I.subprocess, "run", lambda cmd, **k: SimpleNamespace(stdout=parents.get(cmd[-1], "1"), returncode=0))
-    assert I.pane_runs_session("%3", "abcdef123456")          # the shell around Claude owns the pane
-    out[0] = "5555 other"                                      # tmux restarted: %3 is another window now
-    assert not I.pane_runs_session("%3", "abcdef123456")
-    out[0] = "5555 tg-abcdef12"                                # the bridge's own window for this session
+    targets = [[(4100, "start")]]
+    monkeypatch.setattr(I, "_pane_claude_targets", lambda pane: targets[0])
     assert I.pane_runs_session("%3", "abcdef123456")
+    targets[0] = [(5555, "other")]
+    assert not I.pane_runs_session("%3", "abcdef123456")
+    out[0] = "5555"  # numeric pane pid, but the session's own pid is absent from its targets
+    assert not I.pane_runs_session("%3", "abcdef123456")
     monkeypatch.setattr(I, "session_pid", lambda s: None)
     out[0] = "5555 other"
     assert not I.pane_runs_session("%3", "abcdef123456")

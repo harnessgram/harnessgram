@@ -18,11 +18,54 @@ def _free(monkeypatch):
     monkeypatch.setattr(V, "NO_CEILING", set())
 
 
+def _cloud_settings(**values):
+    return radio.settings(Config(radio={"voice_route": "cloud", **values}))
+
+
 def _speech(seconds):
     answer = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"inlineData": {
         "mimeType": "audio/L16;rate=24000", "data": base64.b64encode(b"\0\0" * 24000 * seconds).decode()}}]}}],
         "usageMetadata": {"candidatesTokenCount": seconds * V.AUDIO_TOKENS_PER_SECOND}}
     return io.BytesIO(json.dumps(answer).encode())
+
+
+def _news_usage(tmp_path):
+    return V.NewsUsage(V.Usage(tmp_path / "tts-usage.json"), V.Usage(tmp_path / "news-tts-usage.json"))
+
+
+def test_news_paid_piece_uses_one_capped_reservation_and_settles_both_ledgers(tmp_path, monkeypatch):
+    usage = _news_usage(tmp_path)
+    ceilings = []
+
+    def vertex(*args, max_seconds, **kwargs):
+        ceilings.append(max_seconds)
+        return b"\0\0" * V.RATE * 2, 2
+
+    monkeypatch.setattr(V, "vertex", vertex)
+    settings = dict(radio.settings(Config()), tts_daily_minutes=10, tts_room_daily_minutes=1)
+    why = []
+    assert V._paid_piece("שלום", Config(), settings, tmp_path / "cache", usage, None, why)
+    assert len(ceilings) == 1 and type(ceilings[0]) is float and ceilings[0] > 2
+    assert usage.shared.today() == pytest.approx(2)
+    assert usage.news.today() == pytest.approx(2)
+    assert not usage.shared._ledger()["pending"] and not usage.news._ledger()["pending"]
+
+
+def test_news_paid_piece_with_zero_news_cap_never_reserves_shared_budget(tmp_path, monkeypatch):
+    usage = _news_usage(tmp_path)
+    monkeypatch.setattr(V, "vertex", lambda *a, **k: pytest.fail("paid request with the news voice off"))
+    settings = dict(radio.settings(Config()), tts_daily_minutes=10, tts_room_daily_minutes=0)
+    assert V._paid_piece("שלום", Config(), settings, tmp_path / "cache", usage, None, []) == b""
+    assert usage.shared.today() == 0 and usage.news.today() == 0
+
+
+def test_news_reservation_failure_releases_news_and_leaves_shared_clean(tmp_path, monkeypatch):
+    usage = _news_usage(tmp_path)
+    monkeypatch.setattr(usage.shared, "reserve", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+    settings = dict(radio.settings(Config()), tts_daily_minutes=10, tts_room_daily_minutes=1)
+    assert V._paid_piece("שלום", Config(), settings, tmp_path / "cache", usage, None, []) == b""
+    assert usage.shared.today() == 0 and usage.news.today() == 0
+    assert not usage.shared._ledger()["pending"] and not usage.news._ledger()["pending"]
 
 
 def _refuse_ceiling(calls, seconds=1):
@@ -42,7 +85,8 @@ def test_model_refusing_the_ceiling_still_gets_paid_speech_within_budget(monkeyp
     monkeypatch.setattr(V, "access_token", lambda *a: "token")
     monkeypatch.setattr(V, "to_pcm", lambda raw, args: raw * 2)
     monkeypatch.setattr(V.urllib.request, "urlopen", _refuse_ceiling(calls))
-    st = _station(Config(gemini_vertex_project="my-gcp-project", radio={"tts_daily_minutes": 0}))
+    st = _station(Config(gemini_vertex_project="my-gcp-project",
+                         radio={"voice_route": "cloud", "tts_daily_minutes": 0}))
     L.player_fetch(st.dir)
     for text in ("מבזק ראשון.", "מבזק שני."):
         assert st.speak(text)
@@ -66,7 +110,7 @@ def test_long_text_is_split_into_short_requests_and_stays_in_budget(tmp_path, mo
     V.NO_CEILING.add("gemini-2.5-flash-tts")
     monkeypatch.setattr(V.urllib.request, "urlopen", urlopen)
     text = " ".join(f"זהו משפט מספר {n} של עדכון הצוות הארוך מאוד." for n in range(40))
-    s = dict(radio.settings(Config()), tts_daily_minutes=10)
+    s = dict(_cloud_settings(), tts_daily_minutes=10)
     usage = V.Usage(tmp_path / "usage.json")
     pcm, route = V.speak(text, Config(gemini_vertex_project="p"), s, tmp_path / "cache", usage)
     assert route == "vertex" and pcm
@@ -86,7 +130,7 @@ def test_text_that_does_not_fit_the_remaining_budget_uses_the_free_voice_without
     monkeypatch.setattr(V.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("paid request that cannot fit"))
     V.NO_CEILING.add("gemini-2.5-flash-tts")
     text = " ".join(f"משפט מספר {n} בעדכון." for n in range(40))  # far more than 30 s of speech
-    s = dict(radio.settings(Config()), tts_daily_minutes=1)
+    s = dict(_cloud_settings(), tts_daily_minutes=1)
     usage = V.Usage(tmp_path / "usage.json")
     usage.add(30)  # 30 s left
     assert V.speak(text, Config(gemini_vertex_project="p"), s, tmp_path / "cache", usage) == (b"free", "say")
@@ -106,7 +150,7 @@ def test_split_requests_never_exceed_the_budget_when_the_provider_overruns(tmp_p
 
     monkeypatch.setattr(V.urllib.request, "urlopen", urlopen)
     text = " ".join(f"זהו משפט מספר {n} של העדכון." for n in range(60))
-    s = dict(radio.settings(Config()), tts_daily_minutes=10)
+    s = dict(_cloud_settings(), tts_daily_minutes=10)
     usage = V.Usage(tmp_path / "usage.json")
     assert V.speak(text, Config(gemini_vertex_project="p"), s, tmp_path / "cache", usage) == (b"free", "say")
     assert len(sent) == 1  # the first overrun blocks the day: no further pieces are sent
@@ -141,7 +185,7 @@ def test_overlong_provider_response_is_billed_but_never_aired_or_cached(tmp_path
         return io.BytesIO(json.dumps(answer).encode())
 
     monkeypatch.setattr(V.urllib.request, "urlopen", respond)
-    s = dict(radio.settings(Config()), tts_daily_minutes=0.1)  # only 6 s remain
+    s = dict(_cloud_settings(), tts_daily_minutes=0.1)  # only 6 s remain
     usage, cache = V.Usage(tmp_path / "usage.json"), tmp_path / "cache"
     assert V.speak("שלום", Config(gemini_vertex_project="p"), s, cache, usage) == (b"free", "say")
     assert usage.today() == 20  # full observed bill; hiding it would incorrectly renew the budget
@@ -174,7 +218,7 @@ def test_request_crossing_midnight_settles_its_original_day(tmp_path, monkeypatc
         return (b"audio" if billed is not None else b""), billed
 
     monkeypatch.setattr(V, "vertex", vertex)
-    s = radio.settings(Config(radio={"tts_daily_minutes": 1}))
+    s = _cloud_settings(tts_daily_minutes=1)
     s["tts_room_daily_minutes"] = 0.5
     _, route = V.speak("שלום", Config(), s, tmp_path / "cache", usage)
     assert route == ("vertex" if billed == 2 else "say")
@@ -239,7 +283,8 @@ def test_parallel_radio_and_room_requests_reserve_both_caps_atomically(tmp_path,
 @pytest.mark.parametrize("exhaust", ["shared", "room"])
 def test_station_checks_total_budget_and_room_subcap(monkeypatch, exhaust):
     _free(monkeypatch)
-    st = _station(Config(radio={"tts_listening_minutes": 1, "room_tts_daily_minutes": 0.5}))
+    st = _station(Config(radio={"voice_route": "cloud", "tts_listening_minutes": 1,
+                                "room_tts_daily_minutes": 0.5}))
     L.player_fetch(st.dir)
     st.s["room_tts_daily_minutes"] = 0.5
     monkeypatch.setattr(V, "vertex", lambda *a, **kw: (b"paid", 2))
@@ -258,7 +303,8 @@ def test_station_checks_total_budget_and_room_subcap(monkeypatch, exhaust):
 
 def test_room_request_is_capped_by_remaining_shared_minutes(monkeypatch):
     _free(monkeypatch)
-    st = _station(Config(radio={"tts_listening_minutes": 1, "room_tts_daily_minutes": 1}))
+    st = _station(Config(radio={"voice_route": "cloud", "tts_listening_minutes": 1,
+                                "room_tts_daily_minutes": 1}))
     L.player_fetch(st.dir)
     st.usage.add(57)
     calls = []

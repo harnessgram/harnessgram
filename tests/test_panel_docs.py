@@ -13,7 +13,7 @@ def test_every_route_is_documented():
 
 
 def test_the_docs_name_no_route_that_is_gone():
-    named = set(re.findall(r"/api/[a-z-]+", DOC))
+    named = set(re.findall(r"/api/[a-z-]+(?:/[a-z-]+)*", DOC))
     assert named <= set(panel.ROUTES), sorted(named - set(panel.ROUTES))
 
 

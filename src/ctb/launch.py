@@ -51,5 +51,5 @@ def warning() -> Optional[str]:
     cmd = argv()
     if len(cmd) == 1 or importable_isolated():
         return None
-    return ("The ctb Python package for Harnessgram is not importable in isolated mode (`python -I`), so the hooks would fail. Install it with "
+    return ("The ctb Python package for HarnessGram is not importable in isolated mode (`python -I`), so the hooks would fail. Install it with "
             "pipx or into a venv (pip install .), or make sure the `ctb` script is on PATH.")

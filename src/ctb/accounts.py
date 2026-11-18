@@ -16,11 +16,14 @@ import fcntl
 import fnmatch
 import hashlib
 import json
+import logging
+import math
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +33,26 @@ from .config import private_dir, state_dir, write_private
 from .i18n import t
 
 MAIN = "main"
+CREDIT = "credit"  # explicit per-exhaustion approval only; never a default/profile
+# File overrides present in Claude Code 2.1.322, including remote policy snapshots.
+CREDIT_SETTINGS_PATH_OVERRIDES = ("CLAUDE_CODE_MANAGED_SETTINGS_PATH", "CLAUDE_CODE_REMOTE_SETTINGS_PATH")
+# One boundary for inherited variables, settings-file refusal and the pinned launch settings.
+CREDIT_AUTH_OVERRIDES = {
+    "CLAUDE_CONFIG_DIR": "", "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "",
+    **dict.fromkeys(CREDIT_SETTINGS_PATH_OVERRIDES, ""),
+    "ANTHROPIC_BASE_URL": "https://api.anthropic.com", "ANTHROPIC_CUSTOM_HEADERS": "",
+    "CLAUDE_CODE_OAUTH_TOKEN": "", "CLAUDE_CODE_OAUTH_TOKEN_FILE": "",
+    "CLAUDE_CODE_USE_BEDROCK": "", "CLAUDE_CODE_USE_VERTEX": "", "CLAUDE_CODE_USE_FOUNDRY": "",
+    "CLAUDE_CODE_USE_MANTLE": "", "CLAUDE_CODE_USE_ANTHROPIC_AWS": "",
+    "ANTHROPIC_BEDROCK_BASE_URL": "", "ANTHROPIC_BEDROCK_MANTLE_BASE_URL": "",
+    "ANTHROPIC_VERTEX_BASE_URL": "", "ANTHROPIC_FOUNDRY_BASE_URL": "", "ANTHROPIC_FOUNDRY_API_KEY": "",
+    "ANTHROPIC_AWS_BASE_URL": "", "ANTHROPIC_AWS_API_KEY": "", "ANTHROPIC_AWS_WORKSPACE_ID": "",
+    "HTTPS_PROXY": "", "HTTP_PROXY": "", "ALL_PROXY": "",
+    "https_proxy": "", "http_proxy": "", "all_proxy": "",
+    "NODE_EXTRA_CA_CERTS": "", "NODE_OPTIONS": "", "NODE_TLS_REJECT_UNAUTHORIZED": "1",
+    "CLAUDE_CODE_CLIENT_CERT": "", "CLAUDE_CODE_CLIENT_KEY": "", "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE": "",
+    "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "60000"}
+CREDIT_AUTH_SETTINGS = ("apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "forceLoginMethod")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,19}")
 # Everything else in ~/.claude is shared. `sessions` IS shared on purpose: it is how the bridge
 # sees live sessions of every account.
@@ -39,11 +62,17 @@ UNSHARED = (".credentials.json", ".claude.json", "daemon*", "session-env", "stat
 SEED_KEYS = ("hasCompletedOnboarding", "lastOnboardingVersion", "mcpServers", "projects", "installMethod",
              "autoUpdates", "theme", "hasSeenAutoModeEntryWarning", "hasSeenAutoDefaultNotice")
 LIMIT_COOLDOWN = 5 * 3600  # an account that hit its limit is skipped by the automatic fallback this long
+MOVE_USAGE_MAX_AGE = 12 * 3600  # older readings prove neither available quota nor exhaustion
 LOGIN_WINDOW = 600  # seconds a started login waits for its code
 # A reply that says the plan limit is reached. Deliberately not called LIMIT: mirror and fmt keep a
 # chunk-size constant of that name, and shadowing it once broke every long reply.
-QUOTA_HIT = re.compile(r"\A\s*(?:API Error: )?(?:You've hit your (?:[\w-]+ )?limit|Claude (?:AI )?usage limit reached|"
-                       r"Credit balance is too low|You're out of (?:extra )?usage)", re.I)
+QUOTA_HIT = re.compile(r"\A\s*(?:API Error: )?(?:You've hit your (?:[\w-]+ )?limit(?: for today)?|"
+                       r"Claude (?:AI )?usage limit reached|Usage limit reached|Credit balance is too low|"
+                       r"You're out of (?:extra )?usage)(?:[\s.,·—:-]+resets?\b[^\n]*)?[.\s]*\Z", re.I)
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
+MIXED_EFFORT = "mixed"
+DEFAULT_MODEL_ID = "claude-opus-5-5"
 
 
 def profiles_dir() -> Path:
@@ -59,7 +88,7 @@ def claude_json() -> Path:
 
 
 def valid_name(name: object) -> bool:
-    return isinstance(name, str) and name != MAIN and bool(NAME.fullmatch(name))
+    return isinstance(name, str) and name not in (MAIN, CREDIT) and bool(NAME.fullmatch(name))
 
 
 def _read(path: Path, default):
@@ -73,10 +102,13 @@ def _read(path: Path, default):
 def names() -> List[str]:
     """"main" first, then every profile folder."""
     try:
-        extra = sorted(p.name for p in profiles_dir().iterdir() if p.is_dir() and NAME.fullmatch(p.name))
+        # A profile directory controls credentials and executable configuration.  Never follow an
+        # entry planted as a directory symlink outside the private profiles root.
+        extra = sorted(p.name for p in profiles_dir().iterdir()
+                       if not p.is_symlink() and p.is_dir() and NAME.fullmatch(p.name))
     except OSError:
         extra = []
-    return [MAIN] + [n for n in extra if n != MAIN]
+    return [MAIN] + [n for n in extra if n not in (MAIN, CREDIT)]
 
 
 def multiple() -> bool:
@@ -88,6 +120,153 @@ def config_dir(name: str) -> Optional[Path]:
     if name == MAIN:
         return claude_home()
     return profiles_dir() / name if valid_name(name) and (profiles_dir() / name).is_dir() else None
+
+
+def _profile_settings() -> List[Path]:
+    """The settings file in every account config directory known to the bridge."""
+    return [folder / "settings.json" for name in names() if (folder := config_dir(name)) is not None]
+
+
+def effort_level() -> str:
+    """The shared new-session effort, or ``mixed`` when account profiles disagree.
+
+    Missing, unreadable, and invalid values are deliberately values too: the panel must not claim
+    the profiles agree when Claude would apply different defaults to them.
+    """
+    values = []
+    for path in _profile_settings():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            model_settings = data.get("modelSettings")
+            default_settings = model_settings.get(DEFAULT_MODEL_ID) if isinstance(model_settings, dict) else None
+            value = default_settings.get("effortLevel") if isinstance(default_settings, dict) else None
+            if value not in EFFORT_LEVELS:
+                value = data.get("effortLevel")
+        except (OSError, ValueError, AttributeError):
+            value = None
+        values.append(value if value in EFFORT_LEVELS else None)
+    if not values or any(value != values[0] for value in values[1:]):
+        return MIXED_EFFORT
+    return values[0] or ""
+
+
+def _inside_settings_roots(path: Path) -> bool:
+    """Whether a resolved settings target remains in one of our two configuration roots."""
+    return any(path.is_relative_to(root.resolve()) for root in (claude_home(), profiles_dir()))
+
+
+def _render_effort(original: bytes, data: dict, level: str) -> bytes:
+    """Retain simple top-level formatting, but never let the shortcut mutate a nested key."""
+    text = original.decode("utf-8")
+    old_level = data.get("effortLevel")
+    data["effortLevel"] = level
+    model_settings = data.get("modelSettings")
+    if not isinstance(model_settings, dict):
+        model_settings = {}
+        data["modelSettings"] = model_settings
+    for settings in model_settings.values():
+        if isinstance(settings, dict):
+            settings["effortLevel"] = level
+    model_ids = {DEFAULT_MODEL_ID}
+    model = data.get("model")
+    if isinstance(model, str) and re.fullmatch(r"claude-[a-z0-9-]+", model):
+        model_ids.add(model)
+    for model_id in model_ids:
+        settings = model_settings.setdefault(model_id, {})
+        if not isinstance(settings, dict):
+            settings = model_settings[model_id] = {}
+        settings["effortLevel"] = level
+    # Formatting preservation is safe only when changing the top-level value is the entire edit.
+    needle = (re.compile(r'(?m)^(\s*"effortLevel"\s*:\s*)' + re.escape(json.dumps(old_level)))
+              if old_level is not None and not model_settings else None)
+    if needle is not None and needle.search(text):
+        rendered = needle.sub(lambda match: match.group(1) + json.dumps(level), text, count=1)
+        try:
+            if json.loads(rendered) == data:
+                return rendered.encode("utf-8")
+        except ValueError:
+            pass
+    match = re.search(r'\n([ \t]+)"', text)
+    indent = len(match.group(1)) if match and set(match.group(1)) == {" "} else (2 if "\n" in text else None)
+    rendered = json.dumps(data, ensure_ascii=False, indent=indent)
+    if text.endswith("\n"):
+        rendered += "\n"
+    return rendered.encode("utf-8")
+
+
+def _write_effort(path: Path, level: str) -> None:
+    """Lock, re-read and atomically update one real (not symlink) settings target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_name("." + path.name + ".effort.lock")
+    with lock.open("a+b") as locked:
+        os.chmod(lock, 0o600)
+        fcntl.flock(locked.fileno(), fcntl.LOCK_EX)
+        for _attempt in range(5):
+            try:
+                original = path.read_bytes()
+                mode = path.stat().st_mode & 0o7777
+                data = json.loads(original.decode("utf-8"))
+            except FileNotFoundError:
+                original, mode, data = b"", 0o600, {}
+            if not isinstance(data, dict):
+                raise ValueError("settings must be an object")
+            rendered = _render_effort(original, data, level)
+            backup = path.with_name("settings.json.bak-effort")
+            if original and not backup.exists():
+                fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+                with os.fdopen(fd, "wb") as out:
+                    out.write(original)
+            fd, temporary = tempfile.mkstemp(prefix=".settings.json.", dir=path.parent)
+            closed = False
+            try:
+                os.fchmod(fd, mode)
+                with os.fdopen(fd, "wb") as out:
+                    closed = True
+                    out.write(rendered)
+                    out.flush()
+                    os.fsync(out.fileno())
+                current = path.read_bytes() if path.exists() else b""
+                if current != original:
+                    os.unlink(temporary)
+                    continue
+                os.replace(temporary, path)
+                return
+            except Exception:
+                if not closed:
+                    os.close(fd)
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+        raise OSError("settings changed repeatedly while saving")
+
+
+def set_effort_level(level: str) -> List[dict]:
+    """Set every profile and return a result for each, without hiding partial failures."""
+    if level not in EFFORT_LEVELS:
+        raise ValueError("unknown effort level")
+    results, written = [], {}
+    for name in names():
+        folder = config_dir(name)
+        if folder is None:
+            continue
+        logical = folder / "settings.json"
+        target = logical.resolve(strict=False)
+        if logical.is_symlink() and (not _inside_settings_roots(target) or target.name != "settings.json"):
+            error = "outside profiles" if not _inside_settings_roots(target) else "not settings.json"
+            results.append({"profile": name, "ok": False, "error": error})
+            continue
+        key = str(target)
+        if key not in written:
+            try:
+                _write_effort(target, level)
+                written[key] = None
+            except (OSError, ValueError, UnicodeError) as exc:
+                written[key] = str(exc) or type(exc).__name__
+        error = written[key]
+        results.append({"profile": name, "ok": error is None, **({"error": error} if error else {})})
+    return results
 
 
 # -- the account new sessions use ----------------------------------------------------------------
@@ -178,6 +357,11 @@ def cached_email(name: str) -> str:
 
 def env_for(name: str) -> Dict[str, str]:
     env = dict(os.environ)
+    if name == CREDIT:
+        for key in CREDIT_AUTH_OVERRIDES:
+            env.pop(key, None)
+        env["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"] = CREDIT_AUTH_OVERRIDES["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"]
+        return env
     folder = config_dir(name)
     if name == MAIN or folder is None:
         env.pop("CLAUDE_CONFIG_DIR", None)
@@ -286,13 +470,33 @@ def keychain_service(name: str) -> Optional[str]:
 
 def _keychain_read(service: str, timeout: float = 5.0) -> Optional[str]:
     """The secret stored under `service` (the login JSON), None when there is none. Never logged."""
-    try:
-        res = subprocess.run(["security", "find-generic-password", "-s", service, "-w"], capture_output=True,
-                             text=True, timeout=timeout, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    out = (res.stdout or "").strip()
-    return out if res.returncode == 0 and out else None
+    from .keychain import Keychain
+    return Keychain(subprocess.run, timeout=timeout).get_service(service)
+
+
+KEYCHAIN_NOT_FOUND = 44  # `security find-generic-password`: the item does not exist (errSecItemNotFound)
+_KEYCHAIN_NAME = re.compile(r"[A-Za-z0-9._-]{1,128}")
+_KEYCHAIN_SECRET = re.compile(r"[A-Za-z0-9+/=]{1,512}")  # base64 only: it is quoted on `security -i`'s stdin
+
+
+def _keychain_item(service: str, account: str, timeout: float = 5.0) -> Tuple[str, Optional[str]]:
+    """("ok", secret) for the (service, account) item, ("missing", None) only when the Keychain says it does not
+    exist, ("error", None) for anything else (locked, timed out, no `security`). Never logged. A caller that creates
+    the item on "missing" never mistakes a Keychain it could not read for an empty one."""
+    if not (_KEYCHAIN_NAME.fullmatch(service or "") and _KEYCHAIN_NAME.fullmatch(account or "")):
+        return "error", None
+    from .keychain import Keychain
+    return Keychain(subprocess.run, timeout=timeout).get_status((service, account))
+
+
+def _keychain_add(service: str, account: str, secret: str, timeout: float = 10.0) -> bool:
+    """Store a new (service, account) item; never replaces an existing one (no -U). The secret reaches `security`
+    on stdin only, never on a command line. True when the call ran cleanly; the caller reads the item back."""
+    if not (_KEYCHAIN_NAME.fullmatch(service or "") and _KEYCHAIN_NAME.fullmatch(account or "")
+            and _KEYCHAIN_SECRET.fullmatch(secret or "")):
+        return False
+    from .keychain import Keychain
+    return Keychain(subprocess.run, timeout=timeout).set((service, account), secret, update=False, label=service)
 
 
 def _oauth_fields(name: str) -> dict:
@@ -580,6 +784,21 @@ def logged_out(name: str) -> bool:
     return login_state(name) == "out" or sign_in_unfinished(name)
 
 
+def eligible_target(name: str) -> bool:
+    """Whether a profile is known to be signed in and may receive a session.
+
+    Fails closed: a profile qualifies only after a finished login was read (the bridge
+    stored its address, or read it as logged in without one). A signed-out, unreadable,
+    never-read or half-finished profile is never a target.
+    """
+    if config_dir(name) is None or sign_in_unfinished(name):
+        return False
+    state = login_state(name)
+    if state in ("out", "unreadable"):
+        return False
+    return state == "noemail" or bool(cached_email(name))
+
+
 def _set_login_states(states: Dict[str, str]) -> None:
     with _lock(_status_path()):
         cur = _read(_status_path(), {})
@@ -589,6 +808,11 @@ def _set_login_states(states: Dict[str, str]) -> None:
             else:
                 cur.pop(n, None)
         write_private(_status_path(), json.dumps(cur))
+
+
+def mark_logged_out(name: str) -> None:
+    """Remember a definitive signed-out report without probing the profile again."""
+    _set_login_states({name: "out"})
 
 
 def forget_check(name: str) -> None:
@@ -852,7 +1076,7 @@ def same_login(a: str, b: str) -> bool:
 def usable_in(group: List[str]) -> Optional[str]:
     """The profile of a group a session can be moved to: the logged-in one whose login reports the
     biggest plan (never a stale older login), else the first logged in."""
-    live = [n for n in group if not logged_out(n)]
+    live = [n for n in group if eligible_target(n)]
     if not live:
         return None
     return max(live, key=lambda n: (plan_rank(n) if plan_rank(n) is not None else -1, -live.index(n)))
@@ -1063,7 +1287,7 @@ def account_for(session: Optional[str] = None) -> str:
     takes the current choice."""
     if session:
         known = _read(_sessions_path(), {}).get(session)
-        if isinstance(known, str) and (known == MAIN or config_dir(known)):
+        if isinstance(known, str) and (known in (MAIN, CREDIT) or config_dir(known)):
             return known
     return current()
 
@@ -1088,6 +1312,76 @@ def chrome_available() -> bool:
         return False
 
 
+class CreditActivationUnavailable(ValueError):
+    """Credit launch refused without exposing settings values or parser errors."""
+
+
+def check_credit_settings(session: str) -> None:
+    """Check defaults and the bridge's overrides before clearing them for credit."""
+    from . import assistant, status
+
+    def refuse(why: str) -> None:
+        logging.getLogger(__name__).warning("credit activation unavailable: %s", why)
+        raise CreditActivationUnavailable("credit activation unavailable")
+
+    cwd = status.session_cwd(session)
+    if not cwd:
+        refuse("session folder cannot be checked")
+    files = [("account", claude_home() / "settings.json"),
+             ("user", Path.home() / ".claude/settings.json"),
+             ("project", Path(cwd) / ".claude/settings.json"),
+             ("local", Path(cwd) / ".claude/settings.local.json")]
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        files.append(("account", Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"))
+    files.extend(("override", Path(os.environ[key])) for key in CREDIT_SETTINGS_PATH_OVERRIDES
+                 if os.environ.get(key))
+    # Recent Claude versions also merge local settings at the repo/main-worktree root.
+    for parent in (Path(cwd), *Path(cwd).parents):
+        try:
+            (parent / ".git").stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            refuse("repository settings cannot be located")
+        try:
+            result = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute",
+                                     "--git-common-dir", "--show-toplevel"], capture_output=True, text=True,
+                                    timeout=5, env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+            roots = result.stdout.splitlines()
+            if result.returncode or len(roots) != 2 or not all(Path(p).is_absolute() for p in roots):
+                refuse("repository settings cannot be located")
+            common, root = map(Path, roots)
+            if common.name != ".git":
+                refuse("repository settings location is unsupported")
+            files.extend(("local", p / ".claude/settings.local.json") for p in (root, common.parent))
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            refuse("repository settings cannot be located")
+        break
+    for folder in assistant.MANAGED:
+        files.append(("managed", folder / "managed-settings.json"))
+        try:
+            files.extend(("managed", p) for p in sorted((folder / "managed-settings.d").iterdir())
+                         if p.suffix == ".json")
+        except FileNotFoundError:
+            pass
+        except OSError:
+            refuse("managed settings cannot be listed")
+    for source, path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            if source == "override" or path.is_symlink():
+                refuse(source + " settings cannot be read")
+            continue
+        except (OSError, ValueError, RecursionError):
+            refuse(source + " settings cannot be read")
+        if not isinstance(data, dict) or ("env" in data and not isinstance(data["env"], dict)):
+            refuse(source + " settings are malformed")
+        if any(key in data for key in CREDIT_AUTH_SETTINGS) or any(
+                key in data.get("env", {}) for key in CREDIT_AUTH_OVERRIDES):
+            refuse(source + " settings override credit authentication")
+
+
 def shell_command(session: Optional[str] = None, remember: bool = False, replace: bool = True) -> str:
     """The shell command that starts Claude Code on the session's account. With replace the shell
     is replaced by Claude (exec). An assistant session (assistant.py) starts inside the OS sandbox with no sending
@@ -1106,6 +1400,21 @@ def shell_command(session: Optional[str] = None, remember: bool = False, replace
         run = ("exec " if replace else "") + assistant.launch_command()
     elif chrome_available():
         run += " --chrome"
+    if name == CREDIT:
+        from . import credit_mode
+        if not session or not credit_mode.active(session) or credit_mode.blocked(session):
+            raise CreditActivationUnavailable("credit activation unavailable")
+        check_credit_settings(session)
+        # Absolute path: the helper runs from Claude's shell, whose PATH may lack ~/.local/bin.
+        helper = shutil.which("ctb") or str(Path.home() / ".local/bin/ctb")
+        settings = {"apiKeyHelper": shlex.quote(helper) + " credit-key",
+                    "forceLoginMethod": "console", "env": dict(CREDIT_AUTH_OVERRIDES)}
+        # Inherited account/API overrides must not bypass the helper or redirect billing.
+        return ("unset " + " ".join(CREDIT_AUTH_OVERRIDES) + "; "
+                + "CTB_CREDIT_SESSION=" + shlex.quote(session) + " "
+                + "CLAUDE_CODE_API_KEY_HELPER_TTL_MS=60000 "
+                + run + " --setting-sources user --settings "
+                + shlex.quote(json.dumps(settings, separators=(",", ":"))))
     if name == MAIN or folder is None:
         # Without extra accounts nothing is changed (a CLAUDE_CONFIG_DIR of the user's own stays);
         # with them, "main" must clear an account folder inherited from another session.
@@ -1139,12 +1448,49 @@ def _limits_path() -> Path:
 
 
 def note_limit(name: str, now: Optional[float] = None) -> None:
-    hit = _read(_limits_path(), {})
-    hit[name] = time.time() if now is None else now
-    write_private(_limits_path(), json.dumps(hit))
+    with _lock(_limits_path()):
+        hit = _read(_limits_path(), {})
+        hit[name] = time.time() if now is None else now
+        write_private(_limits_path(), json.dumps(hit))
 
 
-# A limit move that had to wait for background work: retried by the limit loop, announced once.
+def clear_limit_after_success(name: str, at: Optional[float] = None) -> bool:
+    """Forget an older limit hit after this account completes an assistant turn."""
+    evidence_at = time.time() if at is None else at
+    with _lock(_limits_path()):
+        hits = _read(_limits_path(), {})
+        try:
+            older = 0 < float(hits.get(name) or 0) < evidence_at
+        except (TypeError, ValueError):
+            older = False
+        if not older:
+            return False
+        del hits[name]
+        write_private(_limits_path(), json.dumps(hits))
+    return True
+
+
+def _clear_limit_from_usage(name: str, reading: dict) -> bool:
+    """Forget an older hit when a later quota reading says no window is exhausted."""
+    at = iso_epoch(reading.get("at"))
+    values = []
+    for key in ("five_hour", "weekly"):
+        value = reading.get(key)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(number) or number < 0:
+            return False
+        values.append(number)
+    if not values or any(value >= 100 for value in values):
+        return False
+    return clear_limit_after_success(name, at)
+
+
+# A move that had to wait for background work: retried by the recovery loop, announced once.
 DEFER_TTL = 6 * 3600
 DEFER_RETRY = 60.0
 
@@ -1154,20 +1500,27 @@ def _deferred_path(session: str) -> Path:
 
 
 def defer_move(session: str, target: str, now: Optional[float] = None, origin: Optional[str] = None,
-               limit: Optional[dict] = None, proc: Optional[Tuple[int, str]] = None) -> bool:
+               limit: Optional[dict] = None, proc: Optional[Tuple[int, str]] = None,
+               manual: Optional[bool] = None) -> bool:
     """Remember that this session's move waits for its background work. True the first time for a limit
     only, so the owner hears it once however often the move is tried again; a new limit (another id)
     starts a fresh record. `origin` is the account that hit the limit. `proc` is (pid, start time) of the
     process that ignored /exit: a later retry may type into the window only while that same process is
-    still the one running there (the owner may since have run /clear or /resume in it)."""
+    still the one running there (the owner may since have run /clear or /resume in it).
+    `manual` keeps an owner's request retryable with automatic switching off; retry stamps preserve it."""
     now_ts = time.time() if now is None else now
     old = deferred_move(session, now_ts)
+    if old and old.get("manual") and manual is not True:
+        # An automatic worker may stamp a retry, but cannot replace an owner's choice or authority.
+        target, manual = old["target"], True
+        limit = None  # a later automatic report does not replace the owner's request either
     lid = (limit or {}).get("id") or (old or {}).get("limit_id")
     if old and lid != old.get("limit_id"):
         old = None
     write_private(_deferred_path(session), json.dumps({
         "target": target, "since": (old or {}).get("since", now_ts), "tried": now_ts,
         "origin": origin or (old or {}).get("origin"), "limit_id": lid,
+        "manual": bool((old or {}).get("manual")) if manual is None else manual,
         "reset": (limit or {}).get("reset") or (old or {}).get("reset"),
         "pid": proc[0] if proc else (old or {}).get("pid"),
         "started": proc[1] if proc else (old or {}).get("started")}))
@@ -1175,10 +1528,14 @@ def defer_move(session: str, target: str, now: Optional[float] = None, origin: O
 
 
 def deferred_move(session: str, now: Optional[float] = None) -> Optional[dict]:
-    """The waiting move, None once its limit has reset or it is older than DEFER_TTL."""
+    """The waiting move. Automatic requests expire with their limit or DEFER_TTL; owner requests do not."""
     now_ts = time.time() if now is None else now
     data = _read(_deferred_path(session), {})
-    if not isinstance(data, dict) or not data.get("target") or now_ts - float(data.get("since") or 0) > DEFER_TTL:
+    if not isinstance(data, dict) or not data.get("target"):
+        return None
+    if data.get("manual"):
+        return data
+    if now_ts - float(data.get("since") or 0) > DEFER_TTL:
         return None
     try:
         if data.get("reset") and now_ts >= float(data["reset"]):
@@ -1240,15 +1597,22 @@ big_account = is_big_plan
 def used(name: str, now: Optional[float] = None) -> float:
     """The fullest window of the real account behind `name` (0-100). Profiles signed in as the same
     address share one quota, so the fullest reading of any of them counts for all."""
-    return max([_used_one(n, now) for n in [name] + quota_twins(name)])
+    now_ts = time.time() if now is None else now
+    hits = _read(_limits_path(), {})
+    known = [n for n in [name] + quota_twins(name) if reading_fresh(n, now_ts)
+             or 0 <= now_ts - float(hits.get(n) or 0) < LIMIT_COOLDOWN]
+    return max((_used_one(n, now_ts) for n in known), default=50.0)
 
 
 def _used_one(name: str, now: Optional[float] = None) -> float:
     """The profile's own fullest window still running (0-100).
-    A limit hit makes the account count as full (100) for 5 hours, EXCEPT when its
-    5-hour window reset after the hit, or a usage reading newer than the hit shows it below 95%."""
+    A limit hit makes the account count as full (100) for 5 hours, except when its
+    5-hour window reset after the hit or a newer below-limit usage reading clears the hit."""
     now_ts = time.time() if now is None else now
     u = _read(usage_path(name), {})
+    _clear_limit_from_usage(name, u)
+    if not reading_fresh(name, now_ts):
+        u = {}  # unknown, not the obsolete percentage (or its already-passed reset)
     hit = _read(_limits_path(), {})
     t_hit = float(hit.get(name, 0) or 0)
     running = [float(u.get(k) or 0) for k in ("five_hour", "weekly") if float(u.get(k + "_resets") or 0) > now_ts]
@@ -1285,7 +1649,7 @@ def _spent_one(name: str, now: Optional[float] = None) -> bool:
     """The profile's own last reading shows a full 5-hour or weekly window that has not reset yet.
     A weekly-spent account was picked once by the fallback and stopped at once."""
     now_ts = time.time() if now is None else now
-    u = _read(usage_path(name), {})
+    u = _read(usage_path(name), {}) if reading_fresh(name, now_ts) else {}
     for key in ("five_hour", "weekly"):
         try:
             if float(u.get(key) or 0) >= 100 and float(u.get(key + "_resets") or 0) > now_ts:
@@ -1308,15 +1672,25 @@ def origin_account(session: str) -> str:
     """The account a session's process really runs on: its record, else the process account, else main.
     Never `account_for`, whose fallback is the default for NEW sessions."""
     known = _read(_sessions_path(), {}).get(session) if session else None
-    if isinstance(known, str) and (known == MAIN or config_dir(known)):
+    if isinstance(known, str) and (known in (MAIN, CREDIT) or config_dir(known)):
         return known
     return limited_account(session)
+
+
+def session_known(session: str) -> bool:
+    """Whether bridge state identifies a session that a move command may operate on."""
+    known = _read(_sessions_path(), {})
+    if isinstance(known.get(session), str):
+        return True
+    return any(str(rec.get("sessionId") or "") == session for rec in live_session_records())
 
 
 GROUP_WINDOW = 10.0  # seconds: limits recorded this close with the same reset are one exhausted group
 
 
-def _five_reset(name: str) -> float:
+def _five_reset(name: str, now: Optional[float] = None) -> float:
+    if not reading_fresh(name, now):
+        return 0.0
     try:
         return float(_read(usage_path(name), {}).get("five_hour_resets") or 0)
     except (TypeError, ValueError):
@@ -1328,13 +1702,13 @@ def _exhausted_group(here: str, others: List[str], now_ts: float) -> set:
     other and show the same 5-hour reset. Moving to one of them lands on a limit that is already hit
     (two sessions moved to the second account of the same exhausted pair)."""
     hits = _read(_limits_path(), {})
-    mine, reset = float(hits.get(here, 0) or 0) or now_ts, _five_reset(here)
+    mine, reset = float(hits.get(here, 0) or 0) or now_ts, _five_reset(here, now_ts)
     if reset <= now_ts:  # a shared reset that has passed means nothing is exhausted any more
         return set()
     out = set()
     for n in others:
         theirs = float(hits.get(n, 0) or 0)
-        if theirs and abs(theirs - mine) <= GROUP_WINDOW and abs(_five_reset(n) - reset) <= 1:
+        if theirs and abs(theirs - mine) <= GROUP_WINDOW and abs(_five_reset(n, now_ts) - reset) <= 1:
             out.add(n)
     return out
 
@@ -1361,14 +1735,15 @@ def distinct_others(here: str) -> List[str]:
 
 def fallback_plan(session: str, now: Optional[float] = None, env: Optional[dict] = None) -> dict:
     """Which account ran out and which are left: {here, others, fresh, auto}. `fresh` are the others
-    that did not hit their own limit within the last five hours, sorted by (is_big_plan, used%).
+    with a fresh (at most 12 hours old) reading and room, sorted by (is_big_plan, used%).
     Profiles signed in as the same account are one account: `others` never holds a twin of `here`.
     Callers about to plan a move re-read the logins first (identity.check)."""
     now_ts = time.time() if now is None else now
-    here = limited_account(session, env)
+    # A listener/recovery worker's environment is not the running session's login.
+    here = limited_account(session, env) if env is not None else origin_account(session)
     others = distinct_others(here)
     group = _exhausted_group(here, others, now_ts)
-    fresh = [n for n in others if n not in group and not spent(n, now_ts)]
+    fresh = [n for n in others if n not in group and has_headroom(n, now_ts)]
     fresh.sort(key=lambda n: (is_big_plan(n), used(n, now_ts)))
     return {"here": here, "others": others, "fresh": fresh, "auto": auto_enabled()}
 
@@ -1377,16 +1752,19 @@ def pick_account(cur: str, small_first: bool = False, now: Optional[float] = Non
     """The account with the most room when cur is at 95% or hit a limit in the last 5 hours.
     small_first: also leave the big plan for a smaller one with room (<80%), so Pro quota that would
     otherwise reset unused is spent first."""
+    if cur == CREDIT:
+        return None  # only credit_mode owns the approved activation's reset/move
     now_ts = time.time() if now is None else now
     all_names = distinct_others(cur)
     if small_first and is_big_plan(cur):
-        small = sorted((n for n in all_names if not is_big_plan(n) and used(n, now_ts) < 80),
+        small = sorted((n for n in all_names if not is_big_plan(n) and has_headroom(n, now_ts)
+                        and used(n, now_ts) < 80),
                        key=lambda n: used(n, now_ts))
         if small:
             return small[0]
     if used(cur, now_ts) < 95:
         return None
-    room = sorted((n for n in all_names if used(n, now_ts) < 90),
+    room = sorted((n for n in all_names if has_headroom(n, now_ts) and used(n, now_ts) < 90),
                   key=lambda n: (is_big_plan(n), used(n, now_ts)))
     return room[0] if room else None
 
@@ -1565,6 +1943,8 @@ def rebalance(cfg: Optional[object] = None, bot=None, now: Optional[float] = Non
         if not sid:
             continue
         acct = account_for(sid)
+        if acct == CREDIT:
+            continue
         thread = (topics.get(sid) or {}).get("thread")
         pane_exists = False
         try:
@@ -1707,9 +2087,10 @@ def usage_record_from_oauth(body: dict, now_ts: float) -> Optional[dict]:
     week, week_r = _window(body, "seven_day")
     if five is None and week is None:
         return None
-    return {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)), "five_hour": round(five or 0),
-            "weekly": round(week or 0), "five_hour_resets": int(five_r) if five_r else "",
-            "weekly_resets": int(week_r) if week_r else "", "source": "oauth", "extra": []}
+    return {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)), "five_hour": round(five) if five is not None else None,
+            "weekly": round(week) if week is not None else None, "five_hour_resets": int(five_r) if five_r else "",
+            "weekly_resets": int(week_r) if week_r else "", "five_hour_present": five is not None,
+            "source": "oauth", "extra": []}
 
 
 USAGE_FORCE_GAP = 20.0  # a forced fetch never repeats for one profile sooner than this
@@ -1772,6 +2153,7 @@ def refresh_usage(now: Optional[float] = None, only: Optional[List[str]] = None,
             newer = latest.get("source") == "statusline" and iso_epoch(latest.get("at")) >= int(now_ts)
             if out and not newer:
                 write_private(usage_path(name), json.dumps(out))
+                _clear_limit_from_usage(name, out)
                 written.append(name)
         with _lock(_usage_state_path()):  # only this profile's entry goes back, onto the file as it is now
             merged = _read(_usage_state_path(), {})
@@ -1785,6 +2167,17 @@ def reading_age(name: str, now: Optional[float] = None) -> Optional[float]:
     rec = _read(usage_path(name), {})
     at = iso_epoch(rec.get("at"))
     return None if not at else (time.time() if now is None else now) - at
+
+
+def reading_fresh(name: str, now: Optional[float] = None) -> bool:
+    age = reading_age(name, now)
+    return age is not None and 0 <= age <= MOVE_USAGE_MAX_AGE
+
+
+def has_headroom(name: str, now: Optional[float] = None) -> bool:
+    """Only a dated, fresh reading can authorize moving work onto an account."""
+    now_ts = time.time() if now is None else now
+    return reading_fresh(name, now_ts) and not spent(name, now_ts)
 
 
 FRESH_SIGN_IN = 600.0  # a sign-in finished this recently counts as new
@@ -1832,13 +2225,22 @@ def usage_lines(now: Optional[float] = None, lang: Optional[str] = None) -> List
             continue
         u = _read(usage_path(name), {})
         try:
-            week = int(u.get("weekly", 0))
+            from .usage import has_five_hour
+            week = u.get("weekly")
+            if week is not None and not (isinstance(week, (int, float)) and not isinstance(week, bool)
+                                         and math.isfinite(week) and 0 <= week <= 1000):
+                raise ValueError("bad weekly value")
+            week = int(week) if week is not None else None
             at = calendar.timegm(time.strptime(u["at"], "%Y-%m-%dT%H:%M:%SZ"))
-            top = week  # weekly only: the plans here have no 5-hour window
+            five = int(u["five_hour"]) if has_five_hour(u) else None
+            if week is None and five is None:
+                raise ValueError("no reported window")
+            top = max(value for value in (week, five) if value is not None)
             dot = "🔴" if top >= 90 else "🟡" if top >= 70 else "🟢"
             age = now - at
             old = t("accounts_old_age", lang=lang, hours=int(age // 3600)) if age > STALE_READING else ""
-            out.append(t("accounts_week", lang=lang, dot=dot, who=who, week=week, old=old))
-        except (KeyError, ValueError, TypeError):
+            key = "accounts_five" if week is None else "accounts_both" if five is not None else "accounts_week"
+            out.append(t(key, lang=lang, dot=dot, who=who, five=five, week=week, old=old))
+        except (KeyError, ValueError, TypeError, OverflowError):
             out.append(t("accounts_no_data", lang=lang, who=who))
     return out

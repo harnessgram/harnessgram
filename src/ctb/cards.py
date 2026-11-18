@@ -190,6 +190,8 @@ def _record(ident, raw) -> Optional[dict]:
            "chat": raw["chat"], "thread": raw["thread"], "created": float(raw["created"]),
            "updated": float(raw["updated"]), "state": state, "pick": None, "text": "", "closed": 0.0,
            "visibility": visibility_of(raw), **body}
+    if type(raw.get("msg")) is int and raw["msg"] > 0:
+        rec["msg"] = raw["msg"]
     for key in ("finished_since", "ended_since"):
         if kind == "progress" and D._num(raw.get(key)):
             rec[key] = float(raw[key])
@@ -201,6 +203,9 @@ def _record(ident, raw) -> Optional[dict]:
         rec["automatic"] = True
         if type(raw.get("bg")) is int and 0 <= raw["bg"] <= MAX_BG:
             rec["bg"] = raw["bg"]
+        fingerprint = raw.get("activity_fingerprint")
+        if isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            rec["activity_fingerprint"] = fingerprint
     if kind == "progress" and raw.get("auto_closed") is True:
         rec["auto_closed"] = True
     if state != "open":
@@ -323,7 +328,7 @@ def stale_reminder(session: str, now: float, until: Optional[float] = None) -> s
         if last and 0 <= now - last < PROGRESS_STALE_AFTER:
             return ""
         eligible = [r for r in data.values() if r["session"] == session and r["kind"] == "progress"
-                    and r["state"] == "open" and is_stale(r, now)
+                    and not r.get("automatic") and r["state"] == "open" and is_stale(r, now)
                     and (not r.get("nudged_at") or r.get("nudged_at", 0) < r["updated"] or now < r.get("nudged_at", 0))]
         if not eligible:
             return ""
@@ -424,7 +429,10 @@ def _new_ident(data: dict) -> str:
 
 
 def sync_auto(session: str, chat: int, thread: int, title: str, todos: list, bg: int = 0,
-              now: Optional[float] = None) -> Optional[dict]:
+              now: Optional[float] = None, summary: Optional[dict] = None,
+              refresh: bool = False, expected_id: Optional[str] = None,
+              expected_updated: Optional[float] = None,
+              activity_fingerprint: Optional[str] = None) -> Optional[dict]:
     """The bridge's own progress card for a working session whose agent made none: its title is the topic's
     name, its steps are only the subjects of the session's task list (a list with nothing left to do counts
     as no list: it is from an earlier task), and `bg` is how many background tasks it runs. Written only when
@@ -432,15 +440,27 @@ def sync_auto(session: str, chat: int, thread: int, title: str, todos: list, bg:
     when there is no room."""
     if not session:
         return None
+    if activity_fingerprint is not None and not re.fullmatch(r"[0-9a-f]{64}", activity_fingerprint):
+        return None
     now = time.time() if now is None else now
     valid, remaining, body = _todo_body(todos if isinstance(todos, list) else [])
     if not remaining:
         body = {"steps": [], "at": 0, "percent": None}
+    if summary is not None:
+        from .auto_cards import validate_summary
+        summary = validate_summary(summary)
+        if summary is None:
+            return None
+        title = summary["title"]
+        body = _fields("progress", steps=summary["steps"], at=summary["at"], percent=summary["percent"])
+        body["steps"] = summary["steps"]  # validated FSI/PDI names survive agent-text bidi cleaning
     bg = max(0, min(MAX_BG, int(bg))) if type(bg) is int else 0
     try:
         title = _clean(title, TITLE_CHARS, "title")
     except CardError:
         return None
+    if summary is not None:
+        title = summary["title"]
     with _locked() as path:
         data = _load(path)
         mine = [r for r in data.values() if r["session"] == session and r["kind"] == "progress" and r["state"] == "open"]
@@ -452,10 +472,22 @@ def sync_auto(session: str, chat: int, thread: int, title: str, todos: list, bg:
                 _save(path, data)
             return None
         rec = auto[0] if auto else None
+        if expected_id is not None and (rec is None or rec["id"] != expected_id):
+            return None  # another process closed/replaced the card while background work was running
+        if expected_updated is not None and (rec is None or rec["updated"] != expected_updated):
+            return None  # another process changed this card while background work was running
         if rec:
-            if rec["title"] == title and rec.get("bg", 0) == bg and all(rec.get(k) == v for k, v in body.items()):
+            unchanged = (rec["title"] == title and rec.get("bg", 0) == bg
+                         and all(rec.get(k) == v for k, v in body.items())
+                         and rec.get("activity_fingerprint") == activity_fingerprint)
+            if not refresh and unchanged:
                 return rec
+            # strictly later than the last change, even on a clock rollback or the same tick, so background work
+            # started from the old stamp always sees this update (expected_updated) and drops its stale result
+            now = max(now, rec["updated"] + 0.001)
             rec.update(title=title, bg=bg, updated=now, step_at=step_times(rec, body, now), **body)
+            if activity_fingerprint is not None:
+                rec["activity_fingerprint"] = activity_fingerprint
         else:
             if sum(r["state"] == "open" for r in data.values()) >= MAX_OPEN or sum(
                     r["state"] == "open" and r["session"] == session for r in data.values()) >= MAX_OPEN_PER_SESSION:
@@ -464,6 +496,8 @@ def sync_auto(session: str, chat: int, thread: int, title: str, todos: list, bg:
             rec = {"id": ident, "kind": "progress", "session": session, "chat": chat, "thread": thread,
                    "title": title, "detail": "", "created": now, "updated": now, "state": "open", "closed": 0.0,
                    "automatic": True, "bg": bg, "step_at": [now] * body["at"], **body}
+            if activity_fingerprint is not None:
+                rec["activity_fingerprint"] = activity_fingerprint
             data[ident] = rec
         _save(path, data)
         return rec
@@ -495,8 +529,17 @@ def sync_todos(session: str, chat: int, thread: int, todos: list, title: str,
     time.monotonic() deadline, what a hook passes) a lock still busy then raises CardError("busy")."""
     if not session or not isinstance(todos, list):
         return None
+    from . import auto_cards
+    if not auto_cards.enabled():
+        return None
     now = time.time() if now is None else now
     valid, remaining, body = _todo_body(todos)
+    title = auto_cards.hebrew_line(title, auto_cards.title_fallback(title), TITLE_CHARS)
+    if valid and not remaining:
+        body["steps"] = [auto_cards.hebrew_line(s, auto_cards._group(s)) for s in body["steps"]]
+    else:
+        summary = auto_cards.fallback({"title": title}, {"tasks": todos, "activities": []})
+        body = {k: summary[k] for k in ("steps", "at", "percent")}
     with _locked(until) as path:
         data = _load(path)
         rec = next((r for r in data.values() if r["session"] == session and r["kind"] == "progress"
@@ -510,14 +553,14 @@ def sync_todos(session: str, chat: int, thread: int, todos: list, title: str,
             return None
         if valid and not remaining:
             if rec:
-                rec.update(updated=now, step_at=step_times(rec, body, now), **body)
+                rec.update(title=title, updated=now, step_at=step_times(rec, body, now), **body)
                 rec.update(state="closed", closed=now, auto_closed=True)
                 _save(path, data)
             return rec
         if rec:
-            if all(rec.get(key) == value for key, value in body.items()):
+            if rec["title"] == title and all(rec.get(key) == value for key, value in body.items()):
                 return rec
-            rec.update(updated=now, step_at=step_times(rec, body, now), **body)
+            rec.update(title=title, updated=now, step_at=step_times(rec, body, now), **body)
         else:
             if sum(r["state"] == "open" for r in data.values()) >= MAX_OPEN or sum(
                 r["state"] == "open" and r["session"] == session for r in data.values()) >= MAX_OPEN_PER_SESSION:
@@ -526,7 +569,7 @@ def sync_todos(session: str, chat: int, thread: int, todos: list, title: str,
             while ident in data:
                 ident = secrets.token_hex(8)
             rec = {"id": ident, "kind": "progress", "session": session, "chat": chat, "thread": thread,
-                   "title": _clean(title, TITLE_CHARS, "title"), "detail": "", "created": now, "updated": now,
+                   "title": title, "detail": "", "created": now, "updated": now,
                    "state": "open", "closed": 0.0, "automatic": True, "step_at": [now] * body["at"], **body}
             data[ident] = rec
         _save(path, data)
@@ -644,6 +687,7 @@ def _publish(session: str, chat: int, thread: int, kind: str, title: str, detail
                        **body)
             if kind == "progress":
                 raw.update(state="open", closed=0.0)
+                raw.pop("automatic", None)  # an agent adopting an automatic id owns it from now on
                 for key in ("auto_closed", "finished_since", "ended_since"):
                     raw.pop(key, None)
                 raw["step_at"] = step_times(old, body, now)
@@ -671,6 +715,11 @@ def _publish(session: str, chat: int, thread: int, kind: str, title: str, detail
             raise CardError("the card is not valid")
         data[ident] = rec
         _save(path, data)
+    from . import apns
+    try:
+        apns.notify(rec)
+    except OSError:
+        pass
     return rec
 
 
@@ -701,6 +750,11 @@ def close(session: str, ident: str, now: Optional[float] = None) -> dict:
             raise CardError(f"card {ident} is already {rec['state']}", "closed")
         rec.update(state="closed", closed=now, notice_pending=True)
         _save(path, data)
+    from . import apns
+    try:
+        apns.notify(_record(ident, rec) or rec, "end")
+    except OSError:
+        pass
     return rec
 
 
@@ -714,6 +768,13 @@ def close_session(session: str, now: Optional[float] = None) -> int:
             rec.update(state="closed", closed=now, notice_pending=True)
         if mine:
             _save(path, data)
+    if mine:
+        from . import apns
+        for rec in mine:
+            try:
+                apns.notify(_record(rec["id"], rec) or rec, "end")
+            except OSError:
+                pass
     return len(mine)
 
 
@@ -785,7 +846,10 @@ def wake(inbox, rec: dict) -> None:
 def view(rec: dict, now: float) -> dict:
     """A card as the panel page gets it (no session id beyond its short form, no chat ids)."""
     out = {"id": rec["id"], "kind": rec["kind"], "title": rec["title"], "detail": rec["detail"],
-           "age": max(0, int(now - rec["updated"])), "session": rec["session"][:8]}
+           "age": max(0, int(now - rec["updated"])), "session": rec["session"][:8],
+           # epoch seconds of the card's last authored change (steps, percent, title); the live line never moves
+           # it. The iOS Live Activity follows the most recently updated card. A record without it reads as made.
+           "updated": float(rec.get("updated") or rec.get("created") or 0.0)}
     for key in ("steps", "at", "percent", "options", "images", "url", "label", "figures", "live", "live_at"):
         if key in rec:
             out[key] = rec[key]
@@ -841,8 +905,8 @@ def run(cfg: Config, action: str, title: str = "", detail: str = "", ident: str 
                   "so the owner sees them on the card.", file=sys.stderr)
         return 0
     except D.DecisionError as e:
-        print(f"Harnessgram: {e.reason}", file=sys.stderr)
+        print(f"HarnessGram: {e.reason}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Harnessgram: cards are not available ({type(e).__name__})", file=sys.stderr)
+        print(f"HarnessGram: cards are not available ({type(e).__name__})", file=sys.stderr)
         return 1

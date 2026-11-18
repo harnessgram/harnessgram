@@ -48,7 +48,7 @@ def cfg():
 # --- defaults keep today's behaviour -----------------------------------------------------------------------------
 
 def test_defaults_with_no_settings_file():
-    assert A.settings() == {"waiting": "on", "system": "on", "replies": "summary", "files": "off", "radio": "on", "cockpit": "on"}
+    assert A.settings() == {"waiting": "on", "system": "on", "replies": "summary", "quote_owner": "off", "files": "off", "radio": "on", "cockpit": "on"}
     assert [k for k in A.KINDS if A.enabled(k)] == ["waiting", "system", "summary", "radio", "cockpit"]
     assert not A.enabled("unknown")
 
@@ -72,7 +72,7 @@ def test_corrupt_or_unknown_settings_mean_defaults(content):
 
 def test_valid_values_survive_next_to_invalid_ones():
     choose(waiting="off", replies="bogus", files="on", system=["x"])
-    assert A.settings() == {"waiting": "off", "system": "on", "replies": "summary", "files": "on", "radio": "on", "cockpit": "on"}
+    assert A.settings() == {"waiting": "off", "system": "on", "replies": "summary", "quote_owner": "off", "files": "on", "radio": "on", "cockpit": "on"}
 
 
 def test_set_option_validates_and_the_file_is_private():
@@ -172,6 +172,64 @@ def rig(tmp_path):
 def test_default_reply_copy_is_the_summary_only(rig):
     sent = rig.reply("Long body of the answer.\n\nSummary: all done")
     assert rig.bodies(sent) == ["all done"] and sent[0]["disable_notification"] is True
+
+
+def test_summary_does_not_quote_owner_message_by_default(rig):
+    owner_text = "private plans for the next release"
+    rig.bot.calls.clear()
+    rig.mirror.send_reply("Title", "s1", "Details.\n\nSummary: completed",
+                          answer_to={"chat": GROUP, "id": 40, "text": owner_text, "source": "owner"})
+    sent = to_channel(rig.bot)
+    assert rig.bodies(sent) == ["completed"]
+    assert owner_text not in json.dumps(sent)
+
+
+def test_team_message_is_never_quoted_even_when_owner_quotes_are_on(rig):
+    choose(quote_owner="on")
+    team_text = "team-only context"
+    rig.bot.calls.clear()
+    rig.mirror.send_reply("Title", "s1", "Details.\n\nSummary: completed",
+                          answer_to={"chat": GROUP, "id": 40, "text": team_text, "source": "team"})
+    sent = to_channel(rig.bot)
+    assert rig.bodies(sent) == ["completed"]
+    assert team_text not in json.dumps(sent)
+
+
+def test_reply_pair_quotes_prompt_expands_summary_and_links_exact_reply(rig):
+    choose(quote_owner="on")
+    rig.bot.calls.clear()
+    rig.mirror.send_reply("Title", "s1", "Details.\n\nSummary: shipped safely",
+                          answer_to={"chat": GROUP, "id": 41, "text": "Please ship <this>", "source": "owner"})
+    topic = [p for p in rig.bot.methods("sendMessage") if p.get("chat_id") == GROUP][0]
+    assert topic["reply_parameters"] == {"message_id": 41, "allow_sending_without_reply": True}
+    (card,) = to_channel(rig.bot)
+    assert card["parse_mode"] == "HTML"
+    assert card["text"].startswith("<b>Title</b>\n<blockquote>Please ship &lt;this&gt;</blockquote>")
+    assert "<blockquote expandable>shipped safely</blockquote>" in card["text"]
+    url = card["reply_markup"]["inline_keyboard"][0][0]["url"]
+    assert url.endswith("/" + str(topic["message_id"]))
+    assert card["text"].count("Title") == 1
+
+
+def test_full_reply_pair_uses_the_answer_not_only_its_summary(rig):
+    choose(replies="full", quote_owner="on")
+    rig.bot.calls.clear()
+    rig.mirror.send_reply("Title", "s1", "Concrete result.\n\nSummary: shipped",
+                          answer_to={"chat": GROUP, "id": 42, "text": "What changed?", "source": "owner"})
+    (card,) = to_channel(rig.bot)
+    assert "<blockquote expandable>Concrete result.\n\nshipped</blockquote>" in card["text"]
+
+
+def test_long_full_reply_pair_stays_within_escaped_telegram_limit_and_links_topic(rig):
+    choose(replies="full", quote_owner="on")
+    rig.bot.calls.clear()
+    rig.mirror.send_reply("Title", "s1", "<&>" * 3000,
+                          answer_to={"chat": GROUP, "id": 42, "text": "Explain <this> & that", "source": "owner"})
+    (card,) = to_channel(rig.bot)
+    assert len(card["text"]) <= 4096
+    assert "&lt;&amp;&gt;" in card["text"] and "rest of the reply is in the topic" in card["text"]
+    assert card["text"].endswith("</blockquote>")
+    assert card["reply_markup"]["inline_keyboard"][0][0]["url"].startswith("https://t.me/")
 
 
 def test_replies_off_sends_nothing(rig):
@@ -424,16 +482,16 @@ def test_alerts_without_a_channel_says_how_to_connect_in_one_line(phone):
     assert "\n" not in p["text"] and "administrator" in p["text"] and "reply_markup" not in p
 
 
-def test_alerts_shows_five_buttons_with_todays_defaults(phone):
+def test_alerts_shows_buttons_with_todays_defaults(phone):
     register("My alerts")
     phone.command()
     p = phone.shown()
-    assert labels(p) == ["🔔 Waiting for you: ✅ on", "⚙️ System events: ✅ on", "💬 Replies: summary",
+    assert labels(p) == ["🔔 Waiting for you: ✅ on", "⚙️ System events: ✅ on", "💬 Replies: summary", "🗨️ Quote your messages: ⛔ off",
                          "📎 Files (up to 50 MB): ⛔ off", "📻 Radio summaries: ✅ on", "🎛 Cockpit questions: ✅ on",
                          "✖️ Close menu"]
     assert "My alerts" in p["text"] and "Everyone in the channel" not in p["text"]
     assert [b["callback_data"] for row in p["reply_markup"]["inline_keyboard"] for b in row] == [
-        "al:w:off", "al:s:off", "al:r:full", "al:f:on", "al:o:off", "al:c:off", "more:dismiss"]
+        "al:w:off", "al:s:off", "al:r:full", "al:q:on", "al:f:on", "al:o:off", "al:c:off", "more:dismiss"]
 
 
 def test_a_tap_changes_the_setting_and_edits_the_same_message(phone):
@@ -447,7 +505,7 @@ def test_a_tap_changes_the_setting_and_edits_the_same_message(phone):
     assert len(phone.bot.methods("sendMessage")) == 1                                       # no new message
     phone.press("al:r:off")
     phone.press("al:w:off")
-    assert A.settings() == {"waiting": "off", "system": "on", "replies": "off", "files": "off", "radio": "on", "cockpit": "on"}
+    assert A.settings() == {"waiting": "off", "system": "on", "replies": "off", "quote_owner": "off", "files": "off", "radio": "on", "cockpit": "on"}
 
 
 def test_turning_files_on_warns_plainly(phone):
@@ -455,7 +513,7 @@ def test_turning_files_on_warns_plainly(phone):
     phone.press("al:f:on")
     assert "Everyone in the channel will see them" in phone.bot.methods("answerCallbackQuery")[-1]["text"]
     edit = phone.bot.methods("editMessageText")[-1]
-    assert "Everyone in the channel sees every file" in edit["text"] and "⛔ off" not in labels(edit)[3]
+    assert "Everyone in the channel sees every file" in edit["text"] and "⛔ off" not in labels(edit)[4]
     phone.press("al:f:off")
     assert "Everyone" not in phone.bot.methods("editMessageText")[-1]["text"]
 
@@ -716,7 +774,7 @@ def test_low_hebrew_title_is_isolated_and_texts_are_current(phone):
     register("Chan")
     phone.command()
     assert "⁨Chan⁩" in phone.shown()["text"]
-    assert "50" in labels(phone.shown())[3]
+    assert "50" in labels(phone.shown())[4]
     from ctb.i18n import t
     for lang in ("en", "he"):
         assert "Only what needs you" not in t("alerts_channel_intro", lang=lang)
@@ -1139,9 +1197,9 @@ def test_a_file_signed_in_the_previous_shape_keeps_the_owners_choices_and_is_sig
     old = {"waiting": "off", "system": "off", "replies": "full", "files": "on"}
     _old_shape(cfg, old)
     got = A.settings(cfg)
-    assert got == {**old, "radio": "on", "cockpit": "on"}  # nothing reset, the new choices take their defaults
+    assert got == {**old, "quote_owner": "off", "radio": "on", "cockpit": "on"}  # nothing reset, the new choices take their defaults
     raw = json.loads((C.state_dir() / A.SETTINGS_FILE).read_text())
-    assert set(raw) == {"waiting", "system", "replies", "files", "radio", "cockpit", "n", "mac"} and raw["n"] > 5
+    assert set(raw) == {"waiting", "system", "replies", "quote_owner", "files", "radio", "cockpit", "n", "mac"} and raw["n"] > 5
     assert A._read_signed(cfg, CHANNEL)[1] == got  # the re-saved file verifies in the current shape
     A._saved.clear()  # a fresh process reads the same
     assert A.settings(cfg) == got and not A.enabled("system", cfg)

@@ -511,7 +511,7 @@ def _station(c):
 
 def test_room_speech_counts_toward_shared_budget_and_subcap_then_uses_free_voice(monkeypatch):
     c = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER, target_language="he", ui_language="he",
-               gemini_vertex_project="p", radio={"room_tts_daily_minutes": 1})
+               gemini_vertex_project="p", radio={"voice_route": "cloud", "room_tts_daily_minutes": 1})
     st = _station(c)
     radio.radio_listeners.player_fetch(st.dir)
     calls = []
@@ -642,7 +642,8 @@ def test_f1_the_room_cap_records_a_runaway_uncapped_answer_and_blocks_paid_speec
     monkeypatch.setattr(V, "access_token", lambda cfg, why=None: "token")
     monkeypatch.setattr(V, "system_voice", lambda text, voice: b"\x02\x00" * V.RATE)
     c = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER, target_language="he", ui_language="he",
-               gemini_vertex_project="p", radio={"room_tts_daily_minutes": 15, "tts_model": "gemini-3.8-flash-tts"})
+               gemini_vertex_project="p", radio={"voice_route": "cloud", "room_tts_daily_minutes": 15,
+                                                       "tts_model": "gemini-3.8-flash-tts"})
     st = _station(c)
     radio.radio_listeners.player_fetch(st.dir)
     room_usage = V.Usage(RR.usage_path())

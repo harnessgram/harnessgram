@@ -25,6 +25,7 @@ import os
 import plistlib
 import queue
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -39,6 +40,7 @@ from . import (launch, radio_card, radio_listeners, radio_now, radio_play, radio
                radio_voice)
 from .config import Config, HOME, home_chat, private_dir, set_setting, setting_on, state_dir, write_private
 from .i18n import t
+from .news.edition import PrivateRadio
 
 LABEL = "com.claude-telegram-bridge.radio"
 CALL_BUSY = "the group already has another live stream or voice chat"  # radio_call.BUSY
@@ -60,7 +62,8 @@ MAX_RESUME = len(RESUME_BACKOFF)    # failed resume attempts within RESUME_WINDO
 RESUME_WINDOW = 3600
 LATE_AFTER = 0.25           # seconds the audio feed may fall behind real time before the pipeline logs it
 DEFAULTS = {
-    "every_minutes": 20, "news_minutes": 3, "tts_daily_minutes": 25, "tts_listening_minutes": 60,
+    "every_minutes": 20, "news_minutes": 3, "voice_route": "local", "tts_daily_minutes": 25,
+    "tts_listening_minutes": 60,
     "tts_model": "gemini-2.5-flash-tts", "voice": "Sadaltager",
     "style": "", "say_voice": "", "bed": "off", "bed_db": -30, "video_encoder": "", "title": "",
     "telethon_python": "", "account_api_command": [], "account_session_command": [],
@@ -72,7 +75,7 @@ DEFAULTS = {
     "radio_player": True,
     # start on Play (radio_play.py): pressing Play in the private listen page starts the radio (private audio only);
     # a station started that way stops by itself after play_idle_minutes without an authenticated fetch
-    "play_start": True, "play_idle_minutes": 10,
+    "play_start": True, "play_idle_minutes": 10, "private_idle_minutes": 10,
     # the podcast queue (radio_podcast.py): the child-suitability checker an episode must pass ("" = the shared one)
     "podcast_checker": "",
 }
@@ -284,6 +287,8 @@ def settings(cfg: Config) -> dict:
             v = int(v)
         if isinstance(v, want) and (want is not list or all(isinstance(a, str) for a in v)):
             s[k] = v
+    if s["voice_route"] not in ("local", "cloud"):
+        s["voice_route"] = "local"
     s["lang"] = "he" if (cfg.ui_language or "").startswith("he") else "en"
     if not s["say_voice"] and s["lang"] == "he":
         s["say_voice"] = "Carmit"
@@ -307,12 +312,12 @@ def folder() -> Path:
 
 PRIVATE_AUDIO = "private-audio"   # touched every second while audio that must stay on the home stream is on the air
 PRIVATE_AUDIO_FRESH = 10.0
+PRIVATE_HLS = "private-hls"  # never reuse hls: a pre-upgrade mirror may still be reading it
 
 
 def private_audio_on(now: Optional[float] = None) -> bool:
-    """Audio is on the air that only the home stream may carry (an episode the owner put on). The YouTube mirror
-    edition reads the home radio's HLS audio, so it holds while this is true. A marker that stopped being
-    refreshed (the radio job died) no longer counts."""
+    """Legacy status marker for home-only audio. Routing safety uses separate mixers and HLS directories,
+    never this expiring marker. A marker that stopped being refreshed no longer counts."""
     now = time.time() if now is None else now
     try:
         return 0 <= now - (folder() / PRIVATE_AUDIO).stat().st_mtime <= PRIVATE_AUDIO_FRESH
@@ -320,10 +325,61 @@ def private_audio_on(now: Optional[float] = None) -> bool:
         return False
 
 
-def clear_hls() -> None:
+def queue_private_schedule_summary(cfg: Config, text: str) -> dict:
+    """Spool one bounded line for the schedule loop's private-only mixer."""
+    if not private_audio_on():
+        return {"queued": False, "reason": "private_player_off",
+                "message": t("tower_private_player_off", lang=cfg.ui_language)}
+    s = settings(cfg)
+    usage = radio_voice.paid_usage(folder())
+    selected = radio_listeners.voice_settings(s, radio_listeners.snapshot(folder(), s))
+    if usage.available(selected["tts_daily_minutes"]) in (None, 0):
+        return {"queued": False, "reason": "tts_budget_exhausted",
+                "message": t("tower_tts_budget_exhausted", lang=cfg.ui_language)}
+    clean = " ".join(str(text).split())[:500]
+    if not clean:
+        return {"queued": False, "reason": "empty"}
+    spool = private_dir(folder() / "schedule-requests")
+    with open(folder() / "schedule-requests.lock", "a") as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if next(spool.glob("*.txt"), None) is not None:
+            return {"queued": False, "reason": "already_queued",
+                    "message": t("tower_already_queued", lang=cfg.ui_language)}
+        write_private(spool / (secrets.token_hex(8) + ".txt"), clean)
+    return {"queued": True, "private": True,
+            "message": t("tower_summary_queued", lang=cfg.ui_language)}
+
+
+def private_schedule_budget_available(cfg: Config, current_settings=None) -> bool:
+    """Re-read the paid-speech allowance at the point a private summary will be spoken."""
+    current_settings = current_settings or settings(cfg)
+    usage = radio_voice.paid_usage(folder())
+    selected = radio_listeners.voice_settings(
+        current_settings, radio_listeners.snapshot(folder(), current_settings))
+    return usage.available(selected["tts_daily_minutes"]) not in (None, 0)
+
+
+def drain_private_schedule_requests(cfg: Config, current_settings, speak: Callable[[str], None]) -> None:
+    """Consume the single admitted summary, checking its allowance immediately before speech."""
+    requests = private_dir(folder() / "schedule-requests")
+    with open(folder() / "schedule-requests.lock", "a") as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for request in sorted(requests.glob("*.txt"))[:1]:
+            try:
+                text = request.read_text(encoding="utf-8")[:500]
+                if private_schedule_budget_available(cfg, current_settings):
+                    speak(text)
+                request.unlink()
+            except OSError:
+                continue
+
+
+def clear_hls(name: str = PRIVATE_HLS) -> None:
     """Drop this run's private audio, including temporary segments; never follow a directory link."""
     try:
-        path = folder() / "hls"
+        path = folder() / name
         if path.is_symlink():
             path.unlink()
             return
@@ -336,7 +392,7 @@ def clear_hls() -> None:
 
 def prepare_hls() -> Path:
     clear_hls()
-    path = folder() / "hls"
+    path = folder() / PRIVATE_HLS
     if path.is_symlink():
         raise OSError("linked HLS directory")
     return private_dir(path)
@@ -393,6 +449,23 @@ def _secret(command: List[str]) -> str:
 
 # --- the group's live stream (the owner's account) -------------------------------------------
 
+def account_helper(s: dict, action: str, *, runner: Callable = subprocess.run, **request) -> dict:
+    """Run a read-only or call action through the radio's existing account session."""
+    if not s["telethon_python"] or not s["account_api_command"] or not s["account_session_command"]:
+        return {"ok": False, "error": "not configured"}
+    req = {"action": action, "api_command": s["account_api_command"],
+           "session_command": s["account_session_command"], **request}
+    if action == "read_channels":
+        req["cache_file"] = str(folder() / "news-channel-ids.json")
+    try:
+        r = runner([s["telethon_python"], "-I", str(Path(__file__).with_name("radio_call.py"))],
+                   input=json.dumps(req).encode(), capture_output=True, timeout=120)
+        out = json.loads((r.stdout or b"{}").decode("utf-8", "replace").strip().splitlines()[-1])
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return {"ok": False, "error": "helper failed"}
+    return out if isinstance(out, dict) else {"ok": False, "error": "helper failed"}
+
+
 def call_helper(s: dict, action: str, call: Optional[dict] = None, runner: Callable = subprocess.run) -> dict:
     """Run radio_call.py under the Telethon Python. The request names only the home group."""
     if not s["telethon_python"] or not s["account_api_command"] or not s["account_session_command"]:
@@ -402,13 +475,8 @@ def call_helper(s: dict, action: str, call: Optional[dict] = None, runner: Calla
         raise RadioError("radio_needs_group")
     req = {"action": action, "chat": chat, "allowed": [chat], "title": s["title"], "call": call or {},
            "api_command": s["account_api_command"], "session_command": s["account_session_command"]}
-    try:
-        r = runner([s["telethon_python"], "-I", str(Path(__file__).with_name("radio_call.py"))],
-                   input=json.dumps(req).encode(), capture_output=True, timeout=120)
-        out = json.loads((r.stdout or b"{}").decode("utf-8", "replace").strip().splitlines()[-1])
-    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
-        return {"ok": False, "error": "helper failed"}
-    return out if isinstance(out, dict) else {"ok": False, "error": "helper failed"}
+    return account_helper(s, action, runner=runner, **{k: v for k, v in req.items()
+                                                        if k not in ("action", "api_command", "session_command")})
 
 
 # --- launchd -----------------------------------------------------------------------------------
@@ -877,6 +945,67 @@ def stop(cfg: Config, play: bool = False) -> str:
         return _stop_locked(cfg, s)
 
 
+def _mirror_clear(cfg) -> bool:
+    """Only a definite absence permits an idle countdown or stop."""
+    try:
+        return radio_play.mirror_in_use(cfg) is False
+    except Exception:
+        return False
+
+
+def stop_private_idle(cfg: Config, since: float, run_started: int) -> bool:
+    """Recheck the uninterrupted quiet interval and station identity while fetches and switches are locked."""
+    with radio_listeners.presence_lock(folder()) as held:
+        if not held:
+            return False
+        with _locked():
+            s = settings(cfg)
+            state = _read(folder() / "state.json")
+            status = _read(folder() / "status.json")
+            observed = radio_listeners.snapshot(folder(), s)
+            last = _read(folder() / "player-listener.json").get("at", 0)
+            if (not _mirror_clear(cfg) or s["group_live"] or not wanted() or not state.get("on") or
+                    status.get("started") != run_started or not observed["listening_detection"] or
+                    observed["listening_source"] != "none" or type(last) not in (int, float) or
+                    last >= since or time.time() - since < max(1, s["private_idle_minutes"]) * 60):
+                return False
+            _end_room("radio_off")
+            _stop_locked(cfg, s)
+    try:
+        from .telegram import Bot
+        Bot.from_config(cfg).call("sendMessage", {"chat_id": cfg.owner_chat_id,
+            "text": t("radio_private_idle_stopped", lang=cfg.ui_language)})
+    except Exception:
+        log("idle stop: notification failed")
+    return True
+
+
+def watch_private_idle(cfg, quit_event, run_started, clock=time.time, spawn_idle=None):
+    """A fresh interval starts after each listener, unknown signal, or station restart."""
+    since = None
+    while not quit_event.wait(2):
+        now = clock()
+        try:
+            s = settings(cfg)
+            observed = radio_listeners.snapshot(folder(), s, now=now)
+            if not _mirror_clear(cfg) or s["group_live"] or not observed["listening_detection"] or observed["listening_source"] != "none":
+                since = None
+                continue
+            if since is None:
+                since = now
+            if now - since >= max(1, s["private_idle_minutes"]) * 60:
+                if spawn_idle:
+                    spawn_idle(since, run_started)
+                else:
+                    subprocess.Popen(launch.argv() + ["radio", "stop", "--idle-since", str(since),
+                                                     "--idle-run", str(run_started)],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                since = None
+        except Exception:
+            since = None
+
+
 def _stop_locked(cfg: Config, s: dict, play: bool = False) -> str:
     """The stop itself; the caller holds the control lock. A Play stop never ends a group stream (the account helper
     is not run; what state.json recorded stays recorded for the owner's own stop) and never syncs the mirror."""
@@ -1154,6 +1283,102 @@ class Mixer:
             return out.tobytes()
 
 
+class SpeechMixer(Mixer):
+    """Copyright boundary: only queued station speech, regardless of bed/show assignments."""
+
+    def _bed(self, n: int) -> array.array:
+        return array.array("h", [0]) * n
+
+    def show_playing(self) -> bool:
+        return False
+
+
+class PrivateMixer(Mixer):
+    """Private PCM mix before the existing AAC/HLS encoder. Speech starts on the next frame."""
+
+    FADE_OUT, FADE_IN, DUCK = 0.5, 1.0, 10 ** (-18 / 20)
+
+    def __init__(self, bed: bytes, public: SpeechMixer):
+        super().__init__(bed)
+        self.public = public
+        self.background = None
+        self.background_enabled = False  # enabled by the controller after the quiet-day check
+        self.background_allowed: Optional[Callable[[], bool]] = None
+        self.speech_first = True
+
+    def add(self, pcm: bytes, tag: Optional[int] = None, front: bool = False) -> None:
+        self.add_private(pcm, tag, front)
+        self.public.add(pcm, tag, front)
+
+    def add_private(self, pcm: bytes, tag: Optional[int] = None, front: bool = False) -> None:
+        """Home-only speech: never copy it to the group/mirror speech mixer."""
+        super().add(pcm, tag, front)
+
+    def drop(self, tags) -> int:
+        self.public.drop(tags)
+        return super().drop(tags)
+
+    def bed_allowed(self) -> bool:
+        """The audio writer checks the cutoff every chunk, independently of the controller."""
+        try:
+            return self.background_enabled and (self.background_allowed is None or self.background_allowed())
+        except Exception:
+            return False
+
+    def next(self, n: int = FRAME) -> bytes:
+        with self.lock:
+            active_gate = getattr(self, "active_gate", None)
+            if self.voice is not None and active_gate is not None and not active_gate(self.voice_tag):
+                self.voice = None
+            podcast_playing = self.show_playing()
+            # A podcast is paused, rather than ducked, so its decoder must not advance while speech is on air.
+            # Music keeps playing underneath, but speech waits until the fade has reached its floor.
+            while (self.voice is None and self.clips and
+                   (podcast_playing or self.background is None or self.gain <= self.DUCK + 1e-12)):
+                pcm, tag = self.clips.popleft()
+                self.front_n = max(0, self.front_n - 1)
+                if tag is not None and self.veto is not None and self.veto(tag):
+                    continue
+                self.voice_tag = tag
+                self.voice, self.voice_total = memoryview(pcm), len(pcm)
+            speaking = self.voice is not None
+            voice = array.array("h", bytes(self.voice[:2 * n])) if speaking else array.array("h")
+            if speaking:
+                self.voice = self.voice[2 * n:] if len(self.voice) > 2 * n else None
+            self.speaking = speaking
+            bed = array.array("h", [0]) * n
+            if self.bed_allowed():
+                source = self.show if podcast_playing else self.background
+                if source is self.show and speaking:
+                    source = None
+                if source is not None:
+                    chunk = source.read(2 * n)
+                    if chunk is None:
+                        if source is self.show:
+                            self.show = None
+                        else:
+                            self.background = None
+                    else:
+                        bed = array.array("h", chunk[:2 * n])
+                        bed.extend([0] * (n - len(bed)))
+                else:
+                    bed = self._bed(n)
+            if not self.bed_allowed():  # a read may have crossed the quiet-window boundary
+                bed = array.array("h", [0]) * n
+            fading_for_speech = speaking or (bool(self.clips) and self.background is not None and not podcast_playing)
+            target = self.DUCK if fading_for_speech else 1.0
+            seconds = self.FADE_OUT if fading_for_speech else self.FADE_IN
+            step = (1.0 - self.DUCK) / (seconds * RATE)
+            gain = self.gain
+            out = array.array("h")
+            for i, sample in enumerate(bed):
+                gain = max(target, gain - step) if gain > target else min(target, gain + step)
+                value = int(sample * gain) + (voice[i] if i < len(voice) else 0)
+                out.append(max(-32768, min(32767, value)))
+            self.gain = gain
+            return out.tobytes()
+
+
 # --- the encoder pipeline ------------------------------------------------------------------------
 
 def out_fps() -> int:
@@ -1263,16 +1488,23 @@ class Pipeline:
                  quit: Optional[threading.Event] = None, err_path: Optional[Path] = None, marker: str = MARKER,
                  source=None, keep: Optional[Callable[[], bool]] = None, hls: bool = False,
                  hls_input: Optional[Path] = None, output_fps: Optional[int] = None,
-                 bitrate: Optional[Tuple[str, str, str]] = None, audio_only: bool = False):
-        """`audio_only`: no group stream (url, key and card are unused): the audio goes only to the private listen
-        stream, with no picture and no network publishing. `err_path` and `marker`: a second, independent pipeline (the staff edition, radio_youtube) keeps its
+                 bitrate: Optional[Tuple[str, str, str]] = None, audio_only: bool = False,
+                 public_audio: bool = False):
+        """`audio_only`: url, key and card are unused; local audio with no picture or network publishing.
+        `public_audio`: local output contains only station speech and lives in public-hls; the private listen
+        output lives in private-hls. Legacy hls is never written. `err_path` and `marker`: a second, independent pipeline (the staff edition, radio_youtube) keeps its
         own encoder log and its own recognisable encoder. `source` (radio_show.BoardShow): the moving picture
         instead of the card file, with its own frame rate and codec; `keep`: checked each second, False ends the
         run with MODE_CHANGED (the station then starts the other picture)."""
         self.hls_input, self.output_fps, self.bitrate = hls_input, output_fps, bitrate
         self.source, self.keep = source, keep
         self.audio_only = audio_only
-        self.hls, self.hls_dir = hls or audio_only, None   # the private stream is all an audio-only run makes
+        self.public_audio = public_audio or not audio_only
+        if self.public_audio and isinstance(mixer, PrivateMixer):
+            raise ValueError("private audio cannot feed a public pipeline")
+        if hls_input is not None and hls_input in (folder() / name / "live.m3u8" for name in ("hls", PRIVATE_HLS)):
+            raise ValueError("private HLS cannot feed a public pipeline")
+        self.hls, self.hls_dir = hls or audio_only, None
         self.strip_out = None
         self._url, self._key = url, key
         self.err_path, self.marker = err_path, marker
@@ -1285,18 +1517,18 @@ class Pipeline:
         self.diag = None
         self.hls_fresh = False
 
-    def _hls_freshness(self) -> None:
+    def _hls_freshness(self, player=None) -> None:
         """Do all player filesystem probing off the pipeline supervision thread."""
+        from .radio_rtmp import cleanup_player_hls
         while not self.stop.wait(2.0):
+            if player is not None:
+                player.check_health()
+                player.cleanup()
+            else:
+                cleanup_player_hls(self.hls_dir)
             now = time.time()
             try:
                 self.hls_fresh = now - (self.hls_dir / "live.m3u8").stat().st_mtime <= 15
-                for segment in self.hls_dir.glob("segment-*.ts"):
-                    try:
-                        if now - segment.stat().st_mtime > 120:
-                            segment.unlink()
-                    except OSError:
-                        pass
             except OSError:
                 self.hls_fresh = False
 
@@ -1427,7 +1659,7 @@ class Pipeline:
                     pass
             err = open(self.err_path or folder() / "ffmpeg.err", "ab")
             if self.hls:
-                self.hls_dir = folder() / "hls"
+                self.hls_dir = folder() / ("public-hls" if self.public_audio else PRIVATE_HLS)
                 pub.player_output(self.hls_dir, log)
             rfd, wfd = (None, None) if self.audio_only else os.pipe()   # the picture's pipe: none without a picture
             sfd = swfd = None
@@ -1486,14 +1718,10 @@ class Pipeline:
             for target, args in workers:
                 threading.Thread(target=target, args=args, daemon=True).start()
             if self.hls_dir is not None:
-                threading.Thread(target=self._hls_freshness, daemon=True, name="radio-player-freshness").start()
+                threading.Thread(target=self._hls_freshness, args=(pub.player,), daemon=True,
+                                 name="radio-player-freshness").start()
             from . import policy
-            hls_started, hls_warned = time.time(), False
             while not failed.wait(1.0):
-                if (self.hls_dir is not None and time.time() - hls_started > 15 and
-                        not self.hls_fresh and not hls_warned):
-                    log("radio player: output stalled or failed; continuing the broadcast")
-                    hls_warned = True
                 if self.diag:
                     self.diag.log_error(log)
                 if self.quit.is_set():
@@ -1542,22 +1770,36 @@ class Pipeline:
         if err is not None:
             err.close()
         if self.hls:
-            clear_hls()
+            if self.public_audio:
+                # Do not remove the playlist a running mirror may be reading.  The next segmenter publishes both
+                # segments and playlists with ffmpeg's temp_file+rename and retires unreferenced old segments.
+                from .radio_rtmp import cleanup_player_hls, retire_player_playlist
+                cleanup_player_hls(folder() / "public-hls")
+                retire_player_playlist(folder() / "public-hls")
+            else:
+                clear_hls()
 
 
 # --- the daemon ------------------------------------------------------------------------------------
 
-class Station:
+class Station(PrivateRadio):
     """`ctb radio run`: the launchd job. Keeps the stream going and speaks updates."""
 
     def __init__(self, cfg: Config):
         clear_hls()  # remove audio left by SIGKILL or power loss before the service starts
+        clear_hls("hls")  # retire the old speech-only output; running old mirrors cannot receive private audio
+        # Keep the last public playlist available across a restart: an already-running YouTube mirror can carry on
+        # until the new writer atomically replaces it.  Cleanup only removes old, unreferenced segments.
+        from .radio_rtmp import cleanup_player_hls, retire_player_playlist
+        cleanup_player_hls(folder() / "public-hls")
+        retire_player_playlist(folder() / "public-hls")
         self.cfg = cfg
         self.s = settings(cfg)
         self.dir = folder()
         radio_now.clear(self.dir)  # the lock-screen title of a previous run is not what this one says
         self.card = self.dir / "card.png"
-        self.mixer = Mixer(make_bed(self.s["bed"], self.s["bed_db"]))
+        self.group_mixer = SpeechMixer(bytes(4))
+        self.mixer = PrivateMixer(make_bed(self.s["bed"], self.s["bed_db"]), self.group_mixer)
         self.usage = radio_voice.paid_usage(self.dir)
         self.cache = private_dir(self.dir / "tts-cache")
         self.quit = threading.Event()
@@ -1582,7 +1824,51 @@ class Station:
         self.show_slot: Optional[str] = None
         self.room_tags: set = set()           # the mixer tags of the brainstorming room's lines (radio_room.py)
         from . import radio_podcast
-        self.player = radio_podcast.Player(self.mixer, self.mixer.lock, blocked=self.room_live, cfg=self.cfg)
+        self.player = radio_podcast.Player(self.mixer, self.mixer.lock, blocked=self.room_live, cfg=self.cfg,
+                                           announce=lambda text: self.speak(text, front=True))
+        from .radio_filler import Filler
+        self.filler = Filler(self.cfg, self.mixer, self.player)
+
+    def speak_news_edition(self, script: str, gate: Callable[[], bool]) -> object:
+        """Queue news on the isolated owner stream, never the group mixer or a posting outlet."""
+        if self.picture_wanted():
+            return False
+        usage = self.__dict__.setdefault(
+            "_news_usage", radio_voice.NewsUsage(self.usage, radio_voice.Usage(self.dir / "news-tts-usage.json")))
+        return self.speak(script, front=True, gate=gate, schedule_clip=True, usage=usage, news_clip=True)
+
+    def news_edition_step(self, now: Optional[float] = None, channels=None) -> bool:
+        """Run the private hourly edition controller (configuration is off and empty by default)."""
+        from . import radio_suitability
+        from .news import (BridgeSummarizer, EditionBuilder, HourlyEditionScheduler, PrivateEditionQueue,
+                           TelegramChannelSource)
+        controller = self.__dict__.get("_news_edition")
+        if controller is None:
+            from .translate import ask
+
+            def summarize(prompt: str, instruction: str) -> str:
+                return ask(prompt, self.cfg, system=instruction, budget=PHRASE_TIMEOUT)
+
+            summarizer = BridgeSummarizer(summarize)
+            builder = EditionBuilder(TelegramChannelSource(self.s), summarizer, radio_suitability.suitable)
+            controller = self._news_edition = HourlyEditionScheduler(
+                builder, PrivateEditionQueue(), self, radio_suitability.suitable,
+                lambda: not self.picture_wanted(), asynchronous=True)
+        if self.picture_wanted():
+            return False
+        selected = self.cfg.news_edition_channels if channels is None else channels
+        return controller.step(bool(self.cfg.news_edition_enabled), selected, now)
+
+    def program_step(self, now: Optional[float] = None) -> bool:
+        """Let the active programme block choose the next private-radio source."""
+        from . import radio_programs
+        block = radio_programs.current_block(now)
+        if block is None:
+            return self.news_edition_step(now)
+        if block["kind"] != "news":
+            return False
+        channels = radio_programs.channels_for(block, self.cfg.news_edition_channels)
+        return self.news_edition_step(now, channels)
 
     channel_bot = None   # tests inject a fake bot; None = the bridge's own
 
@@ -1653,7 +1939,6 @@ class Station:
         while not self.quit.wait(0.5):
             tag, played = self.mixer.progress()
             with self.caption_lock:
-                entry = self.captions.get(tag) if tag is not None else None
                 talk = self.talks.pop(tag, None) if tag is not None else None
                 title = self.__dict__.setdefault("now_titles", {}).pop(tag, None) if tag is not None else None
             if title and getattr(self, "dir", None) is not None:  # a new clip is on the air: the lock screen names it
@@ -1661,6 +1946,11 @@ class Station:
             if talk is not None:  # sessions' answers just went on the air: each one's round trip
                 for one in talk if isinstance(talk, list) else [talk]:
                     log(radio_talk.round_trip(one, time.time()))
+            caption_source = self.caption_mixer()
+            if caption_source is not self.mixer:
+                tag, played = caption_source.progress()
+            with self.caption_lock:
+                entry = self.captions.get(tag) if tag is not None else None
             if entry is None:
                 if shown is not None and self.snap is not None:
                     shown = None
@@ -1676,6 +1966,9 @@ class Station:
                 he = self.s["lang"] == "he"
                 self._safe_draw({"head": "🎙 בשידור עכשיו" if he else "🎙 On the air", "tone": "warn",
                                  "lines": radio_script.card_lines(chunks[index], 3)})
+
+    def caption_mixer(self) -> Mixer:
+        return self.__dict__.get("group_mixer", self.mixer) if self.picture_wanted() else self.mixer
 
     def _safe_draw(self, top: Optional[dict]) -> None:
         if not self.picture_wanted():
@@ -1715,7 +2008,8 @@ class Station:
 
     def speak(self, text: str, front: bool = False, talk: Optional[dict] = None,
               report: Optional[dict] = None, voice: Optional[dict] = None, usage=None, chime: bool = True,
-              gate: Optional[Callable[[], bool]] = None, room: bool = False) -> Optional[bool]:
+              gate: Optional[Callable[[], bool]] = None, room: bool = False, schedule_clip: bool = False,
+              news_clip: bool = False) -> Optional[bool]:
         """Speak one update: the radio's own intro chime, then the voice; the card shows the words as they
         are said (captions) and keeps the headline afterwards. `front`/`talk`: a session's answer to the
         owner (radio_talk.py), queued ahead of routine updates, its round trip logged once it is on the air.
@@ -1732,10 +2026,13 @@ class Station:
             if voice is not None:  # room voices share the total cap, with an additional room-only sub-cap
                 selected = dict(voice, tts_hard_cap=True, tts_force_system=selected.get("tts_force_system", False),
                                 tts_daily_minutes=selected["tts_daily_minutes"])
+            if news_clip:
+                selected["tts_room_daily_minutes"] = self.cfg.news_edition_daily_seconds / 60
             pcm, route = radio_voice.speak(text, self.cfg, selected, self.cache, usage)
             why = radio_voice.last_reason if route in ("say", "") else ""
             today = time.strftime("%Y-%m-%d")
-            cap_out = route == "say" and radio_voice.last_cap_out and days.get(str(usage.path)) != today
+            cap_out = (not news_clip and route == "say" and radio_voice.last_cap_out and
+                       days.get(str(usage.path)) != today)
             if pcm and cap_out:
                 days[str(usage.path)] = today
         if not pcm:
@@ -1751,14 +2048,17 @@ class Station:
         title = radio_now.title_for(text)  # the lock screen's line while this clip is on the air (radio_now.py)
         with self.caption_lock:
             self.tag += 1
-            self.captions[self.tag] = (len(intro), len(pcm), radio_script.caption_chunks(text))
+            if not news_clip:
+                self.captions[self.tag] = (len(intro), len(pcm), radio_script.caption_chunks(text))
             titles = self.__dict__.setdefault("now_titles", {})
-            titles[self.tag] = title
+            if not news_clip:
+                titles[self.tag] = title
             for old in [k for k in self.captions if k < self.tag - 5]:
                 self.captions.pop(old, None)
             for old in [k for k in titles if k < self.tag - 5]:
                 titles.pop(old, None)
-            self.headline = (radio_script.headline(text), time.strftime("%H:%M"))
+            if not news_clip:
+                self.headline = (radio_script.headline(text), time.strftime("%H:%M"))
             if talk is not None:
                 self.talks[self.tag] = talk
             tag = self.tag
@@ -1774,11 +2074,18 @@ class Station:
                 for old in [k for k in self.room_tags if k < tag - 200]:
                     self.room_tags.discard(old)
                     self.room_gates().pop(old, None)
-            self.mixer.add(intro + pcm, tag, front=front)
+            if schedule_clip:
+                self.__dict__.setdefault("_schedule_gates", {})[tag] = gate
+                self.mixer.add_private(intro + pcm, tag, front=front)
+            else:
+                self.mixer.add(intro + pcm, tag, front=front)
         self.post_channel(report)  # a room line has no report: it never reaches the alerts channel
         self._status(route=route, tts_today=round(self.usage.today(), 1), voice_problem=why or None)
         log(f"speak: {radio_voice.seconds_of(pcm):.0f} s via {route}" + (f" (paid voice: {why})" if why else ""))
-        radio_voice.spoken_log(self.dir / "spoken.log", route, text)
+        if news_clip:
+            radio_voice.spoken_log(self.dir / "spoken.log", "news-" + route, "", length=len(text))
+        else:
+            radio_voice.spoken_log(self.dir / "spoken.log", route, text)
         return True
 
     def talk_loop(self) -> None:
@@ -1840,7 +2147,7 @@ class Station:
         kind = "start" if force else radio_script.decide(snap, last, now, self.s["every_minutes"] * 60,
                                                          self.news_gap())
         self.snap = snap
-        if self.mixer.progress()[0] is None and self.picture_wanted():  # a clip on the air: captions own the card
+        if self.caption_mixer().progress()[0] is None and self.picture_wanted():  # public captions own the card
             self.draw(snap)
         self.feed_board(now)
         if kind is None or self.room_live():
@@ -1877,7 +2184,7 @@ class Station:
 
     def room_veto(self, tag: int) -> bool:
         """A queued room line whose gate no longer holds (paused, ended, switched off) never starts playing."""
-        gate = self.room_gates().get(tag)
+        gate = self.__dict__.get("_schedule_gates", {}).get(tag) or self.room_gates().get(tag)
         if gate is None:
             return False
         try:
@@ -1956,6 +2263,8 @@ class Station:
             digest=self.room_digest, redraw=lambda: self.snap is not None and self._safe_draw(None),
             rules=rules, log=log, run_id="%d-%d" % (os.getpid(), self.status.get("started") or 0))
         self.mixer.veto = self.room_veto
+        if "group_mixer" in self.__dict__:
+            self.group_mixer.veto = self.room_veto
         while not self.quit.wait(1.0):
             try:
                 conductor.step()
@@ -1964,18 +2273,21 @@ class Station:
 
     # the flight board
     def podcast_loop(self) -> None:
-        """The owner's podcast queue (radio_podcast.py): one look a second; an episode plays instead of the bed
-        while the radio's own talk waits. Nothing plays while mirroring is off."""
+        """Private gap filler and episode queue; speech always has priority over either source."""
         from . import policy
         while not self.quit.wait(1.0):
             try:
                 if not policy.on():
                     self.player.stop_all()
                 else:
-                    self.player.step()
+                    if self.filler.step():
+                        self.player.step()
+                    else:
+                        self.player.stop_all()
             except Exception as e:  # noqa: BLE001 - the radio goes on without it
                 log("podcast: a step failed (%s)" % e.__class__.__name__)
         self.player.stop_all()
+        self.filler.close()
 
     def board_wanted(self) -> bool:
         """The board is the picture: switched on, and not within BOARD_RETRY of a failure (the card meanwhile)."""
@@ -2081,7 +2393,8 @@ class Station:
 
     def content_loop(self) -> None:
         selected = radio_listeners.voice_settings(self.s, radio_listeners.snapshot(self.dir, self.s))
-        if self.cfg.gemini_vertex_project and selected["tts_daily_minutes"] > 0:
+        if (self.s.get("voice_route") == "cloud" and self.cfg.gemini_vertex_project
+                and selected["tts_daily_minutes"] > 0):
             radio_voice.access_token(self.cfg)  # first, so the opening update is in the paid voice, not `say`
         from . import policy
         if policy.on():
@@ -2093,11 +2406,47 @@ class Station:
             if not policy.on():
                 continue  # nothing new is prepared while off
             self.spoken_requests()
-            if self.mixer.show_playing():
-                continue  # an episode is on the air: routine updates wait instead of piling up behind it
+            try:
+                self.program_step()
+            except Exception:  # channel names, exception details and content stay out of logs
+                log("news edition: unavailable (1 failure)")
+            if self.mixer.show_playing() and not getattr(self.mixer, "speech_first", False):
+                continue  # compatibility for a legacy exclusive-show mixer
             if time.time() >= next_look:
                 next_look = time.time() + POLL
                 self.update()
+
+    def schedule_allowed(self) -> bool:
+        from . import addons, policy
+        try:
+            return not self.picture_wanted() and policy.on() and addons.enabled(self.cfg, "schedule_card")
+        except Exception:
+            return False
+
+    def schedule_loop(self) -> None:
+        """Private station only: never spawn a transmitter, start the radio, or post a channel report."""
+        from . import schedule_bulletin
+
+        conductor = schedule_bulletin.Conductor(self.cfg,
+            speak=lambda text, gate: self.speak(text, front=True, gate=gate, schedule_clip=True),
+            allowed=self.schedule_allowed)
+        # Expiry is a scheduling rule only. Privacy comes from add_private and the
+        # isolated private-hls pipeline, even if this controller stops refreshing.
+        self.mixer.active_gate = lambda tag: (tag not in self.__dict__.get("_schedule_gates", {}) or
+            self._schedule_gates[tag] is None or
+            getattr(self._schedule_gates[tag], "playing", self._schedule_gates[tag])())
+        self.mixer.veto = self.room_veto
+        while not self.quit.wait(1.0):
+            try:
+                # Admission and playback can straddle another speech charge.  The summary is
+                # intentionally dropped rather than escaping the owner's configured paid cap.
+                drain_private_schedule_requests(
+                    self.cfg, self.s,
+                    lambda text: self.speak(text, front=True, schedule_clip=True))
+                conductor.step()
+            except Exception as exc:
+                conductor.active = None
+                log("schedule: unavailable (%s)" % type(exc).__name__)
 
     # the stream
     def run(self) -> int:
@@ -2119,7 +2468,14 @@ class Station:
                 return self.give_up()
             return 1  # launchd starts the job again after its throttle
         finally:
+            self.quit.set()
+            auxiliary = self.__dict__.get("audio_thread")
+            if auxiliary is not None:
+                auxiliary.join(timeout=12)
             clear_hls()
+            from .radio_rtmp import cleanup_player_hls, retire_player_playlist
+            cleanup_player_hls(folder() / "public-hls")
+            retire_player_playlist(folder() / "public-hls")
             if not by_play:
                 _sync_copy(self.cfg, False)
             try:  # a room never outlives the station that ran it
@@ -2138,12 +2494,12 @@ class Station:
     def _run_private(self) -> int:
         """The radio without the group stream (the add-on is off): audio only, for the private listen stream. No stream
         key is read, no card or show is drawn, no video is encoded, and nothing is sent to Telegram."""
+        self._start_audio(public=True)
         for loop, name in ((self.content_loop, "content"), (self.caption_loop, "captions"), (self.talk_loop, "talk"),
-                           (self.room_loop, "room"), (self.podcast_loop, "podcast")):
+                           (self.room_loop, "room"), (self.podcast_loop, "podcast"), (self.schedule_loop, "schedule")):
             threading.Thread(target=loop, daemon=True, name="radio-" + name).start()
-        if radio_play.started():   # started by Play: it stops itself after play_idle_minutes without a listener
-            threading.Thread(target=radio_play.watch, args=(self.cfg, self.quit), daemon=True,
-                             name="radio-play-idle").start()
+        threading.Thread(target=watch_private_idle, args=(self.cfg, self.quit, self.status["started"]),
+                         daemon=True, name="radio-private-idle").start()
         from . import policy
         while not self.quit.is_set():
             if not policy.on():  # mirroring is off: whatever was prepared is dropped
@@ -2180,6 +2536,7 @@ class Station:
         except Exception:
             radio_card.plain(self.card)
         encoder = pick_encoder(self.s["video_encoder"])
+        self._start_audio(public=False)
         threading.Thread(target=self.listener_loop, daemon=True, name="radio-listeners").start()
         threading.Thread(target=self.content_loop, daemon=True, name="radio-content").start()
         threading.Thread(target=self.caption_loop, daemon=True, name="radio-captions").start()
@@ -2201,8 +2558,8 @@ class Station:
                     self.board_failed(show.failed)
                     return False
                 return (show is not None) == self.board_wanted()
-            self.pipe = Pipeline(url, key, self.card, encoder, self.mixer, lambda pid: self._status(ffmpeg_pid=pid),
-                                 quit=self.quit, source=show, keep=keep, hls=self.s["radio_player"])
+            self.pipe = Pipeline(url, key, self.card, encoder, self.group_mixer, lambda pid: self._status(ffmpeg_pid=pid),
+                                 quit=self.quit, source=show, keep=keep, hls=True)
             self._status(pipeline="live", picture="board" if show is not None else "card")
             why = self.pipe.run()
             if self.quit.is_set():
@@ -2219,6 +2576,32 @@ class Station:
         self._status(pipeline="stopped", ffmpeg_pid=None)
         return 0
 
+    def _start_audio(self, public: bool) -> None:
+        """Independent encoder and segment directory; reconnecting the group cannot clear private audio."""
+        def run():
+            mixer = self.group_mixer if public else self.mixer
+            while not self.quit.is_set():
+                if public and _mirror_clear(self.cfg):  # no group here; only an enabled mirror needs public AAC
+                    with mixer.lock:
+                        mixer.clips.clear()
+                        mixer.front_n = 0
+                        mixer.voice = None
+                    self.quit.wait(1)
+                    continue
+                try:
+                    pipe = Pipeline("", "", self.card, "", mixer, lambda pid: None, quit=self.quit,
+                                    audio_only=True, public_audio=public,
+                                    keep=(lambda: not _mirror_clear(self.cfg)) if public else None,
+                                    err_path=self.dir / ("public-audio.err" if public else "private-audio.err"))
+                    reason = pipe.run()
+                    if reason and reason not in (MIRROR_OFF, MODE_CHANGED) and not self.quit.is_set():
+                        log("separated audio: " + reason)
+                except Exception as e:
+                    log("separated audio failed: " + e.__class__.__name__)
+                self.quit.wait(2)
+        self.audio_thread = threading.Thread(target=run, daemon=True, name="radio-separated-audio")
+        self.audio_thread.start()
+
     def silence(self) -> None:
         """Mirroring is off: every clip waiting to be said, the captions and the headline are dropped, and the
         plain card (no words) replaces the last picture."""
@@ -2232,6 +2615,12 @@ class Station:
                 self.mixer.clips.clear()
                 self.mixer.front_n = 0
                 self.mixer.voice = None
+            public = self.__dict__.get("group_mixer")
+            if public is not None:
+                with public.lock:
+                    public.clips.clear()
+                    public.front_n = 0
+                    public.voice = None
         player = self.__dict__.get("player")
         if player is not None:
             player.stop_all()  # an episode on the air stops too (the queue file keeps what waits)
@@ -2343,12 +2732,15 @@ def prepare_motion(cfg: Config, modules: str = "", chrome: str = "", node: str =
     return 1 if why else 0
 
 
-def cli(cfg: Config, action: str, text: str = "", live: bool = False, play: bool = False) -> int:
+def cli(cfg: Config, action: str, text: str = "", live: bool = False, play: bool = False,
+        idle_since: float = 0, idle_run: int = 0) -> int:
     lang = settings(cfg)["lang"]
     try:
         if action == "run":
             return run_station(cfg)
-        if action in ("start", "stop"):
+        if action == "stop" and idle_since and idle_run:
+            stop_private_idle(cfg, idle_since, idle_run)
+        elif action in ("start", "stop"):
             print(t(switch(cfg, action, play), lang=lang))
         elif action == "say":
             print(t(say(text), lang=lang))

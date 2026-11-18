@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from ctb import panel_page
-from cockpit_v2_browser import sample_state
+from cockpit_v2_browser import needs_state, sample_state
 from test_panel_page import func
 
 NODE = shutil.which("node")
@@ -22,7 +22,7 @@ PRELUDE = (HERE / "studio_fake_dom.js").read_text() + (HERE / "cockpit_v2_fake_d
 def run(body, lang="he", mutate=None):
     script = (Path(panel_page.__file__).parent / "cockpit_v2.js").read_text().replace(
         "__V2_STRINGS__", json.dumps(panel_page.V2_STRINGS, ensure_ascii=False))
-    script = "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock", "requestAction", "requestRow", "v2ModeRow", "settingsBox")) + script
+    script = 'var requestProject="",requestOwnerOnly=false;\n' + "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock", "requestAction", "requestRow", "requestRank", "requestDetail", "requestList", "requestGroups", "requestText", "requestBoard", "v2ModeRow", "settingsBox")) + script
     state = sample_state(lang)
     if mutate:
         mutate(state)
@@ -36,13 +36,110 @@ def run(body, lang="he", mutate=None):
 pytestmark = pytest.mark.skipif(not NODE, reason="node is not installed")
 
 
+@pytest.mark.parametrize("lang,label,why", [
+    ("he", "עבודה", "עבודה פעילה ליד המחשב"),
+    ("en", "Work", "Active work at the Mac"),
+])
+def test_home_context_chip_renders_only_when_state_field_is_present(lang, label, why):
+    absent = run("emit({chips:byClass('v2-context').length});", lang)
+    present = run("emit({chips:byClass('v2-context').length,label:byClass('v2-context-chip')[0].textContent,"
+                  "why:byClass('v2-context-why')[0].textContent});", lang,
+                  lambda state: state.update(home_context={"mode": "work", "why": "active_work", "signals": {}}))
+    assert absent == {"chips": 0}
+    assert present == {"chips": 1, "label": label, "why": why}
+
+
+def test_v2_request_row_places_status_line_after_the_full_width_title():
+    got = run("var row=byClass('v2-requests')[0].querySelector('.request-row'),body=row.querySelector('.body');"
+              "emit({children:body.children.map(x=>x.className),chips:body.children[2].querySelectorAll('.chip').length});",
+              mutate=lambda state: state.update(needs_state()))
+    assert got == {"children": ["nm", "request-disclosure", "mt request-status-line"], "chips": 1}
+
+
 @pytest.mark.parametrize("lang", ["he", "en"])
-def test_screen_semantics_keep_all_decisions_including_old_and_three_request_actions(lang):
+@pytest.mark.parametrize("server_count", [True, False])
+def test_needs_count_equals_all_expandable_rows_from_the_four_sources(lang, server_count):
+    def mutate(state):
+        state.update(needs_state(lang))
+        if not server_count:
+            state.pop("waiting_count")
+        # None of these belong in the shared waiting count.
+        state["decisions"].append(dict(state["decisions"][0], id="ended", stale="ended"))
+        state["cards"].append(dict(state["cards"][-1], id="ended-card", ended=True))
+        state["requests"].append(dict(state["requests"][-1], id=99, status="done"))
+
+    got = run("var zone=byClass('v2-needs')[0],groups=zone.querySelectorAll('[data-v2-needs-group]');"
+              "var groupsInfo=groups.map(g=>{var fold=g.querySelector('.v2-needs-more'),b=fold.querySelector('.compact-toggle');"
+              "var initial=b.getAttribute('aria-expanded');b.click();var expanded=b.getAttribute('aria-expanded');b.click();"
+              "return {key:g.getAttribute('data-v2-needs-group'),n:g.querySelectorAll('[data-v2-decision]').length+"
+              "g.querySelectorAll('[data-v2-reminder]').length+g.querySelectorAll('[data-v2-request]').length,"
+              "label:fold.querySelector('.compact-title').textContent,initial,expanded,collapsed:b.getAttribute('aria-expanded')};});"
+              "emit({groups:groupsInfo,count:Number(zone.querySelector('.v2-count').textContent),"
+              "open:sandbox.v2OpenCount(sandbox.last),empty:zone.querySelectorAll('.v2-empty').length,"
+              "reminders:allEls().filter(e=>e.attrs['data-v2-reminder']).length,"
+              "requests:allEls().filter(e=>e.attrs['data-v2-request']).map(e=>e.attrs['data-v2-request'])});", lang, mutate)
+    sizes = dict(zip(("decisions", "asks", "reminders", "owner-requests"), (6, 7, 8, 9)))
+    assert got["groups"] == [dict(key=key, n=n, label=panel_page.V2_STRINGS[lang]["now"]["showAll"].replace("{n}", str(n)),
+                                 initial="false", expanded="true", collapsed="false") for key, n in sizes.items()]
+    assert got["count"] == got["open"] == sum(g["n"] for g in got["groups"]) == 30
+    assert got["empty"] == 0 and got["reminders"] == 8
+    assert len(got["requests"]) == len(set(got["requests"])) == 15
+
+
+@pytest.mark.parametrize("source", ["reminders", "requests", None])
+def test_needs_empty_text_only_when_shared_count_is_zero(source):
+    def mutate(state):
+        state.update(needs_state())
+        for key in ("decisions", "cards", "reminders", "requests"):
+            if key != source:
+                state[key] = []
+        state["waiting_count"] = 8 if source == "reminders" else 9 if source == "requests" else 0
+
+    got = run("var zone=byClass('v2-needs')[0];emit({count:Number(zone.querySelector('.v2-count').textContent),"
+              "empty:zone.querySelectorAll('.v2-empty').map(e=>e.textContent)});", mutate=mutate)
+    assert got == {"count": 8 if source == "reminders" else 9 if source == "requests" else 0,
+                   "empty": [] if source else [panel_page.V2_STRINGS["he"]["now"]["empty"]]}
+
+
+def test_answered_items_leave_the_needs_rows_and_shared_count_together():
+    got = run("sandbox.closed['0000000000000001']=1;sandbox.cardDone['0000000000000014']={c:sandbox.last.cards[4]};"
+              "root.childNodes.length=0;sandbox.v2Now(sandbox.last);var zone=byClass('v2-needs')[0];"
+              "emit({count:Number(zone.querySelector('.v2-count').textContent),"
+              "rows:zone.querySelectorAll('[data-v2-decision]').length+zone.querySelectorAll('[data-v2-reminder]').length+"
+              "zone.querySelectorAll('[data-v2-request]').length});", mutate=lambda state: state.update(needs_state()))
+    assert got == {"count": 28, "rows": 28}
+
+
+@pytest.mark.parametrize("lang", ["he", "en"])
+def test_screen_semantics_keep_decisions_and_use_touch_drop_for_dormant_requests(lang):
     got = run("emit({zones:byClass('v2-needs').length,ids:allEls().filter(e=>e.attrs['data-v2-decision']).map(e=>e.attrs['data-v2-decision']),"
-              "answers:allEls().filter(e=>e.attrs['data-v2-answer']).length,requests:byClass('v2-requests')[0].children.map(e=>e.querySelector('.request-actions').children.length),"
+              "answers:allEls().filter(e=>e.attrs['data-v2-answer']).length,requests:byClass('request-row').filter(e=>e.querySelector('.request-actions')).map(e=>e.querySelector('.request-actions').children.length),"
               "projects:byClass('v2-project').length,first:root.children[1].attrs['data-v2-section']});", lang)
     assert got == {"zones": 1, "ids": [str(n) * 16 for n in (1, 2, 3)], "answers": 6,
-                   "requests": [3, 3, 3], "projects": 4, "first": "decisions"}
+                   "requests": [3, 3, 3, 2], "projects": 4, "first": "decisions"}
+
+
+@pytest.mark.parametrize("lang,label", [("he", "למעבר להודעה"), ("en", "Go to the message")])
+def test_waiting_items_render_exact_message_links(lang, label):
+    def mutate(state):
+        state["decisions"][0]["link"] = "https://t.me/c/123/7/41"
+        state["cards"].append(dict(state["cards"][0], id="a" * 16, kind="ask", title="Question",
+                                   link="https://t.me/c/123/7/42", ended=False))
+    got = run("emit({labels:byClass('v2-message-link').map(e=>e.textContent),"
+              "targets:byClass('v2-message-link').map(e=>e.listeners.click?true:false)});", lang, mutate)
+    assert got == {"labels": [label] * 4, "targets": [True] * 4}
+
+
+def test_request_filters_exclude_projects_with_only_finished_items():
+    def mutate(state):
+        base = state["requests"][0]
+        state["requests"] = [dict(base, project="active", id=1, status="open"),
+                             dict(base, project="active", id=2, status="done"),
+                             dict(base, project="finished-only", id=3, status="done")]
+
+    got = run("var board=sandbox.requestBoard(sandbox.last);"
+              "emit(board.querySelectorAll('.requests-pill-name').map(e=>e.textContent));", mutate=mutate)
+    assert got == [panel_page.STRINGS["he"]["requestsAll"], "active"]
 
 
 @pytest.mark.parametrize("lang", ["he", "en"])
@@ -55,9 +152,9 @@ def test_decision_uses_original_id_choice_and_note(lang, choice):
 
 @pytest.mark.parametrize("action,index", [("done", 0), ("drop", 1), ("push", 2)])
 def test_actual_request_action_requires_two_taps(action, index):
-    got = run("var b=byClass('v2-requests')[0].children[0].querySelector('.request-actions').children[%d];"
+    got = run("var b=byClass('request-row').find(e=>e.querySelector('.request-actions')&&!e.parentNode.parentNode.attrs['data-requests']).querySelector('.request-actions').children[%d];"
               "b.click();var before=posted.length;b.click();await flush();emit({before,posted,loads});" % index)
-    assert got == {"before": 0, "posted": [["/api/request", {"project": "תכנון", "id": 1, "action": action}]], "loads": 1}
+    assert got == {"before": 0, "posted": [["/api/request", {"project": "לימוד", "id": 2, "action": action}]], "loads": 1}
 
 
 def test_new_disclosures_have_reversible_controls_and_note_direction():
@@ -165,7 +262,7 @@ def test_stale_decisions_leave_the_needs_list_and_count_and_fill_a_dismiss_fold(
               "inZone:zone.querySelectorAll('.v2-stale-fold').length,"
               "dis:fold.querySelectorAll('[data-v2-answer]').length});", lang, with_stale)
     assert got["needs"] == [str(n) * 16 for n in (1, 2, 3)]
-    assert got["count"] == "3" and got["open"] == 3
+    assert got["count"] == "5" and got["open"] == 5
     assert got["rows"] == 2 and got["inZone"] == 0 and got["dis"] == 0
     assert got["buttons"] == ["a" * 16, "b" * 16, "all"]
     assert got["title"] == {"he": "כבר לא רלוונטיות (2)", "en": "No longer relevant (2)"}[lang]
@@ -173,7 +270,7 @@ def test_stale_decisions_leave_the_needs_list_and_count_and_fill_a_dismiss_fold(
 
 def test_no_fold_without_stale_decisions_and_old_ones_stay_answerable():
     got = run("emit({fold:byClass('v2-stale-fold').length,open:sandbox.v2OpenCount(sandbox.last)});")
-    assert got == {"fold": 0, "open": 3}
+    assert got == {"fold": 0, "open": 5}
 
 
 def test_remove_dismisses_that_one_id_through_the_classic_endpoint_then_refreshes():

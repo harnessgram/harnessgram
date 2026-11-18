@@ -12,7 +12,8 @@ function arCard(res){
  var st=AR_STATES[res.state]?res.state:"error",c=el("div","ar-result "+st),head=el("div","ar-head");
  c.setAttribute("data-ar-state",st);head.appendChild(icon(AR_STATES[st][0]));
  var title=el("b","ar-title");title.appendChild(arFill(V2.tools[AR_STATES[st][1]],"n",String(res.retry||0)));head.appendChild(title);c.appendChild(head);
- if(st==="approved"){var when=arTime(res.until);
+ if(st==="approved"&&Object.prototype.hasOwnProperty.call(res,"delivered")&&res.delivered!==true)c.appendChild(el("div","ar-until",V2.tools.arWaitingDevice));
+ else if(st==="approved"){var when=arTime(res.until);
   c.appendChild(when?(function(){var u=el("div","ar-until");u.appendChild(arFill(V2.tools.arUntil,"time",when));return u;})():el("div","ar-until",V2.tools.arOpenNow));}
  if(st==="pending")c.appendChild(el("div","ar-note",V2.tools.arPendingHint));
  if(st==="error")c.appendChild(el("div","ar-note",V2.tools.arErrorHint));

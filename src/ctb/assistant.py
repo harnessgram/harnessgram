@@ -259,7 +259,7 @@ def exec_main(rest: List[str]) -> int:
     """`ctb assistant-exec [claude arguments]`: check and set up the boundary here, in the session's own folder,
     then become claude. Prints why and returns 1 (nothing starts) when any part fails."""
     def refuse(why: str) -> int:
-        sys.stderr.write(f"Harnessgram: assistant session not started: {why}\n")
+        sys.stderr.write(f"HarnessGram: assistant session not started: {why}\n")
         return 1
     try:
         cwd = os.getcwd()
@@ -388,7 +388,7 @@ def preflight(python: Optional[str] = None, guard: Optional[Path] = None, folder
 
 def refusal(why: str) -> str:
     """A launch line that starts nothing: it says why and exits 1 (arguments appended after it are inert)."""
-    return f"echo {shlex.quote('Harnessgram: assistant session not started: ' + why)} >&2; exit 1; :"
+    return f"echo {shlex.quote('HarnessGram: assistant session not started: ' + why)} >&2; exit 1; :"
 
 
 def valid_section(value) -> bool:

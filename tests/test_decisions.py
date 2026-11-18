@@ -94,7 +94,7 @@ def stored():
 def test_ask_stores_the_decision_and_posts_a_line_in_the_topic(rig, capsys):
     rec = ask(rig, detail="line one\n\n\n\nline two", yes="Ship it", no="Hold")
     assert set(rec) == {"id", "session", "chat", "thread", "title", "detail", "yes", "no", "created", "state",
-                        "choice", "note", "closed", "routine"}
+                        "choice", "note", "closed", "routine", "msg"}
     assert len(rec["id"]) == 16 and rec["state"] == "open" and rec["choice"] == ""
     assert (rec["session"], rec["chat"], rec["thread"]) == (ORBIT_S, ORBIT, THREAD)
     assert (rec["title"], rec["yes"], rec["no"]) == ("Ship the fix?", "Ship it", "Hold")
@@ -229,7 +229,7 @@ def test_a_failed_nudge_does_not_lose_the_decision(rig):
 def test_lengths_are_enforced_and_nothing_is_saved(rig, capsys, kw):
     assert run(rig, "ask", session=ORBIT_S, **kw) == 1
     assert decisions.open_decisions() == [] and rig.bot.calls == []
-    assert "Harnessgram:" in capsys.readouterr().err
+    assert "HarnessGram:" in capsys.readouterr().err
 
 
 def test_texts_at_the_limits_are_accepted_and_bidi_controls_are_dropped(rig):
@@ -307,7 +307,8 @@ def test_state_lists_open_decisions_and_reminders_read_only(rig, server):
     [d] = body["decisions"]
     assert d == {"id": rec["id"], "title": "Ship?", "detail": "why", "yes": "Yes", "no": "No",
                  "topic": "Orbit: game", "age": d["age"], "here": False, "stale": d["stale"], "old": False,
-                 "url": "https://t.me/c/1111111111/5",  # the topic's own t.me link: one tap opens it (2026-11-10)
+                     "url": "https://t.me/c/1111111111/5",  # the topic's own t.me link: one tap opens it (2026-11-10)
+                     "link": "https://t.me/c/1111111111/5/2",
                  "sensitive": True}  # not asked as routine: only the app (after Face ID) or here (sensitive_buttons.py)
     [r] = body["reminders"]
     assert (r["text"], r["due"], r["topic"]) == ("Approve the deck", "today", "Orbit: game")
@@ -478,6 +479,18 @@ def test_the_answer_is_saved_closed_before_it_is_queued_and_reopened_if_queueing
     monkeypatch.setattr(rig.box, "put", real)
     assert tap(server, rec["id"])[0] == 200
     assert len(queued(rig, ORBIT_S)) == 1
+
+
+def test_answered_via_mcp_survives_save_load_round_trip(tmp_path):
+    ident = "0123456789abcdef"
+    raw = {"session": "s", "title": "Routine?", "detail": "", "yes": "Yes", "no": "No",
+           "chat": 1, "thread": 2, "created": 3, "state": "answered", "closed": 4,
+           "choice": "yes", "note": "", "answered_via": "mcp"}
+    path = tmp_path / "decisions.json"
+    decisions._save(path, {ident: decisions._record(ident, raw)})
+    assert decisions._load(path)[ident]["answered_via"] == "mcp"
+    raw["answered_via"] = "forged"
+    assert "answered_via" not in decisions._record(ident, raw)
 
 
 def hold(path):

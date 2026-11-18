@@ -1,8 +1,8 @@
-# Harnessgram
+# HarnessGram
 
 **Telegram remote control for Claude Code: one topic per session, voice, approvals, quota dashboard, translation.**
 
-Harnessgram connects your own Telegram bot to the [Claude Code](https://claude.com/claude-code) sessions on your
+HarnessGram connects your own Telegram bot to the [Claude Code](https://claude.com/claude-code) sessions on your
 computer. Every session gets its own topic in your private chat with the bot, you can answer from your phone
 (text, voice notes, pictures, files), and replies can be read in your own language. It is a small Python tool
 with no third-party packages in the core; it works through Claude Code hooks, so it costs no model tokens.
@@ -10,7 +10,7 @@ with no third-party packages in the core; it works through Claude Code hooks, so
 Not affiliated with Anthropic or Telegram. [עברית](README.he.md)
 
 <!-- Demo GIF: record your own (no private data) as docs/demo.gif, then uncomment.
-![Harnessgram demo](docs/demo.gif)
+![HarnessGram demo](docs/demo.gif)
 -->
 
 ## Quick start (5 minutes)
@@ -39,7 +39,7 @@ harnessgram setup
 
 `harnessgram setup` walks you through everything: the BotFather steps, checking the token, pairing your
 Telegram account, saving the config (mode 600), installing the background service and the Claude Code
-hooks, sending a "Harnessgram connected" message to your phone, and running `harnessgram doctor`.
+hooks, sending a "HarnessGram connected" message to your phone, and running `harnessgram doctor`.
 Then start a new Claude Code session: its first reply creates its topic.
 
 Prefer a page with buttons? `harnessgram setup --web` opens the same four steps as a guided page in your
@@ -63,7 +63,7 @@ If something looks wrong later: `harnessgram doctor` prints one line per check a
 
 **Why still BotFather?** Telegram's managed bots let a "manager" bot create a bot for you with one tap, but the
 manager can read and replace your bot's token at any time, must stay online to hand the token over, and
-Threaded Mode can still only be switched on in BotFather. Harnessgram keeps your token only on your computer,
+Threaded Mode can still only be switched on in BotFather. HarnessGram keeps your token only on your computer,
 so it does not use them. Details: [docs/setup-research.md](docs/setup-research.md).
 
 ## Security model
@@ -206,6 +206,7 @@ pipx install .            # or: python3 -m venv .venv && .venv/bin/pip install .
 # optional extras (offline translation)
 pipx inject harnessgram mlx-lm                         # TranslateGemma on Apple silicon
 pipx inject harnessgram ctranslate2 sentencepiece      # NLLB-200
+pipx inject harnessgram cryptography 'httpx[http2]'    # APNs Live Activity pushes (`live-activity` extra)
 ```
 
 ### Upgrading from Lingoline or claude-telegram-bridge
@@ -286,6 +287,8 @@ Or write `~/.config/claude-telegram-bridge/config.json` yourself and `chmod 600`
 | `engines` | `["mlx","nllb"]` | translation engines in order; offline by default. `"gemini"` (official API, your key) and `"google"` (unofficial web endpoints, see Privacy) are explicit opt-ins |
 | `gemini_model` | `"gemini-2.5-flash-lite"` | Gemini model when the optional `gemini` engine is enabled |
 | `gemini_fallback_model` | `""` | A second Gemini model, tried only when the first one fails (a fast one such as `gemini-3.5-flash-lite`) |
+| `gemini_routine_model` | `""` | Gemini model for routine text (live step titles, interim prose, notices, cards, topic names, radio prompts); `gemini_model` is kept for the closing summary of a mirrored reply. Empty: `gemini_fallback_model` when set, else `gemini_model`. `gemini-usage.log` names the model and the caller of every answered call |
+| `filter_committee_key` | `""` | The family filter committee's Ed25519 public key (base64). `filter-policy publish` stores only documents signed for this key; empty means publishing is refused |
 | `gemini_vertex_project`, `gemini_vertex_account` | `""` | Vertex project and optional account identifier; the token command chooses the account |
 | `gemini_token_command`, `gemini_key_command` | `[]` | argument arrays for commands that print a Vertex token or AI Studio key; never put credentials in the configuration |
 | `gemini_thinking` | `""` | thinking level for Gemini 3 models (`"low"`, `"medium"`, `"high"`); empty leaves the model default |
@@ -516,7 +519,7 @@ Start a new Claude Code session afterwards. The first reply creates its topic.
 
 ## Use a group with topics (optional)
 
-By default Harnessgram works in your private chat with the bot. You can use a Telegram group with
+By default HarnessGram works in your private chat with the bot. You can use a Telegram group with
 topics instead, for example to see your sessions better on Telegram Desktop:
 
 1. Create a group, open its settings and turn on **Topics**.
@@ -745,7 +748,7 @@ By default Telegram's cloud Bot API limits bots to 20 MB downloads and 50 MB upl
 2000 MB. Nothing changes until you set `api_local` in the config.
 
 1. **Get `api_id` and `api_hash`** for your own Telegram account at <https://my.telegram.org> (API development
-   tools). Keep them out of the Harnessgram config, shell history and logs: store them in a secret manager
+   tools). Keep them out of the HarnessGram config, shell history and logs: store them in a secret manager
    (for example the macOS Keychain) and pass them to the server as environment variables by name.
 2. **Run the server** (Docker image `aiogram/telegram-bot-api`), reachable only from this machine:
 
@@ -772,7 +775,7 @@ By default Telegram's cloud Bot API limits bots to 20 MB downloads and 50 MB upl
    those 10 minutes. `harnessgram bot-api close` is for moving the bot from one local server to another (Telegram
    refuses it in the first 10 minutes after the bot started on that server); it is not needed for going back to
    the cloud.
-4. **Point Harnessgram at it** in `config.json`:
+4. **Point HarnessGram at it** in `config.json`:
 
    ```json
    {"api_base": "http://127.0.0.1:8081", "api_local": true, "api_files_dir": "/var/lib/telegram-bot-api"}
@@ -786,7 +789,7 @@ By default Telegram's cloud Bot API limits bots to 20 MB downloads and 50 MB upl
 
 With local mode on: photos, videos and files up to 2000 MB are saved to the private download folder
 (streamed to disk, never held in memory). A file over 50 MB is copied in chunks (regular file, one link,
-not in Harnessgram's own folders) to a private staging folder under `api_files_dir`, sent to the server as a
+not in HarnessGram's own folders) to a private staging folder under `api_files_dir`, sent to the server as a
 `file://` path, and the copy is deleted afterwards. Smaller files keep using the normal upload. Over 2000 MB
 a file is not sent (the share-link setting still applies). In local mode no caller-supplied value starting
 with `file:` is ever forwarded to the server. Sessions without Keychain access send through the listener's
@@ -870,7 +873,7 @@ relay, which carries bytes only (50 MB, as before): a larger file gets the "too 
 
 ## Model licences
 
-Harnessgram does not ship any translation or speech model; you download them yourself and their licences
+HarnessGram does not ship any translation or speech model; you download them yourself and their licences
 apply to you:
 
 - **NLLB-200** (Meta, used by the `nllb` engine): the model weights are released under **CC-BY-NC 4.0**,

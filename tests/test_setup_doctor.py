@@ -49,7 +49,7 @@ def test_setup_non_interactive_writes_private_config_installs_and_sends_test_mes
     hooks = json.loads((tmp_path / "claude-settings.json").read_text())["hooks"]
     assert "Stop" in hooks and "UserPromptSubmit" in hooks
     sent = bot.methods("sendMessage")
-    assert sent and sent[0]["chat_id"] == 4242 and "Harnessgram מחובר" in sent[0]["text"]  # --language he gives Hebrew menus
+    assert sent and sent[0]["chat_id"] == 4242 and "\u2068HarnessGram\u2069 מחובר" in sent[0]["text"]  # --language he gives Hebrew menus
     assert GOOD_TOKEN not in out  # the token is never printed
 
 
@@ -211,6 +211,14 @@ def test_optional_features_are_off_and_soft_by_default():
     assert any("first message" in m for _, m in doctor.check_extras(C.Config(auto_topic_names=True)))
     half = C.Config(radio={"telethon_python": "/usr/bin/python3"})
     assert any(lvl == "warn" and "rtmp_url_command" in m for lvl, m in doctor.check_extras(half))
+
+
+@pytest.mark.parametrize("missing", [None, "cryptography", "httpx", "h2"])
+def test_doctor_checks_all_apns_dependencies(monkeypatch, missing):
+    monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda name: None if name == missing else object())
+    cfg = C.Config(apns_key_id="key", apns_team_id="team", apns_bundle_id="bundle")
+    apns = next(item for item in doctor.check_extras(cfg) if "APNs Live Activity" in item[1])
+    assert apns[0] == ("ok" if missing is None else "warn")
 
 
 def test_macos_privacy_names_the_interpreter(tmp_path, monkeypatch):

@@ -8,13 +8,18 @@ import time
 import pytest
 
 from conftest import GOOD_TOKEN
-from ctb import panel, radio_podcast as P
+from ctb import radio, panel, radio_podcast as P
 from ctb.config import Config
 from test_panel import OWNER, call, signed
 from test_radio_podcast import FEED, rss, shared_checker  # noqa: F401 (the autouse checker stand-in)
 
 PATH = "/api/podcast"
 DATA = rss([("First", "ok"), ("Second", "ok")])
+
+
+@pytest.fixture(autouse=True)
+def no_real_launchctl(monkeypatch):
+    monkeypatch.setattr(radio, "job_pid", lambda: None)
 
 
 @pytest.fixture

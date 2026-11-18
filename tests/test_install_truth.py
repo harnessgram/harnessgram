@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from ctb import doctor, install as I, setup
+from ctb import doctor, install as I, listener_service, setup
 from test_setup_doctor import GOOD_TOKEN, SetupBot
 
 
@@ -20,7 +20,40 @@ def svc(tmp_path, monkeypatch):
         return next((code for match, code in fail.items() if any(match in part for part in cmd)), 0)
 
     monkeypatch.setattr(I, "_sh", run)
+
+    def launchctl(*cmd):
+        calls.append(cmd)
+        code = next((value for match, value in fail.items() if any(match in part for part in cmd)), 0)
+        return code, "    pid = 123\n" if cmd[1] == "print" and code == 0 else ""
+
+    monkeypatch.setattr(listener_service, "run", launchctl)
+    def output(*cmd):
+        if fail.get("print") or fail.get("bootstrap"):
+            return 113, ""
+        return 0, "state = running\n\tpid = 123\n"
+
+    monkeypatch.setattr(I, "_out", output)
     return home, calls, fail
+
+
+def test_doctor_fails_spawn_failed_and_panel_without_http(svc, monkeypatch):
+    home, calls, fail = svc
+    platform(monkeypatch, "darwin")
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / f"{I.LABEL}.plist").write_bytes(I.plist_bytes("listener"))
+    (agents / f"{I.PANEL_JOB}.plist").write_bytes(
+        __import__("plistlib").dumps({"ProgramArguments": ["ctb", "panel", "serve", "--port", "8765"]}))
+    monkeypatch.setattr(doctor, "HOME", home)
+    monkeypatch.setattr(doctor, "service_files", lambda svc: I.service_files(svc))
+    monkeypatch.setattr(doctor, "launchd_status", lambda label: I.LaunchdStatus(
+        True, 55, label == I.LABEL))
+    probes = []
+    monkeypatch.setattr(doctor, "panel_answers", lambda port: probes.append(port) or False)
+    results = doctor.check_launch_agents()
+    assert any(level == "FAIL" and "spawn failed" in msg for level, msg in results)
+    assert any(level == "FAIL" and "does not answer" in msg for level, msg in results)
+    assert probes == [8765]
 
 
 def platform(monkeypatch, name):

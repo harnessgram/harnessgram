@@ -4,7 +4,7 @@ import plistlib
 import shlex
 from pathlib import Path
 
-from ctb import install as I
+from ctb import install as I, listener_service
 
 REAL_SH = I._sh  # before any fixture swaps in a recording runner
 
@@ -45,8 +45,11 @@ def test_merge_is_idempotent_and_preserves_other_hooks():
     assert all("unchanged" in c for c in changes)
     assert once["theme"] == "dark" and once["hooks"]["PreToolUse"][0] == other  # existing hooks stay first, untouched
     ask = once["hooks"]["PreToolUse"][1]
-    assert ask["matcher"] == "AskUserQuestion" and len(once["hooks"]["PreToolUse"]) == 2
+    assert ask["matcher"] == "AskUserQuestion" and len(once["hooks"]["PreToolUse"]) == 3
     assert_launcher(shlex.split(ask["hooks"][0]["command"]), "hook-ask") and ask["hooks"][0]["timeout"] <= 5
+    bash = once["hooks"]["PreToolUse"][2]
+    assert bash["matcher"] == "Bash"
+    assert_launcher(shlex.split(bash["hooks"][0]["command"]), "hook-bash")
     assert once["hooks"]["Stop"][0] == other
     assert settings == {"theme": "dark", "hooks": {"Stop": [other], "PreToolUse": [other]}}  # input not mutated
 
@@ -143,7 +146,51 @@ def svc_env(tmp_path, monkeypatch):
     monkeypatch.setattr(I, "HOME", home)
     calls = []
     monkeypatch.setattr(I, "_sh", lambda *cmd: calls.append(cmd) or 0)
+
+    def launchctl(*cmd):
+        calls.append(cmd)
+        return 0, "    pid = 123\n" if cmd[1] == "print" else ""
+
+    monkeypatch.setattr(listener_service, "run", launchctl)
+    monkeypatch.setattr(I, "_out", lambda *cmd: (0, "state = running\n\tpid = 123\n"))
     return home, calls
+
+
+def test_launchd_health_repairs_spawn_failure_and_probes_panel(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    panel = agents / f"{I.PANEL_JOB}.plist"
+    panel.write_bytes(plistlib.dumps({"ProgramArguments": ["ctb", "panel", "serve", "--port", "8765"]}))
+    monkeypatch.setattr(I, "HOME", home)
+    mac(monkeypatch)
+    states = {
+        I.LABEL: iter([I.LaunchdStatus(True, None, True), I.LaunchdStatus(True, 41)]),
+        I.PANEL_JOB: iter([I.LaunchdStatus(True, 42)]),
+    }
+    monkeypatch.setattr(I, "launchd_status", lambda label: next(states[label]))
+    calls = []
+    monkeypatch.setattr(I, "_sh", lambda *cmd: calls.append(cmd) or 0)
+    probes = []
+    monkeypatch.setattr(I, "panel_answers", lambda port: probes.append(port) or True)
+    lines = []
+    assert I.verify_launch_agents([I.SERVICES[0]], say=lines.append) == []
+    assert [c[1] for c in calls] == ["bootout", "bootstrap"] and probes == [8765]
+    assert any("listener: ok" in line and "after one reload" in line for line in lines)
+    assert any("panel: ok" in line for line in lines)
+
+
+def test_panel_http_probe_counts_error_status_and_never_uses_network():
+    def error(*args, **kwargs):
+        raise __import__("urllib.error").error.HTTPError(args[0], 503, "busy", {}, None)
+
+    assert I.panel_answers(8765, opener=error)
+
+
+def test_launchd_exit_config_is_spawn_failure(monkeypatch):
+    monkeypatch.setattr(I, "_out", lambda *cmd: (0, "state = exited\nlast exit code = 78\n"))
+    state = I.launchd_status(I.PANEL_JOB)
+    assert state.loaded and state.spawn_failed and state.pid is None
 
 
 def mac(monkeypatch):
@@ -389,10 +436,11 @@ def test_ask_hook_is_additive_beside_rtk_and_codex_hooks():
     guard = {"matcher": "Edit|Write|NotebookEdit", "hooks": [{"type": "command", "command": "python3 /opt/guards/edit-guard.py"}]}
     settings = {"hooks": {"PreToolUse": [rtk, guard]}}
     new, _ = I.merge_settings(settings)
-    assert new["hooks"]["PreToolUse"][:2] == [rtk, guard] and len(new["hooks"]["PreToolUse"]) == 3
+    assert new["hooks"]["PreToolUse"][:2] == [rtk, guard] and len(new["hooks"]["PreToolUse"]) == 4
     removed, _ = I.remove_settings(new)
     assert removed == settings  # uninstall takes only ours
     assert I.is_hook_command(new["hooks"]["PreToolUse"][2]["hooks"][0]["command"], "hook-ask")
+    assert I.is_hook_command(new["hooks"]["PreToolUse"][3]["hooks"][0]["command"], "hook-bash")
 
 
 def test_doctor_checks_the_ask_hook():

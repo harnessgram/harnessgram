@@ -67,7 +67,8 @@ def test_preview_flag_is_emitted_only_after_owner_auth(monkeypatch, value):
     assert replies[0][0] == 403 and b"settings" not in replies[0][1]
 
 
-@pytest.mark.parametrize("init", ["", "app1.sample.1.0.invalid", signed(user_id=8)])
+@pytest.mark.parametrize("init", ["", "app1.sample.1.0.invalid", signed(user_id=8)],
+                         ids=["missing", "invalid-app-token", "non-owner"])
 def test_non_owner_cannot_turn_preview_on_or_mutate_requests(init):
     for path, body in [("/api/setting", {"name": "ui_v2", "value": "on"}),
                        ("/api/request", {"project": "alpha", "id": 1, "action": "done"}),
@@ -82,6 +83,37 @@ def test_owner_can_change_preview_using_existing_setting_api():
     h, replies = handler("/api/setting", "POST", {"name": "ui_v2", "value": "preview"}, signed())
     h.do_POST()
     assert replies[0][0] == 200 and cockpit_v2.mode() == "preview"
+
+
+def test_app_visual_switches_default_on_and_use_the_owner_setting_api():
+    assert cockpit_v2.app_switches() == {"wideCockpit": True, "summaryRows": True}
+    h, replies = handler("/api/setting", "POST", {"name": "app_wide_cockpit", "value": False}, signed())
+    h.do_POST()
+    assert replies[0][0] == 200
+    assert cockpit_v2.app_switches() == {"wideCockpit": False, "summaryRows": True}
+
+    h, replies = handler("/api/setting", "POST", {"name": "app_summary_rows", "value": False}, signed(user_id=8))
+    h.do_POST()
+    assert replies[0][0] == 403 and cockpit_v2.app_switches()["summaryRows"] is True
+
+
+def test_state_contract_and_settings_page_carry_the_data_driven_app_switches():
+    state = panel.build_state(Config(), light=True)
+    assert state["appSwitches"] == {"wideCockpit": True, "summaryRows": True}
+    page = panel_page.render_page("he", "nonce").decode()
+    assert 'var APP_SWITCHES=[["app_wide_cockpit","wideCockpit","appWideCockpit"],["app_summary_rows","summaryRows","appSummaryRows"]];' in page
+    assert 'data-v2-section","settings-app-appearance"' in page
+    assert "מראה חדש באפליקציה" in page
+
+
+def test_classic_settings_carry_the_localized_app_switches():
+    code = panel_page.PAGE
+    for setting in ("app_wide_cockpit", "app_summary_rows"):
+        assert '"' + setting + '"' in code
+        assert panel_page.STRINGS["he"]["set_" + setting]
+        assert panel_page.STRINGS["en"]["hint_" + setting]
+    screens = (Path(panel_page.__file__).parent / "cockpit_v2_screens.js").read_text()
+    assert 'row.querySelector(".sw").setAttribute("aria-label",V2.settings[copy])' in screens
 
 
 @pytest.mark.parametrize("name", sorted(cockpit_v2.ASSETS))
@@ -212,7 +244,7 @@ def test_neighbouring_unplaced_projects_get_different_scenes_in_any_order():
 
 def test_strings_match_by_screen_and_styles_are_logical():
     strings = panel_page.V2_STRINGS
-    assert strings["he"].keys() == strings["en"].keys() == {"shell", "now", "settings", "projects", "tools", "knowledge", "cleanup", "schedule", "addons", "family", "workmap"}
+    assert strings["he"].keys() == strings["en"].keys() == {"shell", "requests", "now", "settings", "projects", "tools", "knowledge", "cleanup", "schedule", "addons", "family", "workmap", "voiceCopilot", "packs", "art"}
     for screen in strings["he"]:
         assert strings["he"][screen].keys() == strings["en"][screen].keys()
         assert all(strings[lang][screen][k].strip() for lang in strings for k in strings[lang][screen])
@@ -234,7 +266,7 @@ def test_rendered_script_parses_in_node_and_packaged_files_are_declared(tmp_path
     assert checked.returncode == 0, checked.stderr
     config = (Path(panel.__file__).parents[2] / "pyproject.toml").read_text()
     for pattern in ("cockpit_v2.css", "cockpit_v2.js", "cockpit_v2_screens.js", "cockpit_v2_knowledge.js",
-                    "cockpit_v2_knowledge.css", "cockpit_v2_addons.js", "cockpit_v2_addons.css", "cockpit_v2_schedule.js", "cockpit_v2_schedule.css", "cockpit_v2_workmap.js", "cockpit_v2_workmap.css", "cockpit_v2_family.js", "cockpit_v2_family.css", "cockpit_v2_strings.json",
+                    "cockpit_v2_knowledge.css", "cockpit_v2_addons.js", "cockpit_v2_addons.css", "cockpit_v2_schedule.js", "cockpit_v2_schedule.css", "cockpit_v2_workmap.js", "cockpit_v2_workmap.css", "cockpit_v2_family.js", "cockpit_v2_family.css", "cockpit_v2_art.js", "cockpit_v2_art.css", "cockpit_v2_strings.json",
                     "assets/cockpit/*.webp"):
         assert pattern in config
 
@@ -245,6 +277,20 @@ def test_state_has_no_v2_project_payload_when_switch_is_off(monkeypatch):
     cockpit_v2.set_mode("preview")
     state = panel.build_state(Config(bot_token=GOOD_TOKEN, owner_chat_id=7), light=True)
     assert state["cockpit_v2"] == {"projects": [], "as_of": state["now"], "since": None}
+
+
+@pytest.mark.parametrize("mode", ["off", "preview", "on"])
+def test_v2_state_includes_every_reminder_the_shared_count_counts(monkeypatch, mode):
+    from ctb import board, decisions
+
+    rows = [(7, 1, dict(i=i, s=f"Reminder {i}", at=900, d="")) for i in range(37)]
+    monkeypatch.setattr(panel, "collect", lambda *a, **kw: [])
+    monkeypatch.setattr(decisions, "open_decisions", lambda: [])
+    monkeypatch.setattr(board, "open_reminders", lambda: rows)
+    cockpit_v2.set_mode(mode)
+    state = panel.build_state(Config(bot_token=GOOD_TOKEN, owner_chat_id=7), now=1000, light=True)
+    assert state["waiting_count"] == 37
+    assert len(state["reminders"]) == (panel.MAX_REMINDERS if mode == "off" else state["waiting_count"])
 
 
 @pytest.mark.parametrize("mode", ["preview", "on"])
@@ -331,7 +377,8 @@ def test_every_classic_setting_has_a_v2_group():
     switches = re.findall(r'"([a-z_]+)"', re.search(r"var SWITCHES=\[([^\]]*)\]", code).group(1))
     screens = (Path(panel_page.__file__).parent / "cockpit_v2_screens.js").read_text()
     grouped = set(re.findall(r'"([a-z_]+)"', screens[screens.index("var V2_GROUPS="):screens.index("// --- shared parts")]))
-    assert set(switches) | {"activity", "voice_digest", "auto_compact", "cold_compact"} <= grouped
+    app_switches = {setting for setting, _json_key, _copy in cockpit_v2.APP_SWITCHES}
+    assert set(switches) | {"activity", "voice_digest", "auto_compact", "cold_compact"} <= grouped | app_switches
     assert 'if(name==="auto")Object.keys(rows).forEach' in screens
 
 
@@ -386,3 +433,28 @@ def test_brief_line_owner_waits_count_once_beside_requests_and_decisions():
     assert project_for(requests=reqs + [dict(reqs[0], id=3)], brief={"lines": [line]})[0]["waiting"] == 3
     for bad in (True, "2", -1, None):
         assert project_for(brief={"lines": [dict(line, waiting=bad)]})[0]["waiting"] == 0
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/request-detail", {"project": "demo", "id": 1}),
+    ("/api/topic-detail", {"key": ["demo", "item", 1]}),
+])
+def test_detail_reads_use_owner_read_freshness_without_clearing_state(tmp_path, path, body):
+    import time
+    from test_owner_requests import item, put
+
+    put(tmp_path, "demo", [item()])
+    # A login older than an action's 15-minute limit remains valid for a read.
+    h, replies = handler(path, "POST", body, signed(auth_date=int(time.time()) - 1800))
+    h.server.cfg.brief = {"ledger_dir": str(tmp_path)}
+    h.server.state_cache = SimpleNamespace(clear=Mock())
+    h.do_POST()
+    assert replies[0][0] == 200
+    assert json.loads(replies[0][1])["ok"] is True
+    h.server.state_cache.clear.assert_not_called()
+
+    h, replies = handler(path, "POST", body, signed(user_id=8))
+    h.server.cfg.brief = {"ledger_dir": str(tmp_path)}
+    h.do_POST()
+    assert replies[0][0] == 403
+    assert json.loads(replies[0][1]) == {"error": "forbidden"}

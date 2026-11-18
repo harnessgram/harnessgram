@@ -27,6 +27,7 @@ class Element {
 }
 function el(tag,cls,text){var n=new Element();n.cls=cls;n.text=text||"";return n;}
 function icon(){return new Element();}
+function myMusicOpen(){}
 var radioOp=null;
 ''' + "\nvar S=" + json.dumps(strings) + ",LANG=" + json.dumps(lang) + ";\n" + func("radioCard") + "\n" + '''
 var card=radioCard(STATE);

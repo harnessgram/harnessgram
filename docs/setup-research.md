@@ -1,4 +1,4 @@
-# Setup research: can Harnessgram create the bot for you?
+# Setup research: can HarnessGram create the bot for you?
 
 Question: can `harnessgram setup` skip the manual BotFather steps (create a bot, copy its token, switch on
 Threaded Mode) by using Telegram's "managed bots", a bot that creates bots for a user?
@@ -30,16 +30,16 @@ Managed bots arrived in Bot API 9.6 and were extended in 10.0 and 10.4.
 - **Not saved:** the token handoff. Only the manager can call `getManagedBotToken`. The new bot's token reaches
   the user's computer only through the manager: a hosted service, or a message the user copies anyway.
 
-## Why Harnessgram does not use it
+## Why HarnessGram does not use it
 
 1. **Someone else keeps your keys.** The manager can read (`getManagedBotToken`) and replace
-   (`replaceManagedBotToken`) the token of every bot it created, at any time. Harnessgram's security model is
+   (`replaceManagedBotToken`) the token of every bot it created, at any time. HarnessGram's security model is
    that the token lives only on your computer; a manager breaks that.
-2. **It needs a server.** The manager must be online to receive `managed_bot` and fetch the token. Harnessgram is
+2. **It needs a server.** The manager must be online to receive `managed_bot` and fetch the token. HarnessGram is
    self-hosted and runs no shared service.
 3. **The visit to BotFather stays** for Threaded Mode, so the gain is one typed name and username.
 
-Harnessgram could offer it later as an opt-in "invite a friend" flow, where an existing user's own bot is the
+HarnessGram could offer it later as an opt-in "invite a friend" flow, where an existing user's own bot is the
 manager and both sides accept that it keeps access to the friend's token. That needs its own security review.
 
 ## What setup does instead

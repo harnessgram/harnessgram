@@ -71,14 +71,144 @@ def test_date_only_deadline_expires_after_the_entire_day():
 def test_sweep_owner_scope_safety_idempotency_and_counts_only(cfg, capsys):
     seed([reminder(1, "Submit by 2026-11-01"), reminder(2),
           reminder(3, "Submit by 2026-11-01", d="2026-12-01"),
-          reminder(4, "Submit by 2026-11-01", r=NOW - 10),
+          reminder(4, "Submit by 2026-11-01", r=NOW - 100 * life.DAY),
           dict(k="check", i=5, s="Submit by 2026-11-01", at=NOW, x=False)],
          [reminder(1, "Submit by 2026-11-01")])
-    assert board.sweep(cfg, FakeBot(), NOW) == {"cleared": 1, "topics": 1}
+    assert board.sweep(cfg, FakeBot(), NOW) == {"cleared": 1, "topics": 1, "expired": 1,
+                                                "superseded": 0, "linked": 0, "prompted": 0}
     assert [i["i"] for i in board.items_of(CHAT, 10)] == [2, 3, 4, 5]
     assert len(board.items_of(OTHER, 20)) == 1
-    assert board.sweep(cfg, FakeBot(), NOW) == {"cleared": 0, "topics": 0}
+    assert board.sweep(cfg, FakeBot(), NOW) == {"cleared": 0, "topics": 0, "expired": 0,
+                                                "superseded": 0, "linked": 0, "prompted": 0}
     assert not capsys.readouterr().out
+
+
+@pytest.mark.parametrize("older,newer", [
+    ("Install TestFlight build 29", "Check TestFlight build 30"),
+    ("להתקין גרסה 29", "לבדוק גרסה 30"),
+    ("להתקין בנייה 29", "לבדוק בנייה 30"),
+    ("update to version 29", "update to version 30"),
+])
+def test_newer_build_in_same_chat_clears_older_and_records_reason(cfg, older, newer):
+    data = {f"{CHAT}:10": dict(board._blank(), items=[reminder(1, older), reminder(2, newer)])}
+    write_private(state_dir() / board.STATE_FILE, json.dumps(data))
+    counts = board.sweep(cfg, FakeBot(), NOW)
+    assert counts["superseded"] == 1 and counts["cleared"] == 1
+    assert [item["i"] for item in board.items_of(CHAT, 10)] == [2]
+    assert board.snapshot(CHAT, 10)["history"][-1]["reason"] == "superseded"
+
+
+def test_keep_permanently_protects_superseded_build(cfg):
+    kept = reminder(1, "Install build 29", r=NOW)
+    seed([kept, reminder(2, "Install build 30")])
+    assert board.sweep(cfg, FakeBot(), NOW + life.UNDATED_AGE + 1)["superseded"] == 0
+    assert [item["i"] for item in board.items_of(CHAT, 10)] == [1, 2]
+
+
+def test_newer_build_in_another_chat_never_clears(cfg):
+    seed([reminder(1, "Install build 29")], [reminder(2, "Install build 30")])
+    counts = board.sweep(cfg, FakeBot(), NOW)
+    assert counts["superseded"] == 0
+    assert [i["i"] for i in board.items_of(CHAT, 10)] == [1]
+
+
+def test_newer_build_in_another_project_topic_in_same_chat_never_clears(cfg):
+    data = {f"{CHAT}:10": dict(board._blank(), items=[reminder(1, "Install build 29")]),
+            f"{CHAT}:11": dict(board._blank(), items=[reminder(2, "Install build 30")])}
+    write_private(state_dir() / board.STATE_FILE, json.dumps(data))
+    counts = board.sweep(cfg, FakeBot(), NOW)
+    assert counts["superseded"] == 0
+    assert [i["i"] for i in board.items_of(CHAT, 10)] == [1]
+
+
+def test_a_plain_version_number_is_not_a_build():
+    assert board.BUILD_NUMBER.search("Needs Python version 3") is None
+    assert board.BUILD_NUMBER.search("לעדכן לגרסה 30")[1] == "30"
+
+
+@pytest.mark.parametrize("text", ["install build 3000000", "install build 29abc",
+                                    "להתקין גרסה 3000000", "להתקין גרסה 29abc"])
+def test_build_number_must_be_a_whole_bounded_number(text):
+    assert board.BUILD_NUMBER.search(text) is None
+
+
+@pytest.mark.parametrize("text", ["מגרסה 30", "הגרסהחדשה 30", "אבנייה 30", "בנייהחדשה 30"])
+def test_hebrew_build_words_do_not_match_inside_longer_words(text):
+    assert board.BUILD_NUMBER.search(text) is None
+
+
+@pytest.mark.parametrize("text", ["לגרסה 30", "בגרסה 30", "הגרסה 30", "לבנייה 30"])
+def test_hebrew_build_words_allow_common_prefixes(text):
+    assert board.BUILD_NUMBER.search(text)[1] == "30"
+
+
+@pytest.mark.parametrize("status", ["done", "dropped"])
+def test_linked_closed_ledger_item_clears_reminder(cfg, tmp_path, status):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    (ledger / "bridge.json").write_text(json.dumps({"items": [
+        {"id": 41, "status": status, "links": ["https://example.test/item/41"]}
+    ]}))
+    cfg.brief = {"ledger_dir": str(ledger)}
+    seed([reminder(1, "Follow the ledger item", l="bridge#41")])
+    counts = board.sweep(cfg, FakeBot(), NOW)
+    assert counts["linked"] == 1 and not board.items_of(CHAT, 10)
+    assert board.snapshot(CHAT, 10)["history"][-1]["reason"] == "linked"
+
+
+def test_keep_permanently_protects_closed_ledger_reminder(cfg, tmp_path):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    (ledger / "bridge.json").write_text(json.dumps({"items": [
+        {"id": 41, "status": "done"}
+    ]}))
+    cfg.brief = {"ledger_dir": str(ledger)}
+    seed([reminder(1, "Follow the ledger item", l="bridge#41", r=NOW)])
+    assert board.sweep(cfg, FakeBot(), NOW + life.UNDATED_AGE + 1)["linked"] == 0
+    assert [item["i"] for item in board.items_of(CHAT, 10)] == [1]
+
+
+@pytest.mark.parametrize("links", ["https://example.test/item/41", {"x": "https://example.test/item/41"},
+                                     [41], ["https://example.test/item/41", 41],
+                                     ["https://example.test/" + "x" * 1000]])
+def test_malformed_or_unbounded_ledger_links_are_ignored(cfg, tmp_path, links):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    (ledger / "bridge.json").write_text(json.dumps({"items": [
+        {"id": 41, "status": "done", "links": links}
+    ]}))
+    cfg.brief = {"ledger_dir": str(ledger)}
+    seed([reminder(1, "Follow the ledger item", l="https://example.test/item/41")])
+    assert board.sweep(cfg, FakeBot(), NOW)["linked"] == 0
+
+
+def test_bare_ledger_id_never_matches_a_closed_item(cfg, tmp_path):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    (ledger / "bridge.json").write_text(json.dumps({"items": [{"id": 41, "status": "done"}]}))
+    cfg.brief = {"ledger_dir": str(ledger)}
+    seed([reminder(1, "Ambiguous legacy link", l="41")])
+    assert board.sweep(cfg, FakeBot(), NOW)["linked"] == 0
+
+
+def test_load_keeps_only_valid_bounded_history():
+    rows = [{"at": NOW, "i": 1, "reason": "expired"},
+            {"at": float("inf"), "i": 2, "reason": "linked"},
+            {"at": "OVERSIZED", "i": 4, "reason": "superseded"},
+            {"at": NOW, "i": 0, "reason": "linked"},
+            {"at": NOW, "i": 3, "reason": "manual"}, "bad"]
+    payload = json.dumps({f"{CHAT}:10": dict(board._blank(), history=rows)})
+    write_private(state_dir() / board.STATE_FILE, payload.replace('"OVERSIZED"', "1" + "0" * 10000))
+    assert board.snapshot(CHAT, 10)["history"] == [{"at": NOW, "i": 1, "reason": "expired"}]
+
+
+def test_old_undated_reminder_gets_one_prompt_and_is_not_deleted(cfg):
+    seed([reminder(at=NOW - board.STALE_AFTER - 1)])
+    first = board.sweep(cfg, FakeBot(), NOW)
+    second = board.sweep(cfg, FakeBot(), NOW + 60)
+    assert first["prompted"] == 1 and first["cleared"] == 0
+    assert second["prompted"] == 0 and second["cleared"] == 0
+    assert board.items_of(CHAT, 10)[0]["q"] == NOW
 
 
 def test_restore_is_durable_preserves_history_and_can_be_cleared(cfg, monkeypatch):
@@ -90,7 +220,7 @@ def test_restore_is_durable_preserves_history_and_can_be_cleared(cfg, monkeypatc
     row = board.items_of(CHAT, 10)[0]
     assert row["at"] == original and row["r"] == NOW
     assert not life.is_old(row, NOW)
-    assert life.is_old(row, NOW + life.UNDATED_AGE + 1)
+    assert not life.is_old(row, NOW + life.UNDATED_AGE + 1)
     assert panel.clear_reminders(cfg, FakeBot(), [ref]) == {"cleared": 1}
     assert not board.open_reminders()
 
@@ -148,7 +278,7 @@ def test_daily_sweep_is_shared_across_restarts_and_logs_no_content(cfg, monkeypa
     board.daily_sweep(cfg, FakeBot(), NOW + 30)
     board.daily_sweep(cfg, FakeBot(), NOW + life.DAY)
     assert seen == [NOW, NOW + life.DAY]
-    assert logs == ["board sweep: cleared=2 topics=1"] * 2
+    assert logs == ["board sweep: cleared=2 expired=0 superseded=0 linked=0 prompted=0 topics=1"] * 2
 
 
 def test_daily_sweep_retries_after_failure(cfg, monkeypatch):

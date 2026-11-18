@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot
+from conftest import GOOD_TOKEN, FakeBot, signed_in
 from ctb import accounts, delivery, hooks as H, i18n, inbox as I, mirror as M
 from ctb.config import AGENT_NOTICES, STATUS_REPOST, Config, set_setting, setting_on, state_dir, write_private
 from ctb.telegram import TelegramError
@@ -178,7 +178,7 @@ def test_fixed_keyboard_rows():
     # the settings row (live values) above the actions row, which sits closest to the thumb
     assert rows == [["🧠 מודל", "🎚️ חשיבה", "🔐 הרשאות"], ["⏹️ עצור", "🗜️ דחיסה", "⚙️ עוד", "🎛 הקוקפיט"]]
     rows_en = [[b["text"] for b in r] for r in M.KEYBOARD_EN["keyboard"]]
-    assert rows_en == [["🧠 Model", "🎚️ Thinking", "🔐 Permissions"], ["⏹️ Stop", "🗜️ Compact", "⚙️ More", "🎛 Cockpit"]]
+    assert rows_en == [["🧠 Model", "🎚️ Think", "🔐 Access"], ["⏹️ Stop", "🗜️ Compact", "⚙️ More", "🎛 Cockpit"]]
 
 
 def test_live_keyboard_shows_account_effort_model_and_mode(monkeypatch):
@@ -191,8 +191,8 @@ def test_live_keyboard_shows_account_effort_model_and_mode(monkeypatch):
     monkeypatch.setattr(I, "_tmux", FakePane("acceptEdits"))
     kb = M.live_keyboard("הקשר 10 אלף", thread=77)
     labels = [b["text"] for r in kb["keyboard"] for b in r]
-    assert "👤 dev" in labels and "🧠 Opus 5.5" in labels
-    assert "🎚️ " + i18n.t("effort_xhigh", lang="he") in labels and "🔐 עריכות" in labels
+    assert "👤 work" in labels and "🧠 Opus 5.5" in labels
+    assert "🎚️ גבוהה+" in labels and "🔐 עריכות" in labels
     kb_en = M.live_keyboard("Context 10k", lang="en", thread=77)
     assert "🔐 Edits" in [b["text"] for r in kb_en["keyboard"] for b in r]
 
@@ -399,7 +399,7 @@ class Rig:
         for name in ("main", "small"):
             write_private(accounts.usage_path(name), json.dumps(
                 {"five_hour": 20, "weekly": 20, "five_hour_resets": NOW + 3600, "weekly_resets": NOW + 86400,
-                 "at": "2026-11-01T00:00:00Z"}))
+                 "at": iso_now()}))
         self.topics = {}
         self.kids = ""
         monkeypatch.setattr(os, "kill", lambda pid, sig: None)
@@ -575,6 +575,7 @@ def mover(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, *a, **kw: SimpleNamespace(
         stdout="", returncode=1) if cmd[0] == "pgrep" else SimpleNamespace(stdout="", returncode=0))
     monkeypatch.setattr(time, "time", lambda: NOW)
+    signed_in("main", "small")
     accounts.record(SID, "main")
     return pane
 
@@ -634,6 +635,8 @@ def test_a_manual_move_does_not_need_the_session_to_be_idle(mover):
 def test_limit_marker_is_written_only_after_the_move_succeeded(mover, monkeypatch):
     import ctb.usage as U
     monkeypatch.setattr(U, "limit_of", lambda s: {"id": "err-1"})
+    monkeypatch.setattr(accounts, "fallback_plan", lambda s: {
+        "here": accounts.origin_account(s), "fresh": ["small"], "auto": True})
     marker = state_dir() / "limit-cleared" / SID
     monkeypatch.setattr(I, "resume_after_move", lambda *a, **k: "nudged")  # its own tests: test_continue_after_limit_move
     monkeypatch.setattr(I, "account_move", lambda *a, **k: False)

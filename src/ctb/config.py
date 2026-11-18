@@ -66,11 +66,16 @@ def private_dir(path: Path) -> Path:
 
 def write_private(path: Path, text: str) -> None:
     """Atomic write of a file readable only by the current user."""
+    write_private_bytes(path, text.encode("utf-8"))
+
+
+def write_private_bytes(path: Path, data: bytes) -> None:
+    """Atomic write of binary content to a file readable only by the current user."""
     private_dir(path.parent)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except BaseException:
@@ -108,6 +113,22 @@ def locked_map(path: Path, keep: int = 200):
 # Noise settings are plain marker files: the file's presence means "on" (loud). Both default to off.
 STATUS_REPOST = "status-repost"      # post a new status card after every reply instead of editing the old one
 AGENT_NOTICES = "agent-notices"      # announce each finished background agent in its topic
+# Legacy explicit opt-out marker from the former default-on rollout; keep honoring it until a setting write removes it.
+LIVE_ACTIVITY_COCKPIT_OFF = "live-activity-cockpit-off"
+LIVE_ACTIVITY_COCKPIT_ON = "live-activity-cockpit-on"
+
+
+def live_activity_in_cockpit() -> bool:
+    """Whether transient work is kept in the Cockpit instead of being posted to Telegram."""
+    override = os.environ.get("CTB_LIVE_ACTIVITY_COCKPIT")
+    if override is not None:
+        return override == "1"
+    return setting_on(LIVE_ACTIVITY_COCKPIT_ON) and not setting_on(LIVE_ACTIVITY_COCKPIT_OFF)
+
+
+def set_live_activity_in_cockpit(on: bool) -> None:
+    set_setting(LIVE_ACTIVITY_COCKPIT_ON, on)
+    set_setting(LIVE_ACTIVITY_COCKPIT_OFF, False)
 
 
 ACTIVITY_LEVEL = "activity-level"    # how much of an agent's work its topic shows while it works
@@ -333,6 +354,11 @@ def projects_from_raw(raw, projects_root: str = "") -> List[ProjectConfig]:
 
 @dataclass
 class Config:
+    # Headless Claude sessions are an explicit, global opt-in.  Individual sessions
+    # still default to the tmux runner unless their private runner record says otherwise.
+    headless_enabled: bool = False
+    # An optional short, private directory for headless-runner Unix sockets.
+    runner_socket_dir: str = ""
     bot_token: str = ""
     bot_token_command: list = field(default_factory=list)
     # Optional self-hosted Bot API server (`telegram-bot-api --local`): files up to 2000 MB both ways
@@ -344,6 +370,16 @@ class Config:
     api_files_dir: str = ""
     owner_chat_id: int = 0
     widgets_enabled: bool = False
+    youtube: dict = field(default_factory=dict)
+    # APNs Live Activities. The signing key itself remains in the macOS Keychain.
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_bundle_id: str = ""
+    # Optional local text-to-speech engine for the listen button: an argv list (no shell). It reads UTF-8 text on
+    # stdin and writes OGG/Opus to the path after "-o"; "-v <tts_voice>" is added when tts_voice is set.
+    # Empty = the built-in free system voice.
+    tts_command: List[str] = field(default_factory=list)
+    tts_voice: str = ""
     # Optional supergroup id (negative number). Default = 0 (private chat, uses owner_chat_id).
     chat_id: int = 0
     # UI language for menus, buttons, toasts, and alerts: "en" or "he".
@@ -359,6 +395,8 @@ class Config:
     mirror: bool = True
     # Suppress replies to background-only transcript notifications.
     quiet_background_turns: bool = True
+    # Minutes before a foreground Bash tool is offered remote rescue controls.
+    stuck_command_minutes: int = 3
     # Block a reply that is not in target_language and ask for a rewrite (translate off, or failed).
     enforce_language: bool = False
     # Replace credential-looking strings with [redacted] before text leaves the machine.
@@ -382,6 +420,10 @@ class Config:
     gemini_vertex_project: str = ""
     gemini_vertex_account: str = ""
     gemini_token_command: List[str] = field(default_factory=list)
+    # Optional Tower voice pipe, using the radio's existing Vertex identity. The switch is state-only/off.
+    voice_copilot_model: str = "gemini-live-2.5-flash-native-audio"
+    voice_copilot_location: str = "us-central1"
+    voice_copilot_daily_minutes: int = 90
     gemini_key_command: List[str] = field(default_factory=list)
     gemini_glossary: dict = field(default_factory=dict)
     # Thinking level sent to Gemini 3 models ("low", "medium", "high"; "" leaves the model default).
@@ -389,8 +431,20 @@ class Config:
     # A second Gemini model tried only when the first one fails (error, refusal or no answer), within the same
     # time budget; "" = none. A fast model suits it (e.g. "gemini-3.5-flash-lite").
     gemini_fallback_model: str = ""
-    # Team radio (`ctb radio`): a narrated live stream in the home group. Off unless configured; see docs/radio.md.
+    # The model for routine Gemini text (live step titles, interim prose, notices, cards, topic names, radio prompts);
+    # gemini_model is kept for owner-facing text (a mirrored reply's closing summary). "" = gemini_fallback_model
+    # when one is set, else gemini_model. Set it to gemini_model to send everything to that model.
+    gemini_routine_model: str = ""
+    # The family filter committee's Ed25519 public key (base64). `filter-policy publish` stores only documents signed
+    # for this key; "" = no committee, publishing is refused.
+    filter_committee_key: str = ""
+    # Team radio (`ctb radio`): a narrated live stream in the home group. `voice_route` is "local" (default) or
+    # "cloud" (explicit opt-in with the owner's credentials). Off unless configured; see docs/radio.md.
     radio: dict = field(default_factory=dict)
+    # Hourly private-radio summaries of owner-selected Telegram channels; empty/default-off prevents all reading.
+    news_edition_enabled: bool = False
+    news_edition_channels: List[str] = field(default_factory=list)
+    news_edition_daily_seconds: int = 300
     # Podcast feeds the owner lets the radio play (radio_podcast.py, docs/radio.md): a list of
     # {"name": "...", "url": "https://..."}. Empty: only single episode links can be queued.
     radio_podcasts: list = field(default_factory=list)
@@ -400,7 +454,8 @@ class Config:
     voice_digest_quiet_windows: list = field(default_factory=lambda: [
         {"start": "fri 12:00", "end": "sun 00:00"}])
     # The Cockpit's Morning Brief (brief.py, docs/panel.md): where its work lines come from ("ledger_dir" or
-    # "ledger_command"; the radio's ledger_dir otherwise), "project_names", and an optional "events_file".
+    # "ledger_command"; the radio's ledger_dir otherwise), "project_names", an optional "events_file",
+    # and "request_dormant_days" (positive number, default 7).
     brief: dict = field(default_factory=dict)
     # The idle-line nudger (idle_lines.py): "on" (default true), "hours" (default 4) and "leads"
     # ({"<ledger project>": "<session id>"}): only listed leads get the short nudge line; the Cockpit shows all.
@@ -410,6 +465,8 @@ class Config:
     # default 07:00). Their on/off switches are the add-ons "work_map" and "morning_briefing" (addons.py).
     work_map: dict = field(default_factory=dict)
     briefing: dict = field(default_factory=dict)
+    # Proactive owner day helper: briefing_time (HH:MM, configured timezone). Switches live in Settings.
+    day_assistant: dict = field(default_factory=dict)
     # What the system knows (knowledge.py, docs/knowledge.md): where the agents' rules, memories, skills, tools
     # and docs live, the overlay file for switched-off items and extra locked safety rules. Every key is optional.
     knowledge: dict = field(default_factory=dict)
@@ -444,9 +501,12 @@ class Config:
     # The bridge names each session topic itself, "project: task" in the target language, and keeps it current
     # (topic_names.py). A name set by hand (in Telegram or with `ctb topic-rename`) always wins.
     auto_topic_names: bool = False
+    # Change the working placeholder to reflect the latest session activity.
+    state_emoji: bool = True
     topic_check_reminders: bool = False
     auto_account_switch: bool = False
     quota_auto_continue: bool = False
+    emergency_credit: bool = True
     session_auto_revive: bool = False
     # Hard daily budget of Gemini requests for topic names (every route attempt counts, failed ones too; shared by
     # the listener and the CLI). 0 = never ask Gemini; names then come from the first request only.
@@ -481,6 +541,8 @@ class Config:
     # Live progress: edit one message with recent tool calls while working, delete when done.
     progress: bool = False
     progress_details: bool = False
+    # Short action cards hide commands and output until the owner expands that individual card.
+    compact_actions: bool = False
     # Forum group only: one pinned index message per session topic, edited after each reply with
     # links to the last `pin_limit` replies (the pinned bar jumps between replies; 0 = no index).
     pin_replies: bool = True
@@ -605,13 +667,44 @@ def from_dict(raw: dict) -> Config:
             continue  # ignore unknown keys: newer config, older program
         if key == "cold_compact" and value not in ("on", "off"):
             raise ConfigError("cold_compact must be on or off")
-        if key == "bot_token":
+        if key == "voice_copilot_daily_minutes":
+            if type(value) is not int or not 0 <= value <= 1440:
+                raise ConfigError("voice_copilot_daily_minutes must be a whole number from 0 to 1440")
+        elif key == "voice_copilot_model":
+            if not isinstance(value, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", value):
+                raise ConfigError("voice_copilot_model must be a model name")
+        elif key == "news_edition_channels":
+            if (not isinstance(value, list) or len(value) > 20 or
+                    not all(isinstance(v, str) and v.strip() for v in value)):
+                raise ConfigError("news_edition_channels must be a list of at most 20 non-empty strings")
+            value = [v.strip() for v in value]
+        elif key == "news_edition_daily_seconds":
+            if type(value) is not int or not 0 <= value <= 86400:
+                raise ConfigError("news_edition_daily_seconds must be a whole number from 0 to 86400")
+        elif key == "voice_copilot_location":
+            if not isinstance(value, str) or not re.fullmatch(r"[a-z]+-[a-z]+[0-9]+", value):
+                raise ConfigError("voice_copilot_location must be a regional Vertex location")
+        elif key == "bot_token":
             value = str(value).strip()
             if value and not TOKEN_RE.match(value):  # never echo the value: it is a secret
                 raise ConfigError("bot_token has an invalid format (expected 123456:ABC...)")
+        elif key in ("apns_key_id", "apns_team_id"):
+            if not isinstance(value, str) or (value and not re.fullmatch(r"[A-Za-z0-9]{1,32}", value)):
+                raise ConfigError(f"{key} must contain 1 to 32 letters or digits")
+        elif key == "tts_command":
+            if not isinstance(value, list) or len(value) > 16 or not all(
+                    isinstance(part, str) and part and len(part) <= 1024 and "\x00" not in part for part in value):
+                raise ConfigError("tts_command must be a list of program arguments (no shell string)")
+        elif key == "tts_voice":
+            if not isinstance(value, str) or (value and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value)):
+                raise ConfigError("tts_voice must be a short voice name (letters, digits, '.', '_' or '-')")
+        elif key == "apns_bundle_id":
+            if not isinstance(value, str) or (value and not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9.-]{0,254}[A-Za-z0-9]", value)):
+                raise ConfigError("apns_bundle_id must be an app bundle identifier")
         elif key in ("max_queue", "cleanup_days", "context_hint_tokens", "periodic_reminder_minutes",
                      "periodic_reminder_min_kb", "pin_limit", "topic_names_daily_calls",
-                     "topic_cleanup_days"):
+                     "topic_cleanup_days", "stuck_command_minutes"):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ConfigError(f"{key} must be a whole number, 0 or more")
         elif key == "owner_chat_id":
@@ -692,6 +785,13 @@ def from_dict(raw: dict) -> Config:
             from .briefing import valid_section as valid_briefing
             if not valid_briefing(value):
                 raise ConfigError('briefing must be an object like {"time": "07:00"}')
+        elif key == "day_assistant":
+            if not isinstance(value, dict) or set(value) - {"briefing_time"}:
+                raise ConfigError("day_assistant accepts only briefing_time; its switches are managed in Settings")
+            when = value.get("briefing_time")
+            if when is not None and (not isinstance(when, str) or
+                                     not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", when)):
+                raise ConfigError("day_assistant briefing_time must be HH:MM")
         elif key == "knowledge":
             from .knowledge import valid_section as valid_knowledge
             if not valid_knowledge(value):
@@ -710,7 +810,7 @@ def from_dict(raw: dict) -> Config:
         elif key == "gemini_glossary":
             if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
                 raise ConfigError("gemini_glossary must be an object of strings")
-        elif key in ("projects_root", "codex_sessions_dir"):
+        elif key in ("projects_root", "codex_sessions_dir", "runner_socket_dir"):
             if not isinstance(value, str):
                 raise ConfigError(f"{key} must be a path string")
             value = value.strip()

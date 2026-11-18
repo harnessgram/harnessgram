@@ -215,13 +215,16 @@ def test_a_secret_reaches_security_on_stdin_only():
     assert G.Keychain(run).set(G.TOKEN_ITEM, REFRESH) is True
     argv, kw = run.calls[0]
     assert argv == ["security", "-i"] and REFRESH not in " ".join(argv)
-    assert REFRESH in kw["input"] and kw["input"].startswith("add-generic-password -U ")
+    assert REFRESH not in kw["input"] and ("-X " + REFRESH.encode().hex()) in kw["input"]
+    assert kw["input"].startswith("add-generic-password -U ")
     assert all(REFRESH not in " ".join(a) for a, _ in run.calls)
 
 
-def test_a_value_that_could_break_the_command_line_is_never_stored():
+def test_a_value_that_could_break_the_command_line_is_hex_encoded():
     run = Runner()
-    assert G.Keychain(run).set(G.TOKEN_ITEM, 'bad" -s "other') is False and run.calls == []
+    value = 'bad" -s "other'
+    assert G.Keychain(run).set(G.TOKEN_ITEM, value) is True
+    assert value not in run.calls[0][1]["input"] and value.encode().hex() in run.calls[0][1]["input"]
 
 
 def test_reading_asks_for_the_password_only_and_never_prompts():
@@ -552,6 +555,43 @@ def test_timed_events_are_shown_in_the_owners_zone():
                              ("Floating with zone", "2026-11-16", "09:15"),
                              ("Late UTC is tomorrow here", "2026-11-16", "01:30")]
     assert mapped(items[:1], timezone="America/New_York") == [("UTC", "2026-11-15", "03:00")]
+
+
+@pytest.mark.parametrize("start,end", [
+    ("2026-10-25T01:30:00+03:00", "2026-10-25T01:15:00+02:00"),
+    ("2026-03-27T01:30:00+02:00", "2026-03-27T03:15:00+03:00"),
+])
+def test_google_events_crossing_dst_keep_their_instants_and_local_display(start, end):
+    day = datetime.fromisoformat(start).date()
+    cfg = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER, timezone="Asia/Jerusalem")
+    found = G.map_events([{"summary": "DST", "start": {"dateTime": start}, "end": {"dateTime": end}}],
+                         cfg, day, day)
+    assert len(found) == 1
+    event = found[0]
+    assert (event.day, event.time) == (day.isoformat(), "01:30")
+    assert event.start.isoformat() == start
+    assert event.end.isoformat() == end
+    assert event.end.timestamp() - event.start.timestamp() == 45 * 60
+
+
+@pytest.mark.parametrize("start,end", [
+    ("2026-10-25T01:30:00+03:00", "2026-10-25T01:30:00+02:00"),
+    ("2026-03-27T01:30:00+02:00", "2026-03-27T03:30:00+03:00"),
+])
+def test_google_default_duration_is_one_real_hour_across_dst(start, end):
+    day = datetime.fromisoformat(start).date()
+    cfg = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER, timezone="Asia/Jerusalem")
+    found = G.map_events([{"start": {"dateTime": start}}], cfg, day, day)
+    assert len(found) == 1
+    assert found[0].end.isoformat() == end
+    assert found[0].end.timestamp() - found[0].start.timestamp() == 60 * 60
+
+
+def test_google_rejects_an_end_before_start_despite_increasing_wall_time():
+    day = date(2026, 10, 25)
+    cfg = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER, timezone="Asia/Jerusalem")
+    assert G.map_events([{"start": {"dateTime": "2026-10-25T01:15:00+02:00"},
+                          "end": {"dateTime": "2026-10-25T01:30:00+03:00"}}], cfg, day, day) == []
 
 
 def test_cancelled_broken_and_untitled_events():

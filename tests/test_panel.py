@@ -5,6 +5,7 @@ import http.client
 import json
 import threading
 import time
+from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
@@ -12,6 +13,14 @@ import pytest
 from conftest import GOOD_TOKEN
 from ctb import panel
 from ctb.config import Config, state_dir, write_private
+
+
+def test_pack_route_is_read_only_and_has_no_write_action():
+    assert "/api/packs" in panel.READ_ONLY_ROUTES
+    assert panel.PACK_KEYS == {"view": set()}
+    source = Path(panel.__file__).read_text()
+    handler = source[source.index("    def _packs(self)"):source.index("    def _schedule_off")]
+    assert "set_on" not in handler and "undo" not in handler
 
 OWNER = 7
 
@@ -78,6 +87,13 @@ def test_missing_header_is_403(server):
     assert code == 403 and b"sessions" not in data
 
 
+def test_my_music_is_owner_only_read_only(server, monkeypatch):
+    monkeypatch.setattr(panel.panel_my_music, "load", lambda cfg: {"ok": True, "playlists": [], "liked_music": []})
+    assert "/api/my-music" in panel.READ_ONLY_ROUTES
+    assert call(server, path="/api/my-music", init=signed())[0] == 200
+    assert call(server, path="/api/my-music", init=signed(user_id=OWNER + 1))[0] == 403
+
+
 def test_duplicate_keys_rejected():
     assert not panel.validate_init_data(signed() + "&auth_date=1", GOOD_TOKEN, OWNER)
 
@@ -109,6 +125,43 @@ def test_page_has_csp_and_embeds(server):
     assert GOOD_TOKEN not in html
 
 
+def test_page_icons_and_web_manifest(server):
+    code, _, page = call(server, "GET", "/")
+    assert code == 200
+    assert b'rel="icon" href="/favicon.svg"' in page
+    assert b'rel="apple-touch-icon" href="/apple-touch-icon.png"' in page
+    assert b'rel="manifest" href="/manifest.webmanifest"' in page
+
+    code, headers, body = call(server, "GET", "/manifest.webmanifest")
+    assert code == 200 and headers["Content-Type"] == "application/manifest+json"
+    icons = json.loads(body)["icons"]
+    assert {(icon["sizes"], icon["purpose"]) for icon in icons} == {
+        ("192x192", "any"), ("512x512", "any"), ("512x512", "maskable"), ("any", "monochrome")}
+
+
+@pytest.mark.parametrize(("path", "content_type", "magic"), [
+    ("/favicon.svg", "image/svg+xml", b"<svg"),
+    ("/favicon-32.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+    ("/apple-touch-icon.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+    ("/icons/icon-192.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+    ("/icons/icon-512.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+    ("/icons/icon-maskable-512.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+    ("/icons/icon-monochrome.svg", "image/svg+xml", b"<svg"),
+])
+def test_panel_icon_files_are_served(server, path, content_type, magic):
+    code, headers, body = call(server, "GET", path)
+    assert code == 200 and headers["Content-Type"] == content_type
+    assert body.startswith(magic)
+    assert headers["Cache-Control"] == "public, max-age=31536000, immutable"
+
+
+def test_apple_touch_icon_is_opaque_rgb(server):
+    code, _, body = call(server, "GET", "/apple-touch-icon.png")
+    assert code == 200
+    # PNG IHDR colour type 2 is RGB without an alpha channel; the generator also paints every pixel.
+    assert body[:8] == b"\x89PNG\r\n\x1a\n" and body[25] == 2
+
+
 def test_english_page_is_ltr():
     cfg = Config(bot_token=GOOD_TOKEN, owner_chat_id=OWNER, target_language="en")
     assert b'dir="ltr"' in panel.render_page(cfg.ui_language, "n")
@@ -127,7 +180,8 @@ def test_state_shape_from_state_dirs(server, tmp_path):
     assert {s["id"] for s in body["sessions"]} == {"abcd1234", "zzzz9999"}
     s = body["sessions"][0]
     assert set(s) == {"id", "name", "state", "age", "context", "compact", "model", "account", "bg", "now", "summary", "url", "here",
-                      "waiting", "folder", "branch", "left", "usage", "forkable"}
+                      "waiting", "folder", "branch", "left", "usage", "forkable", "credit"}
+    assert s["credit"] == ""  # subscription sessions have no paid-usage line
     assert "topic" not in body
     assert s["state"] in ("working", "idle", "ended")
     q = body["quota"][0]

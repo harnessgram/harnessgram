@@ -160,7 +160,7 @@ def test_private_folder_and_pipeline_close_empty_it():
     assert root.stat().st_mode & 0o777 == 0o700
     (root / "live.m3u8").write_text("audio")
     (root / "segment-0.ts.tmp").write_text("audio")
-    pipe = radio.Pipeline("unused", "unused", root / "card", "libx264", None, lambda pid: None, hls=True)
+    pipe = radio.Pipeline("", "", root / "card", "", None, lambda pid: None, audio_only=True)
     pipe.close()
     assert root.exists() and not list(root.iterdir())
     assert radio.settings(Config())["radio_player"] is True
@@ -236,7 +236,7 @@ def test_player_recovers_renews_and_keeps_one_audio_element():
         pytest.skip("node unavailable")
     from test_panel_page import func, js
     functions = "\n".join(func(name) for name in ("radioPlayerDraw", "radioPlayerSchedule", "radioPlayerSource",
-                                                  "radioPlayerStop", "radioPlayerRefresh"))
+                                                  "radioPlayerPlay", "radioPlayerStop", "radioPlayerRefresh"))
     variables = next(line for line in js().splitlines() if line.startswith("var radioAudio="))
     script = r'''
 const assert=require("node:assert/strict");
@@ -265,18 +265,20 @@ function post(){return Promise.resolve({ok:status===200,status,json:()=>Promise.
  radioInfo=info;radioPlayerDraw();const audio=radioAudio;
  assert.equal(audioCount,1);assert.equal(audio.src,""); // no autoplay before a tap
  box.children[0].children[2].events.click();await Promise.resolve();
- assert.equal(radioWanted,true);assert.equal(audio.paused,false);assert.match(audio.src,/first/);
+ assert.equal(audio.paused,false);assert.match(audio.src,/first/);
  assert.equal(timer.delay,480000); // dedicated renewal, independent of hidden-tab polling
  await radioPlayerRefresh();assert.equal(radioAudio,audio);assert.match(audio.src,/first/);
  view="agents";radioPlayerDraw();assert.equal(box.hidden,true);assert.equal(audio.paused,false);
  info={enabled:true,on:false,token:"second",expires:700};await radioPlayerRefresh();
- assert.equal(audio.paused,true);assert.equal(radioWanted,true);
+ assert.equal(audio.paused,true);
  info={enabled:true,on:true,token:"third",expires:800};await radioPlayerRefresh();
+ assert.equal(audio.paused,true);
+ view="me";radioPlayerDraw();box.children[0].children[2].events.click();
  assert.equal(audio.paused,false);assert.match(audio.src,/third/);
  clock=680001;info={enabled:true,on:true,token:"renewed",expires:1280};
  await timer.fn();assert.match(audio.src,/renewed/);assert.equal(audio.paused,false);
  view="me";radioPlayerDraw();box.children[0].children[2].events.click();
- assert.equal(radioWanted,false);await radioPlayerRefresh();assert.equal(audio.paused,true);
+ await radioPlayerRefresh();assert.equal(audio.paused,true);
  assert.equal(timer,null);assert.equal(audioCount,1);
  status=403;await radioPlayerRefresh();assert.equal(audio.src,"");assert.equal(box.hidden,true);
 })().catch(e=>{console.error(e);process.exitCode=1;});

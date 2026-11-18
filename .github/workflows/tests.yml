@@ -1,51 +1,87 @@
-name: tests
-
+name: PR and batch CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main]
-
 permissions:
   contents: read
-
 concurrency:
-  group: tests-${{ github.ref }}
+  group: pr-tests-${{ github.event.pull_request.number }}
   cancel-in-progress: true
-
 jobs:
-  pytest:
-    # Agent PRs open as drafts; tests run once they are marked ready, and on main.
-    if: github.event_name == 'push' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
-    # Parallel with xdist the suite takes ~2 minutes; the limit stays 20 as a guard (2026-11-15).
-    timeout-minutes: 20
+  # One job on purpose: the shared runner admits every job separately (up to 30 minutes each), so a run waits once.
+  ci:
+    # Draft PRs never take the shared runner: a skipped job needs no runner at all.
+    # Forks never reach the self-hosted runner.
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Linux, ARM64, lingoline-quality]
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.12"
-      - run: sudo apt-get install -y tmux
-      # Wall-clock CPU budgets (tests/test_cpu_budget.py) run locally; shared runners are too noisy for them.
-      - env:
-          CTB_SKIP_BENCH: "1"
-        run: uv run -q --with pytest --with pytest-timeout --with pytest-xdist --with pillow --with-editable . python -m pytest -q --timeout 20 -n auto tests --ignore=tests/test_live.py
-
-  package:
-    # The wheel and the source archive build, pass the metadata check, and a clean install runs the command.
-    if: github.event_name == 'push' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.12"
-      - run: uv build
-      - run: uvx twine check dist/*
-      - name: Install the wheel in a clean environment
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: {fetch-depth: 0, persist-credentials: false}
+      - name: Read CI class
+        id: class
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          uv venv /tmp/wheel-check
-          uv pip install --python /tmp/wheel-check/bin/python dist/*.whl
-          /tmp/wheel-check/bin/harnessgram --version
-          /tmp/wheel-check/bin/python -c "import importlib.resources as r; assert r.files('ctb.studio').joinpath('app.js').is_file()"
+          # Accepts "CI class: High — reason", "CI class: High: reason" and "CI class: High (reason)".
+          ci_class="$(printf '%s\n' "$PR_BODY" | sed -nE 's/^CI class:[[:space:]]*(Low|Medium|High)([[:space:]]*[-—:(].*)?$/\1/p' | head -1 | tr '[:upper:]' '[:lower:]')"
+          echo "ci_class=${ci_class:-invalid}" >> "$GITHUB_OUTPUT"
+          echo "CI class: ${ci_class:-invalid}"
+      - name: Require a CI class and rationale on ready PRs
+        if: ${{ !github.event.pull_request.draft }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! printf '%s\n' "$PR_BODY" | grep -Eq '^CI class:[[:space:]]*(Low|Medium|High)[[:space:]]*([-—:]|\()[[:space:]]*[^[:space:]].+'; then
+            echo 'Ready pull requests need "CI class: Low / Medium / High — <one-sentence reason>".' >&2
+            exit 1
+          fi
+      - name: Find touched areas
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          match() { printf '%s\n' "$changed" | grep -Eq "$1" && echo true || echo false; }
+          echo "python=$(match '^(src/ctb/|tests/)')" >> "$GITHUB_OUTPUT"
+          echo "package=$(match '^(src/|pyproject\.toml$|README(\.he)?\.md$|LICENSE$)')" >> "$GITHUB_OUTPUT"
+          echo "native=$(match '^(ios/|macos/)')" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@4959332f0f014c5280e7eac8b70c90cb574c9f9b # v6.6.0
+        if: ${{ !github.event.pull_request.draft }}
+        with: {python-version: "3.12"}
+      - name: Tests
+        if: >-
+          !github.event.pull_request.draft &&
+          (steps.class.outputs.ci_class == 'high' ||
+           (steps.class.outputs.ci_class == 'medium' && steps.paths.outputs.python == 'true'))
+        env: {CTB_SKIP_BENCH: "1"}
+        run: |
+          command -v tmux >/dev/null || { echo "Error: tmux is required." >&2; exit 1; }
+          uv run -q --with pytest --with pytest-timeout --with pytest-xdist --with pillow --with "cryptography>=42" --with-editable . python -m pytest -q --timeout 20 -n auto tests --ignore=tests/test_live.py
+      - name: Package
+        if: >-
+          !github.event.pull_request.draft &&
+          (steps.class.outputs.ci_class == 'high' ||
+           (steps.class.outputs.ci_class == 'medium' && steps.paths.outputs.package == 'true'))
+        run: |
+          uv build
+          uvx twine check dist/*
+          uv venv "$RUNNER_TEMP/wheel-check"
+          uv pip install --python "$RUNNER_TEMP/wheel-check/bin/python" dist/*.whl
+          "$RUNNER_TEMP/wheel-check/bin/harnessgram" --version
+          "$RUNNER_TEMP/wheel-check/bin/python" -c "import importlib.resources as r; assert r.files('ctb.studio').joinpath('app.js').is_file()"
+      - name: Native project files
+        if: >-
+          !github.event.pull_request.draft &&
+          (steps.class.outputs.ci_class == 'high' ||
+           (steps.class.outputs.ci_class == 'medium' && steps.paths.outputs.native == 'true'))
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if test -d ios || test -d macos; then
+            git diff --check "$BASE_SHA" "$HEAD_SHA" -- ios macos
+          else
+            echo "No native project is present in this revision."
+          fi

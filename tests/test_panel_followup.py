@@ -7,7 +7,7 @@ import time
 import pytest
 
 from conftest import GOOD_TOKEN
-from ctb import decisions, panel, panel_settings, panel_view, sessions_menu
+from ctb import decisions, panel, panel_page, panel_settings, panel_view, sessions_menu
 from ctb.config import Config, state_dir, write_private
 from test_panel import OWNER, call, signed
 
@@ -207,3 +207,32 @@ def test_voice_digest_setting_round_trip_requires_owner_auth(server):
         assert json.loads(call(server, init=signed())[2])["settings"]["voice_digest"] == value
     body = json.dumps({"name": "voice_digest", "value": "daily"}).encode()
     assert call(server, path="/api/setting", init=signed(), body=body)[0] == 400
+
+
+def test_default_effort_change_requires_owner_auth(server, monkeypatch):
+    changed = []
+    monkeypatch.setattr(panel_settings, "SETTINGS", {
+        **panel_settings.SETTINGS,
+        "default_effort": (lambda: "high", changed.append, ("low", "medium", "high", "xhigh")),
+    })
+    body = json.dumps({"name": "default_effort", "value": "xhigh"}).encode()
+    assert call(server, path="/api/setting", init=None, body=body)[0] == 403
+    assert changed == []
+    assert call(server, path="/api/setting", init=signed(), body=body)[0] == 200
+    assert changed == ["xhigh"]
+
+
+def test_default_effort_partial_save_returns_profile_results(server, monkeypatch):
+    results = [{"profile": "main", "ok": True},
+               {"profile": "work", "ok": False, "error": "read only"}]
+    monkeypatch.setattr(panel_settings, "SETTINGS", {
+        **panel_settings.SETTINGS,
+        "default_effort": (lambda: "mixed", lambda _value: results, ("low", "medium", "high", "xhigh")),
+    })
+    body = json.dumps({"name": "default_effort", "value": "high"}).encode()
+    code, _, raw = call(server, path="/api/setting", init=signed(), body=body)
+    response = json.loads(raw)
+    assert code == 200
+    assert response["partial"] is True
+    assert response["profiles"] == results
+    assert "נשמר רק בחלק מהחשבונות" == panel_page.STRINGS["he"]["partlySaved"]

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import FakeBot
+from conftest import FakeBot, signed_in
 from ctb import accounts, inbox as I, recover, usage
 from ctb.config import state_dir
 from test_replay_after_move import (LIMIT, OWNER, SID, assistant, cfg, hit_limit, owner_message, user,  # noqa: F401
@@ -62,7 +62,7 @@ class Tmux:
     def __call__(self, *args):
         self.calls.append(args)
         if args[0] == "send-keys":
-            if "-l" in args and args[-1].startswith("📩"):
+            if "-l" in args and args[-1].startswith(("📩", "continue:")):
                 self.nudge = args[-1]
                 self.screen = self.screen.replace("❯ \n", "❯ " + self.nudge + "\n")
             elif args[-1] in ("Enter", "C-u") and self.nudge:
@@ -89,6 +89,7 @@ class Tmux:
 
 @pytest.fixture
 def screen(world, monkeypatch):
+    signed_in("main", "small")
     tm = Tmux()
     monkeypatch.setattr(I, "_tmux", tm)
     monkeypatch.setattr(I, "pane_runs_session", lambda *a, **k: True)  # the fake pane hosts the session
@@ -235,7 +236,9 @@ def test_the_start_screen_is_given_a_second_look_before_typing(world, screen):
     def tmux(*args):
         if args[0] == "capture-pane":
             seen.append(1)
-            return SimpleNamespace(returncode=0, stdout=next(screens, FIXTURE_SCREEN))
+            shown = next(screens, None)
+            if shown is not None:
+                return SimpleNamespace(returncode=0, stdout=shown)
         return screen(*args)
     I._tmux = tmux
     try:
@@ -252,7 +255,8 @@ def test_a_line_that_was_typed_but_not_taken_is_not_typed_again_while_it_sits_in
     box = FIXTURE_SCREEN.replace("❯ \n", "❯ " + I.RESUME_TEXT[:60] + "\n")
 
     def tmux(*args):
-        if args[0] == "capture-pane" and any(c[:2] == ("send-keys", "-t") for c in screen.calls):
+        # Show the delayed redraw only after submission; the literal input is visible before Enter.
+        if args[0] == "capture-pane" and screen.enters():
             return SimpleNamespace(returncode=0, stdout=box)
         return screen(*args)
     monkeypatch.setattr(I, "_tmux", tmux)
@@ -279,15 +283,43 @@ def test_the_try_count_lives_in_the_marker_and_is_written_before_typing(world, s
     from ctb import autopilot
     real = autopilot.type_into
 
-    def type_into(pane, text):
+    def type_into(pane, text, session):
         seen.append(json.loads((state_dir() / "resume-pending" / SID).read_text())["tries"])
-        real(pane, text)
+        real(pane, text, session)
     monkeypatch.setattr(autopilot, "type_into", type_into)
     monkeypatch.setattr(usage, "prompt_since", lambda *a, **k: False)
     I.mark_resume_pending(SID, 0, "small")
     I.resume_after_move(SID, wait=0)
     I.resume_after_move(SID, wait=0)
     assert seen == [1, 2]
+
+
+def test_a_preflight_refusal_does_not_consume_a_try(world, screen, monkeypatch):
+    from ctb import autopilot
+    monkeypatch.setattr(autopilot, "type_into", lambda *a: (_ for _ in ()).throw(
+        autopilot.NotTyped("not ready")))
+    I.mark_resume_pending(SID, 0, "small")
+    assert I.resume_after_move(SID, wait=0) == "waiting"
+    info = json.loads((state_dir() / "resume-pending" / SID).read_text())
+    assert "tries" not in info
+    assert screen.typed() == []
+
+
+def test_terminal_lock_timeout_does_not_consume_a_resume_try(world, screen, monkeypatch):
+    import fcntl
+    from ctb import terminal_lock
+    from ctb.config import private_dir
+
+    monkeypatch.setattr(terminal_lock, "LOCK_TIMEOUT", 0.01)
+    monkeypatch.setattr(terminal_lock, "LOCK_POLL", 0.001)
+    I.mark_resume_pending(SID, 0, "small")
+    lock_path = private_dir(state_dir()) / "terminal-input.lock"
+    with open(lock_path, "a") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert I.resume_after_move(SID, wait=0) == "waiting"
+    info = json.loads((state_dir() / "resume-pending" / SID).read_text())
+    assert "tries" not in info
+    assert screen.typed() == []
 
 
 def test_a_marker_already_at_three_tries_types_nothing(world, screen):
@@ -305,12 +337,12 @@ def test_no_enter_while_a_menu_is_open_and_the_sent_prompt_is_visible_above(worl
     monkeypatch.setattr(usage, "prompt_since", lambda *a, **k: False)
     menu = "\n".join(["❯ " + I.RESUME_TEXT, "", "⏺ Bash(rm -rf build)", "Bash command", "  rm -rf build",
                       "Do you want to proceed?", "❯ 1. Yes", "  2. No", "Esc to cancel"]) + "\n"
-    state = {"typed": False}
+    state = {"submitted": False}
 
     def tmux(*args):
-        if args[0] == "send-keys" and "-l" in args:
-            state["typed"] = True
-        if args[0] == "capture-pane" and state["typed"]:
+        if args[0] == "send-keys" and args[-1] == "Enter":
+            state["submitted"] = True
+        if args[0] == "capture-pane" and state["submitted"]:
             screen.calls.append(args)
             return SimpleNamespace(returncode=0, stdout=menu)
         return screen(*args)
@@ -319,6 +351,21 @@ def test_no_enter_while_a_menu_is_open_and_the_sent_prompt_is_visible_above(worl
     I.resume_after_move(SID, wait=0)
     assert len(screen.continues()) == 1
     assert [c for c in screen.enters() if c[-1] == "Enter"] and len(screen.enters()) == 1  # type_into's own only
+
+
+def test_a_menu_opening_before_submit_blocks_the_continue_enter(world, screen, monkeypatch):
+    def tmux(*args):
+        result = screen(*args)
+        if args[0] == "send-keys" and "-l" in args and args[-1].startswith("continue:"):
+            screen.screen = MENU_SCREEN
+        return result
+
+    monkeypatch.setattr(I, "_tmux", tmux)
+    I.mark_resume_pending(SID, 0, "small")
+    with pytest.raises(OSError, match="pane changed before submit"):
+        I.resume_after_move(SID, wait=0)
+    assert len(screen.continues()) == 1
+    assert screen.enters() == [] and I.resume_pending(SID)
 
 
 def test_the_box_check_wants_the_last_prompt_row(world, screen):

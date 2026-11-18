@@ -132,6 +132,15 @@ def test_live_fields_survive_agent_edits_and_are_scrubbed_when_loaded():
     assert cards.open_cards()[0]["live"] == "Read [path]"
 
 
+def test_the_view_says_when_the_plan_last_moved_and_old_records_fall_back_to_creation():
+    rec = own()
+    cards.update_live("sess-1", "Working", now=150)
+    edited = cards.publish("sess-1", 1, 7, "progress", "", ident=rec["id"], at=1, now=210)
+    cards.update_live("sess-1", "Still working", now=400)
+    assert cards.view(cards.open_cards()[0], 500)["updated"] == 210.0  # the live line never moves it
+    assert cards.view(dict(edited, updated=0.0), 500)["updated"] == 100.0  # no update time: when it was made
+
+
 def test_stale_plan_reminder_is_ten_minutes_and_asks_for_rewritten_steps():
     assert cards.PROGRESS_STALE_AFTER == hooks.PROGRESS_STALE == 600
     rec = own()

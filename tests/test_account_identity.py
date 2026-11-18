@@ -156,9 +156,9 @@ def test_twins_share_one_quota(pair):
     set_emails(main="same@example.com", second="same@example.com")
     soon = time.time() + 3600
     write_private(accounts.usage_path("main"), json.dumps(
-        {"at": "2026-11-01T10:00:00Z", "five_hour": 100, "five_hour_resets": soon, "weekly": 20, "weekly_resets": soon}))
+        {"at": soon - 3600, "five_hour": 100, "five_hour_resets": soon, "weekly": 20, "weekly_resets": soon}))
     write_private(accounts.usage_path("second"), json.dumps(
-        {"at": "2026-11-01T10:00:00Z", "five_hour": 5, "five_hour_resets": soon, "weekly": 20, "weekly_resets": soon}))
+        {"at": soon - 3600, "five_hour": 5, "five_hour_resets": soon, "weekly": 20, "weekly_resets": soon}))
     assert accounts.spent("second") and accounts.used("second") == 100.0
 
 
@@ -166,6 +166,7 @@ def test_twins_share_one_quota(pair):
 
 def test_the_fallback_never_offers_the_twin_of_the_account_that_ran_out(pair, monkeypatch):
     accounts.add("small")
+    write_private(accounts.usage_path("small"), json.dumps({"at": NOW, "five_hour": 0, "weekly": 0}))
     set_emails(main="bob@example.com", second="bob@example.com", small="alice@example.com")
     accounts.record(SID, "main")
     plan = accounts.fallback_plan(SID, now=NOW)
@@ -394,7 +395,7 @@ def test_the_incident_replay_with_the_status_unreadable(pair, monkeypatch):
     said = Said()
     monkeypatch.setattr(I, "pane_for_session", lambda s: pytest.fail("must not look for a window"))
     assert I.account_move(cfg(), FakeBot(), SID, "second", said) is False
-    assert "same account" in said[0][0]
+    assert "not signed in" in said[0][0]  # unreadable login status fails closed before identity comparison
 
 
 def test_an_unreadable_status_does_not_invent_twins_when_json_agrees_with_the_cache(pair, monkeypatch):

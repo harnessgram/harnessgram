@@ -662,8 +662,8 @@ def _launcher(url: str) -> Path:
     fd, name = tempfile.mkstemp(prefix="harnessgram-setup-", suffix=".html")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write('<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
-                f'<meta http-equiv="refresh" content="0;url={url}"><title>Harnessgram setup</title>'
-                f'<a href="{url}">Open the Harnessgram setup page</a>\n')
+                f'<meta http-equiv="refresh" content="0;url={url}"><title>HarnessGram setup</title>'
+                f'<a href="{url}">Open the HarnessGram setup page</a>\n')
     os.chmod(name, 0o600)
     return Path(name)
 
@@ -689,7 +689,7 @@ def run_web(*, language: Optional[str] = None, owner_id: Optional[int] = None, i
                 pass
 
     server.on_page = forget_launcher
-    say("Harnessgram setup page")
+    say("HarnessGram setup page")
     remote = bool(env.get("SSH_CONNECTION") or env.get("SSH_TTY"))
     opened = False
     if not remote:
@@ -854,7 +854,7 @@ h1{font-size:1.4rem}
 (function(){
 "use strict";
 var ALL=__STRINGS__, FORCED="__FORCED__";
-var CODES={newbot:"/newbot",name:"Harnessgram",username:suggestUsername(),token:"123456789:AAE…",threaded:"/mybots → your bot → Bot Settings → Threaded Mode → On",
+var CODES={newbot:"/newbot",name:"HarnessGram",username:suggestUsername(),token:"123456789:AAE…",threaded:"/mybots → your bot → Bot Settings → Threaded Mode → On",
   install:"harnessgram install",doctor:"harnessgram doctor",serve:"harnessgram serve",setup:"harnessgram setup",again:"harnessgram setup --web"};
 var ERR={token_format:"err_format",token_rejected:"err_rejected",network:"err_network",save_failed:"err_save",
   install_failed:"err_install",order:"err_order",gone:"err_gone",bad_request:"err_generic",stale:"err_generic",conflict:"err_conflict",internal:"err_generic"};

@@ -372,7 +372,7 @@ def test_the_suggested_username_is_one_botfather_accepts():
     for name in names:
         assert re.fullmatch(r"[a-z][a-z0-9_]{4,31}", name) and name.endswith("_bot")
     steps = setup.botfather_steps("harnessgram_sample_bot")
-    assert "harnessgram_sample_bot" in steps and "Harnessgram" in steps and "clipboard" in steps
+    assert "harnessgram_sample_bot" in steps and "HarnessGram" in steps and "clipboard" in steps
 
 
 # --- the setup page --------------------------------------------------------------------------------------------

@@ -61,7 +61,7 @@ def test_claude_five_hour_freshness(tmp_path, monkeypatch):
     (tmp_path / "claude-usage-work.json").write_text(
         json.dumps({"at": at_fresh, "five_hour": 60, "weekly": 40}), encoding="utf-8"
     )
-    assert usage.claude_five_hour(account="work", now=now) is None  # no 5-hour window is ever shown
+    assert usage.claude_five_hour(account="work", now=now) == 60
 
     # Stale reading (> 12 hours) returns None
     (tmp_path / "claude-usage-work.json").write_text(
@@ -296,7 +296,7 @@ def test_pin_quotas_table_rendering(tmp_path, monkeypatch):
     monkeypatch.setattr(usage, "codex_limits", lambda *a, **k: None)
 
     lines = dashboard.quotas(accounts_flag=False, full=False, account="work", now=now)
-    assert not any("5 שעות" in l for l in lines) and any("שבוע" in l for l in lines)  # weekly only
+    assert any("5 שעות" in l for l in lines) and any("שבוע" in l for l in lines)
     assert any("<pre>" in l for l in lines)
     text_content = "\n".join(lines)
     # The non-main account must be labeled "Claude work"

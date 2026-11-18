@@ -75,7 +75,7 @@ def test_tile_and_sheet_are_built_with_the_right_roles():
                 "max:ta.maxLength,sendOff:send.disabled,live:dlg.querySelector('.ar-out').attrs['aria-live'],paste:!!dlg.querySelector('.ar-paste')});")
     assert got["tile"] == "1" and got["popup"] == "dialog" and got["open"] is True
     assert got["label"] == "ar-sheet-title" and got["dir"] == "rtl" and got["max"] == 500
-    assert got["title"] == "בקשת אפליקציה" and got["text"].startswith("בקשת אפליקציה")
+    assert got["title"] == "בקשת אישור התקנה" and got["text"].startswith("בקשת אישור התקנה")
     assert got["sendOff"] is True and got["live"] == "polite" and got["paste"] is False
 
 
@@ -120,7 +120,7 @@ def test_english_reason_has_its_own_block_when_not_translated():
                    "dir": "auto", "until": False}
 
 
-@pytest.mark.parametrize("state,title", [("review", "הוועדה בודקת, תקבל תשובה"), ("pending", "אושר, אבל הניהול מרחוק עדיין לא מחובר"),
+@pytest.mark.parametrize("state,title", [("review", "ועדת הבקרה בודקת, יתקבל דיווח"), ("pending", "אושר, אבל הניהול מרחוק עדיין לא מחובר"),
                                          ("error", "לא הצלחתי לבדוק את הבקשה")])
 def test_other_answers(state, title):
     got = shown("ta.value='id123456789';ta.fire('input');replies.push({status:200,body:{ok:true,result:{state:'%s',app:'',"
@@ -134,6 +134,19 @@ def test_approved_without_a_time_still_says_it_is_open():
     got = shown("ta.value='id123456789';ta.fire('input');replies.push({status:200,body:{ok:true,result:{state:'approved',app:'',"
                 "reason:'',reason_he:null,until:''}}});send.click();await flush();emit(dlg.querySelector('.ar-until').textContent);")
     assert got == "פתוח להתקנה עכשיו"
+
+
+@pytest.mark.parametrize("lang,delivered,until,expected", [
+    ("he", False, "2026-11-14T12:35:00Z", "אושר - ממתין שהאייפון יקבל את פתיחת החנות"),
+    ("he", False, "", "אושר - ממתין שהאייפון יקבל את פתיחת החנות"),
+    ("he", True, "2026-11-14T12:35:00Z", "פתוח להתקנה עד 14:35"),
+    ("he", True, "", "פתוח להתקנה עכשיו"),
+    ("en", False, "", "Approved - waiting for the iPhone to receive the App Store opening"),
+])
+def test_delivery_controls_approved_card(lang, delivered, until, expected):
+    result = json.dumps({"state": "approved", "delivered": delivered, "until": until})
+    got = run("var c=sandbox.arCard(%s);emit(c.querySelector('.ar-until').textContent);" % result, lang=lang)
+    assert got == expected
 
 
 def test_refused_text_and_rate_limit_keep_the_text_for_another_try():

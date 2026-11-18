@@ -87,12 +87,12 @@ def test_the_card_loads_through_the_read_route_and_has_the_right_roles():
                "emit({first:posted[0],section:card.attrs['data-v2-section'],label:card.attrs['aria-label'],tabs:card.querySelector('.sc-tabs').attrs.role,"
                "tabRoles:card.querySelectorAll('[role=tab]').map(t=>[t.attrs['data-sc-tab'],t.attrs['aria-selected']]),add:card.querySelector('[data-sc=add]').attrs['aria-haspopup'],"
                "renders:renders2});")
-    assert got["first"] == ["/api/schedule-view", {}] and got["section"] == "schedule" and got["label"] == "הלו״ז שלי"
+    assert got["first"] == ["/api/schedule-view", {}] and got["section"] == "schedule" and got["label"] == "לוח המראות יומי"
     assert got["tabs"] == "tablist" and got["tabRoles"] == [["today", "true"], ["tomorrow", "false"]]
     assert got["add"] == "dialog" and got["renders"] == 1  # the load finished and asked the screen to draw again
 
 
-@pytest.mark.parametrize("lang,title,today", [("he", "הלו״ז שלי", "היום"), ("en", "My schedule", "Today")])
+@pytest.mark.parametrize("lang,title,today", [("he", "לוח המראות יומי", "היום"), ("en", "My schedule", "Today")])
 def test_both_languages(lang, title, today):
     got = card("view([row('x')],[])", "emit({title:card.querySelector('.sc-heading').textContent,tab:tab('today').textContent});", lang=lang)
     assert got["title"] == title and got["tab"].startswith(today)
@@ -127,7 +127,7 @@ def test_the_tabs_switch_without_asking_the_bridge_again():
 def test_empty_days_say_something_friendly_in_each_tab():
     got = card("view([],[])", "var a=card.querySelector('.sc-empty').textContent;tab('tomorrow').click();"
                               "emit({a,b:card.querySelector('.sc-empty').textContent,state:card.querySelector('[data-sc-state]').attrs['data-sc-state'],rows:rows().length});")
-    assert "יום רגוע" in got["a"] and "מחר עוד ריק" in got["b"] and got["state"] == "empty" and got["rows"] == 0
+    assert "טיסה רגועה" in got["a"] and "למחר ריק" in got["b"] and got["state"] == "empty" and got["rows"] == 0
 
 
 def test_one_tap_done_and_one_tap_undo_post_exactly_and_use_the_answer():
@@ -189,7 +189,7 @@ def test_the_sheet_has_one_text_field_a_hebrew_placeholder_and_the_right_roles()
                 "max:field.maxLength,saveOff:save.disabled,title:dlg.querySelector('.topic-heading').childNodes[0].textContent});")
     assert got["open"] is True and got["label"] == "sc-sheet-title" and got["dir"] == "rtl" and got["section"] == "schedule-add"
     assert got["fields"] == 1 and got["inputs"] == 0 and got["max"] == 200 and got["saveOff"] is True
-    assert got["ph"] == "למשל: להתקשר לרופא מחר בשעה 10:00" and got["title"] == "פריט חדש ללו״ז"
+    assert got["ph"] == "למשל: להתקשר לרופא מחר בשעה 10:00" and got["title"] == "תכנון יעד חדש בלוח"
     assert got["fieldDir"] == "rtl"  # an empty field takes the page's direction
 
 
@@ -205,7 +205,7 @@ def test_saving_posts_the_trimmed_text_closes_and_opens_the_matching_tab():
                 "save.click();await flush();await flush();"
                 "emit({posts:posted.filter(p=>p[0]==='/api/schedule'),open:dlg.open,tab:sandbox.scTab,toasts,field:field.value});")
     assert got["posts"] == [["/api/schedule", {"action": "add", "text": "פגישה מחר בשעה 17:00"}]]
-    assert got["open"] is False and got["tab"] == "tomorrow" and got["toasts"] == [["נוסף ללו״ז", False]] and got["field"] == ""
+    assert got["open"] is False and got["tab"] == "tomorrow" and got["toasts"] == [["נרשם בלוח ההמראות", False]] and got["field"] == ""
 
 
 def test_an_undated_item_opens_the_today_tab():
@@ -253,7 +253,7 @@ def test_close_button_and_escape_both_close_the_sheet():
 def test_the_now_screen_puts_the_card_right_after_the_decisions():
     from cockpit_v2_browser import sample_state
     script = (SRC / "cockpit_v2.js").read_text().replace("__V2_STRINGS__", json.dumps(panel_page.V2_STRINGS, ensure_ascii=False))
-    script = "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock", "requestAction", "requestRow",
+    script = 'var requestProject="",requestOwnerOnly=false;\n' + "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock", "requestAction", "requestRow", "requestRank", "requestDetail", "requestList", "requestGroups", "requestText", "requestBoard",
                                          "v2ModeRow", "settingsBox")) + script + "\n" + (SRC / "cockpit_v2_schedule.js").read_text()
     src = PRELUDE + "\nsandbox.last=null;\nbootV2(%s,%s,%s,%s);\n(async()=>{await flush();%s})().catch(e=>{console.error(e);process.exit(1);});" % (
         json.dumps(script), json.dumps(sample_state("he")), json.dumps(panel_page.STRINGS["he"]), json.dumps("he"),
@@ -262,3 +262,14 @@ def test_the_now_screen_puts_the_card_right_after_the_decisions():
     assert result.returncode == 0, result.stderr
     got = json.loads(result.stdout)
     assert got["card"] == 1 and got["sections"][1:3] == ["decisions", "schedule"]
+
+
+def test_hour_actions_send_the_selected_day_and_never_offer_edits_for_anchors():
+    got = card("view([],[],{timeline:{today:{available:true,blocks:["
+               "{id:'topic1',title:'Project Alpha',start:480,end:540,kind:'topic',fixed:false},"
+               "{id:'anchor1',title:'Appointment',start:600,end:630,kind:'calendar',fixed:true}]}}})",
+               "var hours=card.querySelectorAll('[data-sc-hour]');"
+               "reply('/api/schedule',200,{ok:true,view:sandbox.scData});"
+               "hours[0].querySelector('[data-sc-hour-action=\"extend15\"]').click();await flush();await flush();"
+               "console.log(JSON.stringify({post:posted[posted.length-1],anchors:hours[1].querySelectorAll('button').length}));")
+    assert got == {"post": ["/api/schedule", {"action": "extend", "id": "topic1", "date": "2026-11-15", "minutes": 15}], "anchors": 0}

@@ -210,7 +210,7 @@ LATER = 16 * 60  # past the quarter hour between two redraws of one topic
 
 def test_a_new_session_gets_its_first_card_with_quota_on_the_heartbeat(tmp_path, monkeypatch):
     bot, topics, thread = card_world(tmp_path, monkeypatch)
-    write_usage("main", 4, 40)
+    write_usage("main", None, 40)
     assert heartbeat.refresh_cards(cfg(), bot, NOW) == 1
     sent = [p for m, p in bot.calls if m == "sendMessage" and p.get("message_thread_id") == thread][-1]
     assert any("40%" in b["text"] for row in sent["reply_markup"]["keyboard"] for b in row)
@@ -220,9 +220,9 @@ def test_a_new_session_gets_its_first_card_with_quota_on_the_heartbeat(tmp_path,
 
 def test_the_card_is_redrawn_when_the_quota_moves(tmp_path, monkeypatch):
     bot, topics, thread = card_world(tmp_path, monkeypatch)
-    write_usage("main", 4, 40)
+    write_usage("main", None, 40)
     heartbeat.refresh_cards(cfg(), bot, NOW)
-    write_usage("main", 4, 55)
+    write_usage("main", None, 55)
     assert heartbeat.refresh_cards(cfg(), bot, NOW + LATER) == 1
     last = [p for m, p in bot.calls if m == "sendMessage"][-1]
     assert any("55%" in b["text"] for row in last["reply_markup"]["keyboard"] for b in row)
@@ -231,8 +231,8 @@ def test_the_card_is_redrawn_when_the_quota_moves(tmp_path, monkeypatch):
 def test_the_card_follows_a_session_to_another_account(tmp_path, monkeypatch):
     bot, topics, thread = card_world(tmp_path, monkeypatch)
     (accounts.profiles_dir() / "account2").mkdir(parents=True)
-    write_usage("main", 4, 40)
-    write_usage("account2", 1, 9)
+    write_usage("main", None, 40)
+    write_usage("account2", None, 9)
     heartbeat.refresh_cards(cfg(), bot, NOW)
     accounts.record("sess-1", "account2")
     assert heartbeat.refresh_cards(cfg(), bot, NOW + LATER) == 1
@@ -242,7 +242,7 @@ def test_the_card_follows_a_session_to_another_account(tmp_path, monkeypatch):
 
 def test_a_flooded_chat_skips_the_refresh_and_retries_later(tmp_path, monkeypatch):
     bot, topics, thread = card_world(tmp_path, monkeypatch)
-    write_usage("main", 4, 40)
+    write_usage("main", None, 40)
     monkeypatch.setattr(heartbeat.flood, "is_open", lambda chat, now=None: False)
     monkeypatch.setattr(mirror.flood, "is_open", lambda chat, now=None: False)
     assert mirror.refresh_card(cfg(), bot, "sess-1", topics=topics, create=True) is False
@@ -309,9 +309,9 @@ def test_a_closed_topic_is_kept_and_waits(tmp_path, monkeypatch):
 
 def test_a_failing_redraw_waits_so_other_topics_get_a_turn(tmp_path, monkeypatch):
     bot, topics, thread = card_world(tmp_path, monkeypatch)
-    write_usage("main", 4, 40)
+    write_usage("main", None, 40)
     assert heartbeat.refresh_cards(cfg(), bot, NOW) == 1
-    write_usage("main", 4, 55)
+    write_usage("main", None, 55)
     for method in ("sendMessage", "editMessageText"):
         bot.fail[method] = "Bad Request: not enough rights"
     assert heartbeat.refresh_cards(cfg(), bot, NOW + LATER) == 0
@@ -336,29 +336,31 @@ def test_a_paced_topic_does_not_hold_up_the_others(tmp_path, monkeypatch):
     bot, topics, thread = card_world(tmp_path, monkeypatch)
     topics.ensure("sess-2", "Other")
     monkeypatch.setattr(accounts, "live_session_records", lambda: [{"sessionId": "sess-1"}, {"sessionId": "sess-2"}])
-    write_usage("main", 4, 40)
+    write_usage("main", None, 40)
     assert heartbeat.refresh_cards(cfg(), bot, NOW) == 1 and heartbeat.refresh_cards(cfg(), bot, NOW) == 1
-    write_usage("main", 4, 55)                                          # both cards stale, both drawn lately
+    write_usage("main", None, 55)                                          # both cards stale, both drawn lately
     assert heartbeat.refresh_cards(cfg(), bot, NOW + 60) == 0
     assert heartbeat.refresh_cards(cfg(), bot, NOW + LATER) == 1
 
 
 def test_a_card_is_not_redrawn_within_a_quarter_hour(tmp_path, monkeypatch):
     bot, topics, thread = card_world(tmp_path, monkeypatch)
-    write_usage("main", 4, 40)
+    write_usage("main", None, 40)
     heartbeat.refresh_cards(cfg(), bot, NOW)
-    write_usage("main", 4, 55)
+    write_usage("main", None, 55)
     n = len(bot.calls)
     assert heartbeat.refresh_cards(cfg(), bot, NOW + 300) == 0 and len(bot.calls) == n
 
 
 def test_one_percent_of_quota_does_not_make_the_card_stale(tmp_path, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
     bot, topics, thread = card_world(tmp_path, monkeypatch)
-    write_usage("main", 4, 41)
+    write_usage("main", None, 41)
     key = mirror.card_data_key("sess-1")
-    write_usage("main", 4, 48)
+    write_usage("main", None, 48)
     assert mirror.card_data_key("sess-1") == key
-    write_usage("main", 4, 52)
+    write_usage("main", None, 52)
     assert mirror.card_data_key("sess-1") != key
 
 
@@ -517,3 +519,14 @@ def test_the_finish_button_returns_after_the_window():
 def test_the_link_sent_string_exists_in_both_languages():
     from ctb import i18n
     assert i18n.t("account_link_sent_tag", lang="en") and i18n.t("account_link_sent_tag", lang="he") != i18n.t("account_link_sent_tag", lang="en")
+
+
+def test_waiting_count_change_redraws_card_after_backoff(tmp_path, monkeypatch):
+    from ctb import waiting
+    bot, topics, thread = card_world(tmp_path, monkeypatch)
+    count = [1]
+    monkeypatch.setattr(waiting, 'waiting_count', lambda cfg: count[0])
+    assert mirror.refresh_card(cfg(), bot, 'sess-1', topics=topics, create=True, now=NOW)
+    count[0] = 0
+    assert not mirror.refresh_card(cfg(), bot, 'sess-1', topics=topics, now=NOW + 60)
+    assert mirror.refresh_card(cfg(), bot, 'sess-1', topics=topics, now=NOW + LATER)

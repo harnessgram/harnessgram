@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from ctb import board, panel, panel_page, sessions_menu
+from ctb import board, panel, panel_page, panel_view, sessions_menu
 from ctb.config import state_dir
 from test_decisions import HOME, ORBIT, THREAD, cfg, queued, rig, roomy_budget, server  # noqa: F401
 from test_panel import call, signed
@@ -12,6 +12,12 @@ from test_panel import call, signed
 ORBIT_S = "a1b2c3d4-0000-4000-8000-000000000001"
 HOME_S = "e5f6a7b8-0000-4000-8000-000000000002"
 DAY = 24 * 3600
+
+
+def test_waiting_link_targets_the_message_and_old_records_fall_back_to_topic():
+    old = {"chat": -100123, "thread": 7}
+    assert panel_view.waiting_link(dict(old, msg=42)) == "https://t.me/c/123/7/42"
+    assert panel_view.waiting_link(old) == "https://t.me/c/123/7"
 
 
 def entry(session, age, state="idle", closed=False, chat=ORBIT, thread=THREAD):

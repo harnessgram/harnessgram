@@ -84,7 +84,7 @@ def test_weekly_reset_clock_is_kept_ltr_in_hebrew(tmp_path):
     stamp = time.strftime("%d.%m %H:%M", time.localtime(reset))
     assert f"↻ ⁦{stamp}⁩" in q
     day = time.strftime("%d.%m", time.localtime(reset))  # a later day by its date only: the cell fits a phone
-    assert M.live_keyboard(q, lang="he")["keyboard"][0] == [{"text": f"📅 45% · ↻ {day}"}]  # weekly only
+    assert M.live_keyboard(q, lang="he")["keyboard"][0] == [{"text": "📅 45%"}]  # weekly only
 
 
 def test_compact_footer_is_lines_without_the_task_list(tmp_path):

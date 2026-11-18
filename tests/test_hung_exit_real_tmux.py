@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import GOOD_TOKEN, signed_in
 from ctb import accounts, inbox as I
 
 SID = "abcd1234-real-process"
@@ -175,6 +176,12 @@ class Lab:
 
 @pytest.fixture
 def lab(monkeypatch, fake_program, private_tmux):
+    # The real move path now fails closed unless the destination is both an existing
+    # profile and known to have completed login.  Build the destination before
+    # seeding the identity cache: unlike the small (origin) profile, no individual
+    # test creates spare before _account_move checks it.
+    accounts.add("spare")
+    signed_in("main", "small", "spare")
     sock = tempfile.mkdtemp(prefix="hgt", dir="/tmp")  # short: a unix socket path has a length limit
     prog = Path(tempfile.mkdtemp(prefix="hgp", dir="/tmp"))
     monkeypatch.setenv("TMUX_TMPDIR", sock)
@@ -435,7 +442,6 @@ def test_a_reopen_spares_a_claude_that_a_record_names(lab, signals, monkeypatch)
 def test_a_limit_move_ends_a_claude_that_ignored_exit_and_finishes(lab, signals, monkeypatch, bot):
     """The whole move on real processes: /exit is typed, the process ignores it, the stop ends it, the
     move types the resume into the shell that is left."""
-    from conftest import GOOD_TOKEN
     from ctb.config import Config
     accounts.add("small")
     accounts.record(SID, "main")
@@ -589,6 +595,8 @@ def test_a_vanished_record_in_a_plain_tmux_window_still_lets_the_move_end_the_pr
 def test_a_deferred_move_whose_record_vanished_is_retried_once_agents_are_quiet(lab, signals, monkeypatch):
     """A subagent wrote lately, so the first try waits; its record is gone, so restart_is_safe could never
     say yes again and the retry never fired (recover.py)."""
+    monkeypatch.setattr(accounts, "auto_enabled", lambda: True)  # an automatic deferred move obeys the switch (#433)
+    fresh_room("small", "spare")  # only a dated, fresh reading can authorize a move (#433)
     from ctb import recover
     ok, pid, said = move_on_real_processes(lab, monkeypatch, subagent=True)
     assert ok is False and alive(pid) and signals == []
@@ -601,6 +609,17 @@ def test_a_deferred_move_whose_record_vanished_is_retried_once_agents_are_quiet(
 
 
 # --- round 4: a deferred retry types only into the process that ignored /exit --------------------------------
+
+def fresh_room(*names):
+    """A dated reading with room for each account, as the live usage poller writes it."""
+    import json
+    from datetime import datetime, timezone
+    from ctb.config import write_private
+    for name in names:
+        write_private(accounts.usage_path(name), json.dumps({
+            "five_hour": 5, "weekly": 10, "weekly_resets": time.time() + 86400,
+            "at": datetime.now(timezone.utc).isoformat()}))
+
 
 def deferred_cfg():
     from conftest import GOOD_TOKEN
@@ -683,6 +702,8 @@ def test_a_new_process_in_the_window_drops_the_retry(lab, signals, monkeypatch):
 
 def test_a_deferred_move_in_a_plain_tmux_window_retries_and_recovers(lab, signals, monkeypatch):
     """No tg- name to go by: the pid saved at the deferral shows the window is still this session's."""
+    monkeypatch.setattr(accounts, "auto_enabled", lambda: True)  # an automatic deferred move obeys the switch (#433)
+    fresh_room("small", "spare")  # only a dated, fresh reading can authorize a move (#433)
     ok, pid, said = move_on_real_processes(lab, monkeypatch, window="work", subagent=True)
     assert ok is False and alive(pid) and signals == []
     quiet_agents()

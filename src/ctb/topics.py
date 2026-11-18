@@ -28,7 +28,7 @@ MAX_ENTRIES = 300
 MAX_MOVES = 500  # old topics remembered after a move (topic-moves.json)
 NAME_LIMIT = 120  # Telegram allows 1-128 characters
 STATE_ICONS = {"busy": "⚙️", "waiting": "❓", "done": "✅"}
-PLACEHOLDER = "🧑🏼‍💻"  # the "working" placeholder message; a lone emoji is shown large and animated
+PLACEHOLDER = "🧑🏼‍💻"  # the default working placeholder; a lone emoji is shown large and animated
 
 
 def session_name(session: str) -> str:
@@ -95,7 +95,7 @@ def topic_rename(cfg, name: str, session: Optional[str] = None, bot=None) -> int
     from .telegram import Bot
     clean = " ".join(str(name or "").split())[:NAME_LIMIT]
     if not clean:
-        print("Harnessgram: topic-rename requires a non-empty name", file=sys.stderr)
+        print("HarnessGram: topic-rename requires a non-empty name", file=sys.stderr)
         return 1
     sid = session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not sid:
@@ -103,18 +103,19 @@ def topic_rename(cfg, name: str, session: Optional[str] = None, bot=None) -> int
         tmap = TopicMap(state_dir() / "topics.json", bot, home_chat(cfg), cfg=cfg)
         sid = last_session(tmap) or ""
     if not sid:
-        print("Harnessgram: no session found to rename (set CLAUDE_CODE_SESSION_ID or pass session)", file=sys.stderr)
+        print("HarnessGram: no session found to rename (set CLAUDE_CODE_SESSION_ID or pass session)", file=sys.stderr)
         return 1
     bot = bot or (Bot.from_config(cfg) if cfg.ready else None)
     topics = TopicMap(state_dir() / "topics.json", bot, home_chat(cfg), cfg=cfg)
     found = topics.place_of(sid)
     if found is None:
-        print(f"Harnessgram: session {sid} has no Telegram topic", file=sys.stderr)
+        print(f"HarnessGram: session {sid} has no Telegram topic", file=sys.stderr)
         return 1
     chat, thread = found.chat, found.thread
     save_topic_rename(sid, clean)
-    from . import title_sync
-    title_sync.want(sid, clean)  # the Claude Code session title follows the topic name
+    from . import addons, title_sync
+    if addons.enabled(cfg, "title_sync"):
+        title_sync.want(sid, clean)
     state = session_state(sid).get("state", "")
     visible = (STATE_ICONS.get(state, "") + " " + clean).strip()[:128]
     if bot:
@@ -255,6 +256,7 @@ def set_state(cfg, session: str, state: str, bot=None, status: Optional[str] = N
     if not cfg.ready or not session or state not in {*STATE_ICONS, "bottom"}:
         return 0
     from . import flood
+    from .config import live_activity_in_cockpit
     from .telegram import Bot
     # A muted task's status card and state icon are held back: every Telegram call below fails like a
     # refused send, so the local state (state, main_idle, ids still to delete) is written as always.
@@ -272,6 +274,8 @@ def set_state(cfg, session: str, state: str, bot=None, status: Optional[str] = N
     thread = found.thread if found else None
     if not isinstance(thread, int) or isinstance(thread, bool):
         return _held_state(session, state, optional) if held else 0
+    if live_activity_in_cockpit() and not held:
+        return _cockpit_status(cfg, session, state, bot, topics, found, status)
     send = (flood.optional_call if optional and not held else (lambda b, m, p: b.call(m, p)))
     # the refresh's two units were reserved above, so its own send is not charged again
     placeholder = ((lambda b, m, p: flood.optional_call(b, m, p, budget=False)) if optional and not held
@@ -333,11 +337,14 @@ def set_state(cfg, session: str, state: str, bot=None, status: Optional[str] = N
             tracked = _sweep(bot, chat, tracked, None)
             keep = None
             try:
+                emoji = PLACEHOLDER
                 mid = placeholder(bot, "sendMessage", {"chat_id": chat,
-                                  "message_thread_id": thread, "text": PLACEHOLDER, "disable_notification": True}).get("message_id")
+                                  "message_thread_id": thread, "text": emoji, "disable_notification": True}).get("message_id")
                 if type(mid) is int and mid > 0:
                     keep = mid
                     tracked.append(mid)
+                    cur["placeholder_emoji"] = emoji
+                    cur["placeholder_emoji_at"] = 0
             except TelegramError:
                 pass
         left = _sweep(bot, chat, tracked, keep)
@@ -358,9 +365,93 @@ def set_state(cfg, session: str, state: str, bot=None, status: Optional[str] = N
             cur["placeholder"] = keep
         else:
             cur.pop("placeholder", None)
+            cur.pop("placeholder_emoji", None)
+            cur.pop("placeholder_emoji_at", None)
         write_private(path, json.dumps(cur))
         if not held:
             topics.refresh(session)
+    return 0
+
+
+def _cockpit_status(cfg, session: str, state: str, bot, topics, found, status: Optional[str]) -> int:
+    """Keep one quiet topic message while Cockpit owns the high-frequency activity stream."""
+    from . import flood, menus
+    from .i18n import t
+    from .panel import topic_param
+    from .panel_pin import app_url
+    target = "busy" if state == "bottom" else state
+    path = session_state_path(session)
+    private_dir(path.parent)
+    now = __import__("time").time()
+    with open(str(path) + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        cur = session_state(session)
+        # Re-read after acquiring the session lock.  A project move can have changed the destination while
+        # the optional flood reservation was being made.
+        current = topics.place_of(session)
+        if current is None or type(current.thread) is not int:
+            return 0
+        found = current
+        previous = cur.get("state")
+        if state == "bottom" and previous != "busy":
+            return 0
+        if cur.get("chat") is not None and cur.get("chat") != found.chat:
+            for key in ("all", "placeholder", "status_id", "status_text", "cockpit_status_id"):
+                cur.pop(key, None)
+        tracked = [mid for mid in cur.get("all", []) if type(mid) is int and mid > 0]
+        for key in ("placeholder", "status_id"):
+            mid = cur.pop(key, None)
+            if type(mid) is int and mid > 0 and mid not in tracked:
+                tracked.append(mid)
+        cur["all"] = _sweep(bot, found.chat, tracked, None)
+        for key in ("placeholder_emoji", "placeholder_emoji_at", "status_text"):
+            cur.pop(key, None)
+        if previous != target:
+            cur.pop("stuck_alert", None)
+        cur.update(state=target, chat=found.chat)
+        if target == "done":
+            cur["main_idle"] = True
+        elif state == "busy":
+            cur.pop("main_idle", None)
+        label = status or t("cockpit_status_" + (target if target in {"busy", "waiting", "idle", "done"} else "busy"),
+                            lang=cfg.ui_language)
+        due = previous != target or now - float(cur.get("cockpit_status_at", 0)) >= 60
+        if due:
+            params = {"chat_id": found.chat, "text": label, "disable_notification": True}
+            url = app_url(cfg, topic_param(found.chat, found.thread))
+            if url:
+                params["reply_markup"] = {"inline_keyboard": [
+                    [{"text": t("cockpit_open_button", lang=cfg.ui_language), "url": url}],
+                    menus.close_row(cfg.ui_language)]}
+            try:
+                if cur.get("cockpit_status_id"):
+                    params["message_id"] = cur["cockpit_status_id"]
+                    result = flood.optional_call(bot, "editMessageText", params)
+                else:
+                    params["message_thread_id"] = found.thread
+                    result = flood.optional_call(bot, "sendMessage", params)
+                    if isinstance(result, dict) and type(result.get("message_id")) is int:
+                        cur["cockpit_status_id"] = result["message_id"]
+                # A declined gate raises FloodSkipped (a TelegramError); it does not return None.
+                if result is not None:
+                    cur["cockpit_status_at"] = now
+            except TelegramError as exc:
+                message = str(exc).lower()
+                if cur.get("cockpit_status_id") and "message is not modified" in message:
+                    cur["cockpit_status_at"] = now
+                elif cur.get("cockpit_status_id") and "not found" in message:
+                    cur.pop("cockpit_status_id", None)
+                    params.pop("message_id", None)
+                    params["message_thread_id"] = found.thread
+                    try:
+                        result = flood.optional_call(bot, "sendMessage", params)
+                        if isinstance(result, dict) and type(result.get("message_id")) is int:
+                            cur["cockpit_status_id"] = result["message_id"]
+                            cur["cockpit_status_at"] = now
+                    except TelegramError:
+                        pass
+        write_private(path, json.dumps(cur))
+        topics.refresh(session)
     return 0
 
 
@@ -394,6 +485,11 @@ def chat_of(cfg, session: str) -> int:
     """The chat this session's topic is in (the home chat when it has none)."""
     found = place(cfg, session)
     return found.chat if found else home_chat(cfg)
+
+
+def create_forum_topic(bot, chat: int, name: str) -> int:
+    """Create a forum topic and return its thread id."""
+    return bot.call("createForumTopic", {"chat_id": chat, "name": name})["message_thread_id"]
 
 
 class TopicMap:
@@ -460,7 +556,7 @@ class TopicMap:
                 from . import moves
                 moves.suggest(self.cfg, self.bot, self, session, session_override_name(session) or title)
             except Exception as exc:  # an offer is never worth breaking the topic's own work
-                print(f"Harnessgram: move suggestion failed: {type(exc).__name__}", file=sys.stderr)
+                print(f"HarnessGram: move suggestion failed: {type(exc).__name__}", file=sys.stderr)
 
     def _ensure(self, session: str, title: str, thread: Optional[int] = None, chat: Optional[int] = None) -> Optional[int]:
         """The topic's thread id for this session: created on first use, renamed when the
@@ -522,8 +618,8 @@ class TopicMap:
             return thread
         try:
             if entry is None:
-                topic = self.bot.call("createForumTopic", {"chat_id": where, "name": visible})
-                entry = self._new_entry(where, topic["message_thread_id"], name, visible, why)
+                thread_id = create_forum_topic(self.bot, where, visible)
+                entry = self._new_entry(where, thread_id, name, visible, why)
                 if task:
                     entry["task"] = task
                     scheduled.remember_topic(task, where, entry["thread"], session)

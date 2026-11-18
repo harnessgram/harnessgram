@@ -47,6 +47,12 @@ def test_phone_views_fit(browser, width, lang, scheme, edition):
                           "folder": "/project/" + long, "branch": long, "summary": long,
                           "usage": {"today": usage, "session": usage}}]
     state["usage_totals"] = {"today": usage, "week": usage, "top": []}
+    # The Requests list: every section (needs you, agents, long wait, done) with unbroken long titles and project names.
+    state["requests"] = [
+        dict(project=long[:60], id=n, title=long[:160], title_he=long[:160], status="done" if n == 5 else "open",
+             wait="owner" if n < 3 else "team", age=3600, updated=1700000000 - (900000 if n == 4 else 60),
+             idle=900000 if n == 4 else 60, long=n == 4)
+        for n in range(1, 6)]
     ctx = browser.new_context(viewport={"width": width, "height": 844}, color_scheme=scheme,
                               reduced_motion="reduce", bypass_csp=True)
     page = ctx.new_page()
@@ -68,10 +74,17 @@ def test_phone_views_fit(browser, width, lang, scheme, edition):
     assert page.locator("html").get_attribute("data-theme") == scheme
     for index, view in enumerate(("here", "me", "agents", "settings", "app:studio")):
         page.locator(".tabs .tab").nth(index).click()  # the bar's order; the page's functions are not global
-        page.wait_for_timeout(150)
+        if view == "app:studio":
+            page.wait_for_selector("iframe.appframe")
+        else:
+            page.wait_for_function("i => document.querySelectorAll('.tabs .tab')[i].getAttribute('aria-selected') === 'true' && document.getElementById('app').children.length > 0", arg=index)
+        if view == "me":
+            page.wait_for_selector(".requests .request-row")
         if view == "agents":
             assert page.locator(".yt .btns .btn").count() >= 2
             assert page.locator(".yt .ch").first.inner_text()
+        if view == "me":
+            assert page.locator(".requests .request-row").count() == 5
         if view == "app:studio":
             assert page.locator("iframe.appframe").is_visible()
         for expanded in (False, True):
@@ -79,13 +92,25 @@ def test_phone_views_fit(browser, width, lang, scheme, edition):
                 page.evaluate("""() => {
                   document.querySelectorAll('.srow').forEach(n=>n.open=true);
                   document.querySelectorAll('.compact-toggle[aria-expanded="false"]').forEach(n=>n.click());
+                  document.querySelectorAll('.request-toggle').forEach(n=>n.click());
                 }""")
             problems = page.evaluate("""() => {
               const w = document.documentElement.clientWidth;
+              // A designed scroll rail (the Requests project filter) keeps its off-screen items reachable by
+              // swiping inside the rail; that is not page overflow while the rail itself fits the screen and no
+              // item is wider than the rail. Everything else must sit inside the viewport.
+              const inRail = e => {
+                const r = e.getBoundingClientRect();
+                const rail = e.closest('.requests-filter');
+                if (!rail || rail === e) return false;
+                const s = getComputedStyle(rail), ar = rail.getBoundingClientRect();
+                return (s.overflowX === 'auto' || s.overflowX === 'scroll')
+                  && ar.left >= -1 && ar.right <= w + 1 && r.width <= rail.clientWidth + 1;
+              };
               const bad = [...document.querySelectorAll('body *')].filter(e => {
                 const s = getComputedStyle(e), r = e.getBoundingClientRect();
                 return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 0 && r.height > 0
-                  && (r.left < -1 || r.right > w + 1);
+                  && (r.left < -1 || r.right > w + 1) && !inRail(e);
               }).map(e => ({tag:e.tagName, class:e.className.baseVal ?? e.className,
                             text:e.textContent.slice(0, 50), x:e.getBoundingClientRect().x,
                             width:e.getBoundingClientRect().width}));

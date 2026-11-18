@@ -7,6 +7,7 @@ exactly and in full (the whole tool_input, every field). A widget never answers.
 """
 import io
 import json
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -164,8 +165,55 @@ def test_no_answer_prints_nothing_and_the_terminal_prompt_stays(pq):
     hook = Hook(pq, payload(), wait=0.3)
     ident = hook.ident()
     assert hook.result() is None
-    assert PQ.get(ident)["state"] == "expired" and decision_of(ident)["state"] == "cancelled"
+    assert PQ.get(ident)["state"] == "expired"
+    PQ.sweep(pq.cfg, pq.bot)
+    assert decision_of(ident)["state"] == "cancelled"
     assert "still waits at the computer" in pq.bot.methods("editMessageText")[-1]["text"]
+
+
+def test_question_tokens_return_original_questions_and_exact_labels(pq):
+    questions = [{"question": "בחר", "options": [{"label": "שלום ארוך"}, {"label": "אפשרות אחרת"}],
+                  "multiSelect": False, "header": "כותרת"}]
+    hook = Hook(pq, payload(tool="AskUserQuestion", tool_input={"questions": questions, "metadata": {"source": "x"}}))
+    ident = hook.ident()
+    token = datas(card(pq))[0]
+    assert "שלום" not in token
+    assert tap(pq, token, ident=ident) == "permission-ok"
+    decision = hook.result()["hookSpecificOutput"]["decision"]
+    assert decision == {"behavior": "allow", "updatedInput": {
+        "questions": questions, "metadata": {"source": "x"}, "answers": {"בחר": "שלום ארוך"}}}
+
+
+def test_multi_question_toggles_join_labels_and_done_is_single_use(pq):
+    questions = [{"question": "Pick", "options": [{"label": "One"}, {"label": "Two"}], "multiSelect": True}]
+    hook = Hook(pq, payload(tool="AskUserQuestion", tool_input={"questions": questions}))
+    ident = hook.ident()
+    options = datas(card(pq))
+    assert tap(pq, options[0], ident=ident) == "permission-ok"
+    assert tap(pq, options[1], ident=ident) == "permission-ok"
+    assert tap(pq, options[2], ident=ident) == "permission-ok"
+    assert hook.result()["hookSpecificOutput"]["decision"]["updatedInput"]["answers"] == {"Pick": "One, Two"}
+    assert tap(pq, options[2], ident=ident) == "permission-closed"
+
+
+@pytest.mark.parametrize("action, expected", [
+    ("a", {"behavior": "allow", "updatedInput": {"plan": "Do it", "extra": 1}}),
+    ("r", {"behavior": "deny", "message": "The owner rejected this plan from the phone."}),
+])
+def test_plan_approval_and_rejection_shapes(pq, action, expected):
+    hook = Hook(pq, payload(tool="ExitPlanMode", tool_input={"plan": "Do it", "extra": 1}))
+    ident = hook.ident()
+    assert tap(pq, f"pq:p:{action}:{ident}", ident=ident) == "permission-ok"
+    assert hook.result()["hookSpecificOutput"]["decision"] == expected
+
+
+def test_question_terminal_and_non_owner_taps_leave_no_decision(pq):
+    questions = [{"question": "Pick", "options": [{"label": "One"}], "multiSelect": False}]
+    hook = Hook(pq, payload(tool="AskUserQuestion", tool_input={"questions": questions}), wait=0.4)
+    ident = hook.ident()
+    assert tap(pq, datas(card(pq))[0], user=999, ident=ident) == "ignored"
+    assert tap(pq, f"pq:x:{ident}", ident=ident) == "permission-ok"
+    assert hook.result() is None
 
 
 @pytest.mark.parametrize("stdin", [
@@ -333,6 +381,180 @@ def test_a_request_whose_hook_is_gone_takes_no_answer_and_its_card_closes(pq, mo
     assert PQ.get(ident)["state"] == "gone" and decision_of(ident)["state"] == "cancelled"
     assert "answered at the computer" in pq.bot.methods("editMessageText")[-1]["text"]
     assert hook.result() is None
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires a separate hook process")
+def test_sweep_retires_card_if_hook_dies_after_publication(pq, monkeypatch):
+    # Exit without cleanup as soon as publication returns, before handlers exist.
+    monkeypatch.setattr(PQ.signal, "signal", lambda *_: os._exit(0))
+    pid = os.fork()
+    if pid == 0:
+        PQ.run_hook(payload(), cfg=pq.cfg, bot=pq.bot, out=io.StringIO())
+        os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    (ident,) = PQ._all()
+    rec = PQ.get(ident)
+    assert rec["state"] == "open" and isinstance(rec["message_id"], int)
+    assert decision_of(ident)["state"] == "open"
+    assert PQ.sweep(pq.cfg, pq.bot) == 1
+    assert decision_of(ident)["state"] == "cancelled"
+    edit = pq.bot.methods("editMessageText")[-1]
+    assert edit["message_id"] == rec["message_id"]
+    assert edit["reply_markup"] == {"inline_keyboard": []}
+
+
+def test_stop_only_marks_requests_and_sweep_frees_quota(pq, monkeypatch):
+    from ctb import hooks
+    ident = "0000000000000001"
+    decision = decisions.create("s", OWNER, pq.thread, "Permission", perm=ident)
+    PQ._update(lambda data: data.update({ident: {"state": "open", "session": "s", "decision": decision["id"],
+                                                 "chat": OWNER, "message_id": 100}}))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("permission stop path must not load config or call Telegram")
+    with monkeypatch.context() as patch:
+        patch.setattr(hooks, "load_config", forbidden)
+        patch.setattr(pq.bot, "call", forbidden)
+        hooks._retire_permissions({"session_id": "s"})
+        assert PQ.get(ident)["state"] == "gone"
+        assert decision_of(ident)["state"] == "open"
+    PQ.sweep(pq.cfg, pq.bot)
+    assert decision_of(ident)["state"] == "cancelled"
+
+
+def test_stop_skips_busy_lock_within_bound(pq):
+    import fcntl
+    lock_path = state_dir() / "permission-requests.lock"
+    with open(lock_path, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        start = time.monotonic()
+        PQ.supersede("s")
+        assert time.monotonic() - start < 1.0
+
+
+def test_sweep_cancels_only_old_orphan_permission_decisions(pq):
+    old = decisions.create("s", OWNER, pq.thread, "Old", perm="0000000000000001", now=100)
+    recent = decisions.create("s", OWNER, pq.thread, "Recent", perm="0000000000000002", now=150)
+    ordinary = decisions.create("s", OWNER, pq.thread, "Ordinary", now=100)
+    PQ.sweep(pq.cfg, pq.bot, now=160)
+    stored = decisions._load(state_dir() / decisions.STATE_FILE)
+    assert stored[old["id"]]["state"] == "cancelled"
+    assert stored[recent["id"]]["state"] == stored[ordinary["id"]]["state"] == "open"
+
+
+@pytest.mark.parametrize("message", ["Bad Request: message is not modified", "Bad Request: message to edit not found"])
+def test_sweep_treats_already_edited_or_missing_card_as_retired(pq, monkeypatch, message):
+    ident = "0000000000000001"
+    decision = decisions.create("s", OWNER, pq.thread, "Permission", perm=ident)
+    PQ._update(lambda data: data.update({ident: {"state": "gone", "session": "s", "decision": decision["id"],
+                                                 "chat": OWNER, "message_id": 100}}))
+    monkeypatch.setattr(pq.bot, "call", lambda *a, **k: (_ for _ in ()).throw(Exception(message)))
+    PQ.sweep(pq.cfg, pq.bot)
+    assert PQ.get(ident)["retired"] is True
+    assert decision_of(ident)["state"] == "cancelled"
+
+
+def test_many_closures_retire_before_old_records_are_trimmed(pq):
+    ids = []
+    for number in range(PQ.KEEP_CLOSED + 1):
+        ident = f"{number:016x}"
+        decision = decisions.create("s", OWNER, pq.thread, "Permission", perm=ident)
+        ids.append(decision["id"])
+        PQ._update(lambda data: data.update({ident: {"state": "open", "session": "s", "pid": 42,
+                                                     "deadline": time.time() + 60, "decision": decision["id"],
+                                                     "chat": OWNER, "message_id": number + 100}}))
+        PQ.supersede("s")
+        PQ.sweep(pq.cfg, pq.bot)
+    stored = decisions._load(state_dir() / decisions.STATE_FILE)
+    assert all(stored[ident]["state"] == "cancelled" for ident in ids)
+    assert len(PQ._all()) == PQ.KEEP_CLOSED
+    assert len(pq.bot.methods("editMessageText")) == PQ.KEEP_CLOSED + 1
+
+
+def test_failed_retirement_is_not_trimmed(pq, monkeypatch):
+    ident = "0000000000000000"
+    decision = decisions.create("s", OWNER, pq.thread, "Permission", perm=ident)
+    PQ._update(lambda data: data.update({ident: {"state": "open", "session": "s", "decision": decision["id"]}}))
+    with monkeypatch.context() as patch:
+        patch.setattr(decisions, "settle_permission", lambda *args: (_ for _ in ()).throw(OSError()))
+        PQ.supersede("s")
+        PQ.sweep(pq.cfg, pq.bot)
+        for number in range(1, PQ.KEEP_CLOSED + 2):
+            PQ._update(lambda data: data.update({f"{number:016x}": {"state": "answered", "closed_at": number}}))
+        assert not PQ.get(ident).get("retired")
+    PQ.sweep(pq.cfg, pq.bot)
+    assert decision_of(ident)["state"] == "cancelled"
+
+
+def test_sweep_at_deadline_leaves_live_waiter_to_expire(pq, monkeypatch):
+    ident = "0123456789abcdef"
+    decision = decisions.create("s", OWNER, pq.thread, "Permission", perm=ident)
+    PQ._update(lambda data: data.update({ident: {"state": "open", "session": "s", "pid": 42,
+                                                 "deadline": 100, "decision": decision["id"],
+                                                 "message_id": 123, "chat": OWNER}}))
+    monkeypatch.setattr(PQ, "_alive", lambda pid: True)
+    assert PQ.sweep(pq.cfg, pq.bot, now=100) == 0
+    assert PQ.get(ident)["state"] == "open"
+    assert decision_of(ident)["state"] == "open"
+    assert not pq.bot.methods("editMessageText")
+    assert PQ.sweep(pq.cfg, pq.bot, now=111) == 1
+    assert PQ.get(ident)["state"] == "expired"
+    assert decision_of(ident)["state"] == "cancelled"
+    assert "still waits at the computer" in pq.bot.methods("editMessageText")[-1]["text"]
+
+
+def test_expired_request_is_hidden_even_before_the_watcher_runs(pq, monkeypatch):
+    hook = Hook(pq, payload(), wait=2)
+    ident = hook.ident()
+    rec = PQ.get(ident)
+    PQ._update(lambda data: data[ident].update(deadline=time.time() - 1))
+    assert all(r["id"] != rec["decision"] for r in decisions.open_decisions())
+    assert PQ.sweep(pq.cfg, pq.bot, now=time.time() + 11) == 1
+    assert hook.result() is None
+
+
+def test_a_parallel_tool_finishing_never_closes_a_waiting_permission_card(pq, monkeypatch):
+    from ctb import hooks
+    hook = Hook(pq, payload(), wait=2)
+    ident = hook.ident()
+    hooks.hook_post(json.dumps({"session_id": "s", "tool_name": "Read"}))
+    assert PQ.get(ident)["state"] == "open"
+    tap(pq, f"pq:n:{ident}", ident=ident)
+    hook.result()
+
+
+@pytest.mark.parametrize("event", ["stop"])
+def test_session_progress_closes_permission_card(pq, monkeypatch, event):
+    from ctb import hooks
+    hook = Hook(pq, payload(), wait=2)
+    ident = hook.ident()
+    other = Hook(pq, payload(session="s", agent_id="other"), wait=2)
+    other_id = other.ident(skip={ident})
+    monkeypatch.setattr(hooks, "load_config", lambda: pq.cfg)
+    monkeypatch.setattr("ctb.telegram.Bot.from_config", lambda cfg: pq.bot)
+    monkeypatch.setattr(hooks, "spawn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hooks, "_direct", lambda data: None)
+    data = json.dumps({"session_id": "s", "tool_name": "Read"})
+    (hooks.hook_post if event == "post" else hooks.hook_stop)(data)
+    assert all(r["id"] != decision_of(ident)["id"] for r in decisions.open_decisions())
+    assert PQ.get(other_id)["state"] == "open"
+    assert hook.result() is None
+    PQ.sweep(pq.cfg, pq.bot)
+    assert decision_of(ident)["state"] == "cancelled"
+    tap(pq, f"pq:n:{other_id}", ident=other_id)
+    other.result()
+
+
+def test_long_command_shows_short_readable_summary(pq):
+    hook = Hook(pq, payload(command="\n  cat /srv/demo/projects/long/path/report.txt " + "x" * 2000))
+    ident = hook.ident()
+    rec = decision_of(ident)
+    assert rec["decline_only"] is True
+    assert rec["request"].startswith("Bash\ncat ")
+    assert "report.txt" in rec["request"] and "/srv/demo" not in rec["request"]
+    assert '"command"' not in rec["request"] and len(rec["request"]) < 220
+    tap(pq, f"pq:n:{ident}", ident=ident)
+    hook.result()
 
 
 def test_the_screen_card_and_the_plain_ring_stay_away_while_the_request_card_is_out(pq, monkeypatch):

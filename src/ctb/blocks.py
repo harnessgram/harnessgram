@@ -304,11 +304,11 @@ def run(cfg: Config, action: str, source: str = "-", ident: str = "") -> int:
               f"again with \"id\": \"{rec['id']}\"")
         return 0
     except D.DecisionError as e:
-        print(f"Harnessgram: {e.reason}", file=sys.stderr)
+        print(f"HarnessGram: {e.reason}", file=sys.stderr)
         return 1
     except OSError as e:
-        print(f"Harnessgram: cannot read the block ({type(e).__name__})", file=sys.stderr)
+        print(f"HarnessGram: cannot read the block ({type(e).__name__})", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Harnessgram: blocks are not available ({type(e).__name__})", file=sys.stderr)
+        print(f"HarnessGram: blocks are not available ({type(e).__name__})", file=sys.stderr)
         return 1

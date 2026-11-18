@@ -2,7 +2,7 @@
 import pytest
 
 import panel_browser
-from cockpit_v2_browser import assert_contract, open_v2, sample_state
+from cockpit_v2_browser import assert_contract, open_first_request, open_v2, sample_state
 
 sync_api = pytest.importorskip("playwright.sync_api")
 
@@ -28,7 +28,7 @@ def test_must_keep_phone_contract(browser, lang, scheme):
         assert not errors
         page.locator("#radio-player .v2-radio-art").wait_for()
         metadata = page.evaluate("navigator.mediaSession.metadata && {title:navigator.mediaSession.metadata.title,artist:navigator.mediaSession.metadata.artist,artwork:navigator.mediaSession.metadata.artwork}")
-        assert metadata["title"] == "רדיו הצוות" and metadata["artist"] == "Harnessgram"
+        assert metadata["title"] == "שידורי הקוקפיט" and metadata["artist"] == "HarnessGram"
         assert metadata["artwork"][0]["src"].endswith("/assets/cockpit/v1/artwork.webp")
         page.locator("#v2-exit").click()
         assert page.evaluate("window.__closed === true")
@@ -83,13 +83,14 @@ def test_full_decision_detail_is_visible_before_answers_even_when_more_is_closed
 def test_request_actions_require_second_tap_and_keep_project_identity(browser, action, index):
     ctx, page, calls, errors, state = open_v2(browser)
     try:
-        row = page.locator('[data-v2-section="requests"] [data-v2-request]').first
+        row = open_first_request(page)
         b = row.locator('.request-actions button').nth(index)
         b.click()
-        assert not calls
+        writes = lambda: [c for c in calls if c[0] == "/api/request"]
+        assert not writes()
         b.click()
-        page.wait_for_function("() => document.querySelectorAll('[data-v2-section=\"requests\"] [data-v2-request]').length === 2")
-        assert calls == [("/api/request", {"project": "תכנון", "id": 1, "action": action})]
+        page.wait_for_function("() => document.querySelectorAll('[data-v2-section=\"requests\"] [data-request]').length === 4")
+        assert writes() == [("/api/request", {"project": "לימוד", "id": 2, "action": action})]
         assert not errors
     finally:
         ctx.close()
@@ -187,7 +188,7 @@ def test_stale_decisions_fold_away_and_can_be_removed_at_390(browser, lang):
                                        old=False, stale=why, url=""))
     ctx, page, calls, errors, state = open_v2(browser, lang, state=state)
     try:
-        assert page.locator(".v2-needs .v2-count").inner_text().strip() in ("3", "\u200f3")
+        assert page.locator(".v2-needs .v2-count").inner_text().strip() in ("5", "\u200f5")
         assert page.locator(".v2-needs [data-v2-decision]").count() == 3
         fold = page.locator(".v2-stale-fold")
         fold.locator(".compact-toggle").click()

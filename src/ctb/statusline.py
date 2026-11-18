@@ -42,9 +42,9 @@ def usage_record(rl: dict) -> Optional[dict]:
     week, week_r = percent(rl, "seven_day", "weekly_all")
     if five is None and week is None:
         return None
-    return {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "five_hour": round(five or 0),
-            "weekly": round(week or 0), "five_hour_resets": five_r or "", "weekly_resets": week_r or "",
-            "source": "statusline",
+    return {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "five_hour": round(five) if five is not None else None,
+            "weekly": round(week) if week is not None else None, "five_hour_resets": five_r or "", "weekly_resets": week_r or "",
+            "source": "statusline", "five_hour_present": five is not None,
             # every other limit Claude Code reports (e.g. per-model weekly caps)
             "extra": [{"kind": r.get("kind"), "percent": r.get("percent"), "resets_at": r.get("resets_at")}
                       for r in rl.get("limits") or [] if isinstance(r, dict)

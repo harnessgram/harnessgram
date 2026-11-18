@@ -278,18 +278,34 @@ def test_type_command_asks_still_ok_before_typing_and_before_enter(monkeypatch):
         keys.append(args)
         if "-l" in args:
             box["text"] = args[-1]
+        elif "BSpace" in args:
+            box["text"] = box["text"][:-args.count("BSpace")]
         return type("R", (), {"returncode": 0})()
     monkeypatch.setattr(inbox, "_tmux", tmux)
     answers = iter([True, False])
     assert inbox.type_command("s", "%7", "hello", verify_session=True,
                               still_ok=lambda: asked.append(1) or next(answers)) == "stale"
     assert len(asked) == 2 and not any("Enter" in k for k in keys)  # typed, then refused before Enter
+    assert box["text"] == ""  # the stale final gate takes its already-typed nudge back
     keys.clear()
     box["text"] = ""
     assert inbox.type_command("s", "%7", "hello", still_ok=lambda: False) == "stale" and keys == []
     box["text"] = ""
     assert inbox.type_command("s", "%7", "hello", verify_session=True, still_ok=lambda: True) == "sent"
     assert any("Enter" in k for k in keys)
+
+
+def test_an_older_owner_push_cannot_replay_after_a_newer_team_pause(monkeypatch):
+    pushed_row = row(1, 9, wait="owner", note="pushed by owner")
+    pushed_row["urgent"] = True
+    pushed = items([pushed_row])
+    # The external ledger may append a note without changing the item's coarse updated timestamp.
+    paused = items([row(1, 9, note="paused by team")])
+    monkeypatch.setattr(I, "read_items", lambda cfg, now: paused)
+    sent = []
+    assert I.check(lead_cfg(), NOW, pushed, [entry(LEAD, "x")],
+                   lambda *args: sent.append(args) or "sent") == 0
+    assert sent == []
 
 
 def test_the_heartbeat_checks_at_most_every_five_minutes(monkeypatch):
@@ -523,7 +539,8 @@ def test_closed_or_changed_item_is_re_read_before_typing_and_enter(tmp_path, mon
     if stage != "before_enter":
         assert keys == []
     else:
-        assert len(keys) == 1  # typed while open, refused after the close, before Enter
+        assert len(keys) == 2  # typed while open, then taken back after the close, before Enter
+        assert "-l" in keys[0] and "BSpace" in keys[1]
     assert not I._read().get("items") and not I._read().get("delivered")
 
 

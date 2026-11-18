@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GOOD_TOKEN
+from conftest import GOOD_TOKEN, signed_in
 from ctb import i18n, inbox, menus
 from ctb.config import Config
 
@@ -21,6 +21,7 @@ EXEMPT = {
     ("board.py", "_sync", 0): "permanent pinned board; closing would remove its controls.",
     ("board.py", "_sync", 1): "permanent pinned board; closing would remove its controls.",
     ("board.py", "refresh_dirty", 0): "permanent pinned board; closing would remove its controls.",
+    ("board.py", "pin_content", 0): "permanent pinned board; closing would remove its controls.",
     ("panel_pin.py", "_markup", 0): "permanent pinned topic link, not a menu.",
     ("cockpit_notice.py", "update", 0): "one link to the open Cockpit question; the notice closes itself once answered.",
     ("dialogs.py", "_background_card", 0): "one Move to background button; the card clears itself when the command ends or after the tap.",
@@ -185,6 +186,7 @@ def test_status_shortcut_can_be_closed(monkeypatch, lang):
 
 
 def test_sent_answer_receipt_has_its_own_close_row():
+    signed_in("main")
     # This keyboard sits in a function that builds other keyboards; examine the
     # keyboard expression itself so another menu's close row cannot hide a gap.
     tree = ast.parse((SRC / "inbox.py").read_text(encoding="utf-8"))
@@ -441,6 +443,21 @@ def test_cockpit_dialogs_sheets_and_pickers_have_a_way_out():
     assert 'close.addEventListener("click",function(){setOpen(false);})' in mt
     assert 'dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);})' in mt
     code = code.replace('el("dialog","topic-sheet mt-sheet")', "")
+    # Agent packs (read-only cards): the details sheet closes by its close button, a tap on the shade, Escape and
+    # the back gesture (its own back layer).
+    vp = func("vpSheet")
+    assert 'el("section","vk-sheet vp-sheet")' in vp and 's.setAttribute("role","dialog")' in vp
+    assert 'shade.addEventListener("click",close)' in vp and 'x.addEventListener("click",close)' in vp
+    assert 'if(e.key==="Escape"){e.preventDefault();close();}' in vp
+    assert 'bindBackLayer("vp-sheet",s,true' in vp
+    for part in ('el("section","vk-sheet vp-sheet")', 's.setAttribute("role","dialog")', 'el("div","vp-sheet-head")'):
+        code = code.replace(part, "")
+    # The change-picture sheet (a project's tile or page): close button, Escape and the back gesture all close it.
+    art = func("v2ArtEdit")
+    assert 'el("dialog","topic-sheet v2-art-sheet")' in art and 'bindBackLayer("project-art"' in art
+    assert 'dialog.addEventListener("cancel",function(e){e.preventDefault();setOpen(false);})' in art
+    assert 'x.addEventListener("click",function(){haptic("sel");if(back)menu();else close();})' in art
+    code = code.replace('el("dialog","topic-sheet v2-art-sheet")', "").replace("dialog.showModal()", "")
     # Refuse newly introduced dialog/sheet/popover APIs until this inventory is extended.
     assert not re.search(r'<dialog\b|el\(["\']dialog["\']|createElement\(["\']dialog["\']|\.showModal\s*\(|\.showPopover\s*\(|role["\']?\s*,\s*["\']dialog|el\(["\'][^"\']+["\']\s*,\s*["\'][^"\']*(?:modal|sheet|popover)', code, re.I)
     assert not re.search(r'el\(["\']select["\']|<select\b|["\']listbox["\']|\.type\s*=\s*["\'](?:time|datetime-local|month|week)["\']', code, re.I)
@@ -456,7 +473,8 @@ def test_cockpit_dialogs_sheets_and_pickers_have_a_way_out():
     assert 'exit.addEventListener("click",backTap)' in prepare
     assert 'mb=more.querySelector(".compact-toggle")' in func("v2Decision")
     assert 'picture.appendChild(mb)' in func("v2Decision")
-    assert 'compactBlock("v2-older"' in func("v2Now")
+    board = func("requestBoard")
+    assert all('"%s"' % key in board for key in ("requests-agents", "requests-long", "requests-done"))
     # Old topics (Now): an inline disclosure, no dialog. Close-all arms on the first tap and offers Cancel,
     # a finished close offers Reopen (undo) and a dismiss button.
     cleanup = func("v2TopicCleanup")
@@ -474,6 +492,6 @@ def test_cockpit_dialogs_sheets_and_pickers_have_a_way_out():
     # The podcast sheet (feed picker -> episode picker) is a fold with its own way back and no new dialog API.
     pod = func("podcastCard")
     assert 'fold("podadd",S.podAdd)' in pod and 'el("details"' not in pod
-    assert 'S.podBack' in pod and 'podUi.eps=null;render(last,false)' in pod  # from the episode list back to the feeds
+    assert 'S.podBack' in pod and 'podUi.eps=null;render(last,true)' in pod  # from the episode list back to the feeds
     assert re.search(r'el\("input"\)', pod) and 'inp.type="url"' in pod
     assert not re.search(r'\b(?:prompt|confirm)\s*\(', code)

@@ -27,7 +27,7 @@ GRACE = 60  # seconds after the reset before the queue is delivered
 NUDGE_RETRY = 300  # seconds: a nudge that did not get the messages delivered is repeated at most this often
 GIVE_UP = 1800  # seconds after the reset: a later queue is an ordinary busy queue, not "quota returned"
 NUDGE_TEXT = "📩 Telegram"
-RESUME_TEXT = "▶️ Harnessgram: the quota is back. Continue the work the limit interrupted."
+RESUME_TEXT = "▶️ HarnessGram: the quota is back. Continue the work the limit interrupted."
 
 
 def _load(path) -> dict:
@@ -63,9 +63,10 @@ def _say(cfg, bot, thread: int, text: str, session: str, alert: bool = False) ->
 def _deliver(session: str, queued: bool, line: str = NUDGE_TEXT) -> str:
     """Wake the session for its saved messages: "nudged", "no-pane" or "later". The conditions are those
     of the inbox's own nudge: no live waiter (it delivers by itself), not busy, an idle prompt, empty."""
-    from .autopilot import at_prompt, type_into
+    from .autopilot import at_prompt
     from . import compact
-    from .inbox import _empty_prompt, _nudge_guard, _waiter_alive, clear_nudge_typed, main_working, mark_nudge_typed, pane_for_session
+    from .inbox import (_empty_prompt, _nudge_guard, _waiter_alive, clear_nudge_typed, main_working, mark_nudge_typed, pane_for_session,
+                        type_command)
     pane = pane_for_session(session)
     if not pane:
         return "no-pane"
@@ -74,14 +75,18 @@ def _deliver(session: str, queued: bool, line: str = NUDGE_TEXT) -> str:
     if (queued and _waiter_alive(session)) or main_working(session) or compact.command_pending(session):
         return "later"
     try:
-        with _nudge_guard(session):  # the lock every nudge and slash line takes: one writer into the input box
-            if not (at_prompt(pane) and _empty_prompt(pane)) or compact.command_pending(session):
-                return "later"
+        if not (at_prompt(pane) and _empty_prompt(pane)) or compact.command_pending(session):
+            return "later"
+        with _nudge_guard(session):  # the marker belongs to the writer that holds the nudge lock
             if line == NUDGE_TEXT:
                 mark_nudge_typed(session)
-            type_into(pane, line)
-            if line == NUDGE_TEXT:
-                clear_nudge_typed(session)
+            try:
+                result = type_command(session, pane, line, verify_session=True, guard_held=True)
+            finally:
+                if line == NUDGE_TEXT:
+                    clear_nudge_typed(session)
+        if result != "sent":
+            return "later"
     except Exception:
         return "later"
     return "nudged"
@@ -156,14 +161,15 @@ def _same_hung_process(session: str, wait: dict, busy_ok: bool = False) -> Optio
 
 
 def _retry_deferred(cfg, bot, session, thread, now_ts, spawn_fn, old, error) -> bool:
-    """A limit move that waited for background work: once the session is quiet (idle, no agent writing,
+    """A move that waited for background work: once the session is quiet (idle, no agent writing,
     no shell job) try it again, at most once a minute and without another message (the owner was told
-    once). True while such a move is pending. It is dropped when the limit it belongs to is gone, or the
-    session no longer runs on the account that hit it (no ping-pong between accounts)."""
+    once). True while such a move is pending. An automatic move is dropped when its limit is gone, or the
+    session no longer runs on the account that hit it (no ping-pong between accounts).
+    Owner requests retry independently of automatic switching or limit changes and retain their chosen target."""
     wait = accounts.deferred_move(session, now_ts)
-    if not wait:
+    if not wait or (not wait.get("manual") and not accounts.auto_enabled()):
         return False
-    if (error and wait.get("limit_id") and wait["limit_id"] != error["id"]) or (
+    if (not wait.get("manual") and error and wait.get("limit_id") and wait["limit_id"] != error["id"]) or (
             wait.get("origin") and accounts.origin_account(session) != wait["origin"]):
         accounts.clear_deferred(session)
         return False
@@ -183,7 +189,9 @@ def _retry_deferred(cfg, bot, session, thread, now_ts, spawn_fn, old, error) -> 
         # close the owner's current conversation. The move proves the process is hung before ending it.
         if not overdue and not accounts.restart_is_safe_or_gone(session, now_ts):
             return True
-        same = _same_hung_process(session, wait, busy_ok=overdue)
+        from .inbox import _can_reopen_for_move, pane_for_session
+        closed = pane_for_session(session) is None and _can_reopen_for_move(session)
+        same = closed or _same_hung_process(session, wait, busy_ok=overdue)
         if same is None:
             return True
         if not same:
@@ -193,7 +201,8 @@ def _retry_deferred(cfg, bot, session, thread, now_ts, spawn_fn, old, error) -> 
             old["moved"], old["moved_at"] = "dropped", now_ts  # no "account freed up" move in its place
             return False
     fresh = accounts.fallback_plan(session, now_ts)["fresh"]
-    target = wait["target"] if wait["target"] in fresh else (fresh[0] if fresh else None)
+    target = wait["target"] if wait["target"] in fresh else (
+        fresh[0] if fresh and not wait.get("manual") else None)
     if target is None:
         return True
     if spawn_fn is None:
@@ -211,6 +220,9 @@ def _finish_resume(session: str) -> None:
 
 
 def _one(cfg, bot, inbox, session, thread, state, path, now_ts, spawn_fn, ui_lang) -> None:
+    from . import credit_mode
+    if credit_mode.active(session):
+        return  # explicit credit activation owns its resume/reset lifecycle
     try:
         _finish_resume(session)
     except Exception:
@@ -237,7 +249,8 @@ def _one(cfg, bot, inbox, session, thread, state, path, now_ts, spawn_fn, ui_lan
         old["updated"] = now_ts
         state[session] = old
         _save(path, state)
-    if old and now_ts < old.get("reset", 0) and accounts.auto_enabled() and _retry_deferred(
+    manual_wait = (accounts.deferred_move(session, now_ts) or {}).get("manual")
+    if (manual_wait or (old and now_ts < old.get("reset", 0))) and _retry_deferred(
             cfg, bot, session, thread, now_ts, spawn_fn, old, error):
         return
     if old.get("moved") == "dropped":

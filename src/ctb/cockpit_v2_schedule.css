@@ -24,6 +24,8 @@
 .cockpit-v2 .sc-empty,.cockpit-v2 .sc-note{margin:0}
 .cockpit-v2 .sc-retry{min-block-size:44px;margin-block-start:var(--v2-gap-sm)}
 .cockpit-v2 .sc-warn{margin-block-start:var(--v2-gap-sm)}
+.cockpit-v2 .sc-day-card{display:flex;flex-direction:column;gap:var(--v2-gap-sm);margin-block-end:var(--v2-gap-sm);padding-block:14px;padding-inline:14px;border-radius:var(--v2-small);background:var(--v2-soft)}
+.cockpit-v2 .sc-day-card h3,.cockpit-v2 .sc-day-card p{margin:0}
 .cockpit-v2 .sc-sheet{color:var(--v2-ink)}
 :root.cockpit-v2[data-theme="dark"] .sc-sheet{background:var(--v2-page)}
 .cockpit-v2 .sc-hint{margin-block:10px 0;color:var(--v2-muted);font-size:15px}
@@ -41,3 +43,18 @@
 .cockpit-v2 .sc-g-state{font-size:13px;color:var(--v2-muted);overflow-wrap:anywhere}
 .cockpit-v2 .sc-google.on .sc-g-state{color:var(--v2-green);font-weight:700}
 .cockpit-v2 .sc-google .btn{flex:none;min-block-size:44px;padding-inline:14px}
+/* Personal hours remain a local proposal; anchors and the current hour have distinct rails. */
+.cockpit-v2 .sc-timeline{min-inline-size:0;margin-block-end:16px}
+.cockpit-v2 .sc-hours-heading{font-size:18px;margin-block:0 6px}
+.cockpit-v2 .sc-hours-hint{color:var(--v2-muted);font-size:14px;margin-block:6px 12px;overflow-wrap:anywhere}
+.cockpit-v2 .sc-hours{display:flex;flex-direction:column;gap:10px;list-style:none;margin:0;padding:0;min-inline-size:0}
+.cockpit-v2 .sc-hour{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-inline-size:0;padding-block:12px;padding-inline:12px;border:1px solid var(--v2-line);border-inline-start:4px solid var(--v2-blue);border-radius:var(--v2-small);background:var(--v2-soft)}
+.cockpit-v2 .sc-hour.fixed{border-inline-start-color:var(--v2-muted)}
+.cockpit-v2 .sc-hour.current{border-color:var(--v2-blue);background:var(--v2-glass)}
+.cockpit-v2 .sc-hour.past{opacity:.7}
+.cockpit-v2 .sc-hour-time{font-size:14px;font-weight:750;flex:none}
+.cockpit-v2 .sc-hour-title{min-inline-size:0;flex:1 1 110px;font-weight:750;overflow-wrap:anywhere}
+.cockpit-v2 .sc-hour-state{font-size:13px;color:var(--v2-blue)}
+.cockpit-v2 .sc-hour-summary{flex:1 1 100%;min-inline-size:0;overflow-wrap:anywhere;font-size:14px;color:var(--v2-muted)}
+.cockpit-v2 .sc-hour-actions{display:flex;flex-wrap:wrap;gap:6px;inline-size:100%;min-inline-size:0}
+.cockpit-v2 .sc-hour-actions .btn{min-block-size:44px;min-inline-size:44px;max-inline-size:100%;white-space:normal;overflow-wrap:anywhere;flex:1 1 100px}

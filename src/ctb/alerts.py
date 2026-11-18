@@ -33,15 +33,17 @@ from .topics import TopicMap
 
 FILE = "alerts-channel.json"
 SETTINGS_FILE = "alerts-settings.json"
-DEFAULTS = {"waiting": "on", "system": "on", "replies": "summary", "files": "off", "radio": "on", "cockpit": "on"}  # what it always did
+DEFAULTS = {"waiting": "on", "system": "on", "replies": "summary", "quote_owner": "off", "files": "off", "radio": "on", "cockpit": "on"}  # what it always did
 CHOICES = {"waiting": ("on", "off"), "system": ("on", "off"),
-           "replies": ("summary", "full", "off"), "files": ("off", "on"), "radio": ("on", "off"), "cockpit": ("on", "off")}  # in the order a tap cycles
+           "replies": ("summary", "full", "off"), "quote_owner": ("off", "on"), "files": ("off", "on"), "radio": ("on", "off"), "cockpit": ("on", "off")}  # in the order a tap cycles
 # An alert's kind -> the setting and value that lets it through.
 KINDS = {"waiting": ("waiting", "on"), "system": ("system", "on"), "summary": ("replies", "summary"),
-         "full": ("replies", "full"), "files": ("files", "on"), "radio": ("radio", "on"), "cockpit": ("cockpit", "on")}
+         "full": ("replies", "full"), "files": ("files", "on"),
+         "radio": ("radio", "on"), "cockpit": ("cockpit", "on")}
 MAX_PARTS = 5  # one huge reply must not flood the channel
 PART_CHARS = 3500  # leaves room for the header under Telegram's 4096
 REPLY_BUDGET = 15.0  # seconds for all parts of one reply; the rest is dropped
+TELEGRAM_TEXT_CHARS = 4096
 
 
 def _path():
@@ -209,7 +211,8 @@ def enabled(kind: str, cfg: Optional[Config] = None) -> bool:
     """Whether the owner lets this kind of alert through (an unknown kind never does). Pass `cfg` to count
     only choices the owner saved (see settings()); without it this is a hint, never a permission."""
     pair = KINDS.get(kind)
-    return bool(pair) and settings(cfg).get(pair[0]) == pair[1]
+    value = settings(cfg).get(pair[0]) if pair else None
+    return bool(pair) and (value in ("summary", "full") if pair[1] == "*" else value == pair[1])
 
 
 def set_option(key: str, value: str, cfg: Optional[Config] = None) -> bool:
@@ -275,7 +278,8 @@ def allowed(kind: str, cfg: Config, bot) -> bool:
     """Whether an alert of this kind may be sent now: a trusted channel, and the owner's saved choice."""
     got = state(cfg, bot)
     pair = KINDS.get(kind)
-    return bool(got and pair and got[1].get(pair[0]) == pair[1])
+    value = got[1].get(pair[0]) if got and pair else None
+    return bool(got and pair and (value in ("summary", "full") if pair[1] == "*" else value == pair[1]))
 
 
 def _owner_is_admin(chat_id: int, cfg: Config, bot) -> bool:
@@ -417,6 +421,13 @@ def _header(cfg: Config, session: str) -> str:
     return f"{mark}💬 {name}" if name else ""
 
 
+def _without_title(text: str, name: str) -> str:
+    """Remove a leading title when a caller included the same title as the alert header."""
+    if not name:
+        return text
+    return re.sub(r"^\s*" + re.escape(name) + r"\s*(?::|[-–—]|\n)\s*", "", text, count=1)
+
+
 def topic_link(cfg: Config, session: str) -> str:
     """The session's topic in the group, else the group's General topic; "" when there is no group."""
     from .panel_view import topic_url
@@ -440,7 +451,8 @@ def _button(chan: dict, ui_lang: str, url: str, label: str = "alerts_open_reply"
 
 
 def alert(cfg: Config, text: str, session: str = "", bot=None, silent: bool = False,
-          url: str = "", kind: str = "system", html: bool = False, label: str = "alerts_open_reply") -> bool:
+          url: str = "", kind: str = "system", html: bool = False, label: str = "alerts_open_reply",
+          reply_id: str = "") -> bool:
     """Send a copy of `text` to the alerts channel, headed by the session's topic name. A no-op
     (False) until a channel is registered, when the owner has turned this `kind` off, or while the
     flood gate is closed; never raises. `html`: `text` is Telegram HTML (the caller escaped it); it is still cleaned.
@@ -448,12 +460,15 @@ def alert(cfg: Config, text: str, session: str = "", bot=None, silent: bool = Fa
     try:
         bot = bot or Bot.from_config(cfg)
         got = state(cfg, bot)
-        if not got or KINDS.get(kind) is None or got[1].get(KINDS[kind][0]) != KINDS[kind][1]:
+        pair = KINDS.get(kind)
+        value = got[1].get(pair[0]) if got and pair else None
+        if not got or not pair or not (value in ("summary", "full") if pair[1] == "*" else value == pair[1]):
             return False
         chan = got[0]
         name = topic_name(session)
         ui_lang = getattr(cfg, "ui_language", "en")
         mark = L.RLM if ui_lang == "he" else ""
+        text = _without_title(text, name)
         body = text if not name else f"{mark}💬 {name}\n{text}"
         params = {"chat_id": chan["id"], "text": _clean(body)}
         if silent:
@@ -464,6 +479,9 @@ def alert(cfg: Config, text: str, session: str = "", bot=None, silent: bool = Fa
         if markup:
             params["reply_markup"] = markup
         flood.optional_call(bot, "sendMessage", params, timeout=5)
+        if kind in ("summary", "full"):
+            from .radio_dedupe import remember
+            remember(chan["id"], _clean(text), reply_id=reply_id)
         return True
     except Exception:
         return False
@@ -477,7 +495,60 @@ def plain_text(md: str) -> str:
     return re.sub(r"\*\*|`", "", text)
 
 
-def send_reply(cfg: Config, text: str, session: str = "", bot=None, url: str = "") -> bool:
+def send_reply_pair(cfg: Config, owner_text: str, reply: str, session: str = "", bot=None,
+                    url: str = "", reply_id: str = "") -> bool:
+    """Post the owner's message and its answer as one HTML card under the saved reply choice."""
+    try:
+        bot = bot or Bot.from_config(cfg)
+        got = state(cfg, bot)
+        mode = got[1].get("replies") if got else "off"
+        quote_owner = got[1].get("quote_owner") if got else "off"
+        if not got or quote_owner != "on" or mode not in ("summary", "full") or not owner_text.strip():
+            return False
+        shown = fmt.split_summary(reply)[1] if mode == "summary" else fmt.join_summary(reply)
+        if not shown or not shown.strip():
+            return False
+        chan = got[0]
+        name = topic_name(session)
+        owner = _clean(owner_text.strip())
+        if len(owner) > 300:
+            owner = owner[:297].rstrip() + "…"
+        shown = _without_title(_clean(shown.strip()), name)
+        title = fmt.inline(name) if name else ""
+        prefix = "\n".join(filter(None, (
+            f"<b>{title}</b>" if title else "",
+            f"<blockquote>{fmt.to_html(owner)}</blockquote>",
+        )))
+        def card(answer_text: str, suffix: str = "</blockquote>") -> str:
+            return prefix + f"\n<blockquote expandable>{fmt.to_html(answer_text)}{suffix}"
+
+        body = card(shown)
+        if len(body) > TELEGRAM_TEXT_CHARS:
+            note = fmt.to_html(t("alerts_reply_cut", lang=getattr(cfg, "ui_language", "en")))
+            suffix = f"\n\n{note}</blockquote>"
+            low, high = 0, len(shown)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if len(card(shown[:middle].rstrip(), suffix)) <= TELEGRAM_TEXT_CHARS:
+                    low = middle
+                else:
+                    high = middle - 1
+            body = card(shown[:low].rstrip(), suffix)
+        params = {"chat_id": chan["id"], "text": body, "parse_mode": "HTML",
+                  "disable_notification": True, "link_preview_options": {"is_disabled": True}}
+        markup = _button(chan, getattr(cfg, "ui_language", "en"), url,
+                         topic=topic_link(cfg, session) if not url else "")
+        if markup:
+            params["reply_markup"] = markup
+        flood.optional_call(bot, "sendMessage", params, timeout=5)
+        from .radio_dedupe import remember
+        remember(chan["id"], _clean(shown), reply_id=reply_id)
+        return True
+    except Exception:
+        return False
+
+
+def send_reply(cfg: Config, text: str, session: str = "", bot=None, url: str = "", reply_id: str = "") -> bool:
     """The full reply, as the owner got it in the topic, to the alerts channel: cleaned plain text,
     silent, at most MAX_PARTS messages (then a note that the rest is in the topic), the link button
     on the first part. Stops at the first failed part; when the time budget runs out the note is left
@@ -489,7 +560,7 @@ def send_reply(cfg: Config, text: str, session: str = "", bot=None, url: str = "
             return False
         chan = got[0]
         ui_lang = getattr(cfg, "ui_language", "en")
-        parts = fmt.chunks(fmt.unmix(_clean(plain_text(text))), PART_CHARS)
+        parts = fmt.chunks(fmt.unmix(_without_title(_clean(plain_text(text)), topic_name(session))), PART_CHARS)
         if not parts:
             return False
         cut = len(parts) > MAX_PARTS
@@ -519,6 +590,8 @@ def send_reply(cfg: Config, text: str, session: str = "", bot=None, url: str = "
             markup = _button(chan, ui_lang, url, "alerts_more_in_topic" if last and cut else "alerts_open_reply") if (
                 i == 0 or (last and cut and url)) else None
             post(body, markup, max(1, min(5, left)))
+            from .radio_dedupe import remember
+            remember(chan["id"], part, reply_id=reply_id)
         return True
     except Exception:
         return False
@@ -536,7 +609,8 @@ def send_file(cfg: Config, session: str, title: str, method: str, field: str, fi
         chan = got[0]
         name = topic_name(session) or title
         mark = L.RLM if getattr(cfg, "ui_language", "en") == "he" else ""
-        text = _clean((f"{mark}💬 {name}\n" if name else "") + "📎 " + (caption or filename))
+        body = _without_title(caption or filename, name)
+        text = _clean((f"{mark}💬 {name}\n" if name else "") + "📎 " + body)
         fields = {"chat_id": chan["id"], "disable_notification": "true", "caption": text[:1000]}
         fields.update({k: _clean(v) if isinstance(v, str) else v for k, v in (media_fields or {}).items()})
         flood.optional_upload(bot, method, fields, field, _clean(filename) or "file", payload, timeout=60)
@@ -547,8 +621,8 @@ def send_file(cfg: Config, session: str, title: str, method: str, field: str, fi
 
 # -- /alerts: the owner's settings, one message edited in place --------------------------------------
 
-_CODES = {"w": "waiting", "s": "system", "r": "replies", "f": "files", "o": "radio", "c": "cockpit"}
-_BUTTON = re.compile(r"al:([wsrfoc]):([a-z]+)")
+_CODES = {"w": "waiting", "s": "system", "r": "replies", "q": "quote_owner", "f": "files", "o": "radio", "c": "cockpit"}
+_BUTTON = re.compile(r"al:([wsrqfoc]):([a-z]+)")
 
 
 def _screen(cfg: Config) -> tuple:
@@ -568,6 +642,8 @@ def _screen(cfg: Config) -> tuple:
     text = t("alerts_settings", lang=ui_lang, title="\u2068" + (chan.get("title") or "?") + "\u2069")  # a title in another script must not reorder the line
     if current["replies"] == "full":
         text += "\n\n" + t("alerts_full_warning", lang=ui_lang)
+    if current["quote_owner"] == "on":
+        text += "\n\n" + t("alerts_quote_owner_warning", lang=ui_lang)
     if current["files"] == "on":
         text += "\n\n" + t("alerts_files_warning", lang=ui_lang)
     rows.append(menus.close_row(ui_lang))

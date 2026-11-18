@@ -333,3 +333,53 @@ def test_a_refused_edit_falls_back_to_a_short_message_with_the_button(tmp_path):
     assert follow["text"] == "🔊" and follow["reply_parameters"]["message_id"] == sent[0]["message_id"]
     assert follow["reply_markup"]["inline_keyboard"][0][0]["callback_data"].startswith("ls:")
     assert len(sent) == 2
+
+
+def _engine_script(tmp_path, body):
+    script = tmp_path / "engine.py"
+    script.write_text("import sys\nargs = sys.argv[1:]\nout = args[args.index('-o') + 1]\ntext = sys.stdin.read()\n" + body)
+    return [__import__("sys").executable, str(script)]
+
+
+def test_configured_engine_speaks_with_the_voice_and_stdin(tmp_path, monkeypatch):
+    from ctb.config import Config
+    seen = tmp_path / "seen.txt"
+    command = _engine_script(tmp_path, "open(%r, 'w').write(' '.join(args) + '|' + text)\n"
+                                       "open(out, 'wb').write(b'OggS-voice')\n" % str(seen))
+    cfg = Config(tts_command=command, tts_voice="adam")
+    assert listen.engine_ready(cfg)
+    assert listen.synthesize(cfg, "שלום עולם") == b"OggS-voice"
+    argv, text = seen.read_text().split("|")
+    assert argv.endswith("-v adam") and text == "שלום עולם"
+
+
+def test_failed_or_non_ogg_engine_falls_back_to_the_system_voice(tmp_path, monkeypatch):
+    from ctb.config import Config
+    from ctb import radio_voice
+    fallback = []
+    monkeypatch.setattr(radio_voice, "system_voice", lambda text, voice: fallback.append(text) or b"")
+    monkeypatch.setattr(listen, "_ffmpeg", lambda: "ffmpeg")  # CI hosts have no ffmpeg; the fallback must still be asked
+    for body in ("sys.exit(3)\n", "open(out, 'wb').write(b'not ogg')\n"):
+        cfg = Config(tts_command=_engine_script(tmp_path, body))
+        assert listen.synthesize(cfg, "שלום") == b""
+    assert len(fallback) == 2
+
+
+def test_engine_timeout_kills_its_process_group(tmp_path, monkeypatch):
+    from ctb.config import Config
+    monkeypatch.setattr(listen, "ENGINE_TIMEOUT", 1)
+    cfg = Config(tts_command=_engine_script(tmp_path, "import time\ntime.sleep(30)\n"))
+    import time as _time
+    start = _time.monotonic()
+    assert listen._run_engine(cfg, "שלום") == b""
+    assert _time.monotonic() - start < 10
+
+
+def test_tts_config_is_validated():
+    import pytest
+    from ctb.config import ConfigError, from_dict
+    assert from_dict({"tts_command": ["/usr/bin/true"], "tts_voice": "adam"}).tts_voice == "adam"
+    for bad in ({"tts_command": "hebrew-tts -v x"}, {"tts_command": [""]}, {"tts_voice": "-o /tmp/x"},
+                {"tts_voice": "a b"}):
+        with pytest.raises(ConfigError):
+            from_dict(bad)

@@ -152,9 +152,9 @@ def test_live_keyboard_extracts_context_and_claude_quota():
     kb = live_keyboard(footer)
     assert kb["keyboard"][0] == [
         {"text": "📏 120 אלף"},
-        {"text": "⏱️ 45% · 📅 20%"},
+        {"text": "⏱️ 45%"},
     ]
-    assert kb["input_field_placeholder"] == "📏 120 אלף · ⏱️ 45% · 📅 20%"
+    assert kb["input_field_placeholder"] == "📏 120 אלף · ⏱️ 45%"
     # base buttons follow below the info row
     assert kb["keyboard"][1:] == KEYBOARD["keyboard"]
 
@@ -183,7 +183,7 @@ def test_live_keyboard_regex_accepts_named_accounts():
     assert kb2["keyboard"][0] == [{"text": "⏱️ 65%"}]
 
     kb3 = live_keyboard(footers[2])
-    assert kb3["keyboard"][0] == [{"text": "⏱️ 70% · 📅 30%"}]
+    assert kb3["keyboard"][0] == [{"text": "⏱️ 70%"}]
 
 
 def test_live_keyboard_empty_or_plain_footer_keeps_default_keyboard():

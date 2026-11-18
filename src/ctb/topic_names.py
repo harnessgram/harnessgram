@@ -22,7 +22,7 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import lang as L
-from . import title_sync
+from . import addons, title_sync
 from .config import Config, private_dir, state_dir, write_private
 from .i18n import t
 from .telegram import TelegramError
@@ -560,6 +560,7 @@ def apply(cfg: Config, bot, topics, session: str, old: str, new: str) -> bool:
     where the rest of the bridge reads it, so the next topic refresh keeps it."""
     from . import flood
     from .topics import save_session_name
+    queue_title = False
     with topics._locked():
         found = topics.place_of(session)
         entries = topics._load() if found is not None and found.home else topics._load_projects()
@@ -574,11 +575,14 @@ def apply(cfg: Config, bot, topics, session: str, old: str, new: str) -> bool:
             if "not modified" not in str(exc).lower():
                 return False
         save_session_name(session, new)
-        title_sync.want(session, new)  # the Claude Code session title follows the topic name
+        if addons.enabled(cfg, "title_sync"):
+            queue_title = True
         entry["name"], entry["visible_name"] = new, visible
         entries.pop(session, None)
         entries[session] = entry
         (topics._save if found.home else topics._save_projects)(entries)
+    if queue_title:
+        title_sync.want(session, new)
     return True
 
 

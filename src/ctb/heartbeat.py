@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import logging
 import re
+import sys
 import time
 from typing import Callable, Optional
 
@@ -181,13 +182,17 @@ def refresh_cards(cfg: Config, bot, now: Optional[float] = None,
     base = state_dir()
     have = mirror._read_map(base / "status-footer.json")
     seen = mirror._read_map(base / mirror.CARD_DATA_FILE)
+    count = None
     for session in sorted(topics.all_places()):
         if session not in live:
             continue
         found = topics.place_of(session)
         if found is None or not flood.is_open(found.chat, now):
             continue  # a flooded group waits; the other groups' cards go on
-        data_key = mirror.card_data_key(session)
+        if count is None:
+            from . import waiting
+            count = waiting.waiting_count(cfg)  # once per round, not once per session
+        data_key = mirror.card_refresh_key(cfg, session, count)
         stale = (found.key not in have) or seen.get(found.key) != data_key
         if not stale:
             continue
@@ -255,18 +260,54 @@ def _check_funnel(cfg, now):
     _FUNNEL_STATE = state
 
 
+def _drain_live_activity(cfg: Config, now: float) -> None:
+    """Keep optional push failures visible without interrupting the heartbeat."""
+    try:
+        from . import apns
+        apns.drain(cfg, now)
+    except Exception as exc:
+        print(f"live activity drain failed: {exc}", file=sys.stderr)
+
+
 def run_once(cfg: Config, bot=None, now: Optional[float] = None,
-             find: Callable[[str], Optional[str]] = status.transcript_of) -> int:
+             find: Callable[[str], Optional[str]] = status.transcript_of,
+             listener_check: Optional[Callable[[], object]] = None) -> int:
     """One round: refresh the placeholder of one busy, recently active session, in turn. Returns 0 or 1."""
     from . import reply_outbox, policy
     now = time.time() if now is None else now
+    if listener_check is not None:
+        try:
+            listener_check()
+        except Exception:
+            logging.getLogger(__name__).warning("Listener LaunchAgent check could not finish")
+    _drain_live_activity(cfg, now)
+    try:
+        from . import auto_cards
+        auto_cards.start(cfg, now)  # local progress does not depend on Telegram or an open Cockpit
+    except Exception:
+        pass
     try:
         _check_funnel(cfg, now)
     except Exception:
         pass  # an optional repair never interrupts a heartbeat
+    from . import radio_upgrade
+    radio_upgrade.check(cfg)  # its own clock: the round's `now` predates the funnel check
+    if cfg.ready:
+        # Paid spend is enforced even while mirroring or the policy is off: a credit process
+        # keeps a cached key, so the cap and expiry must always reach it (review #423f).
+        bot = bot or Bot.from_config(cfg)
+        try:
+            from . import credit_mode
+            credit_mode.tick(cfg, bot, now)
+        except Exception:
+            logging.getLogger(__name__).warning("Emergency credit check could not finish")
     if not cfg.ready or not cfg.mirror or not policy.on():
         return 0
-    bot = bot or Bot.from_config(cfg)
+    try:
+        from . import request_sweep
+        request_sweep.start(cfg, now)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Request sweep could not start (%s)", type(exc).__name__)
     try:
         from . import board
         board.daily_sweep(cfg, bot, now)
@@ -285,6 +326,11 @@ def run_once(cfg: Config, bot=None, now: Optional[float] = None,
             briefing.tick(cfg, bot, now, entries=seen)  # the morning briefing, once a day at the wake time
     except Exception:
         pass  # optional: never holds up replies
+    try:
+        from . import day_assistant
+        day_assistant.heartbeat_tick(cfg, bot, now)
+    except Exception:
+        pass  # optional owner help must never interrupt replies
     try:
         from . import hook_health
         hook_health.check(cfg, bot, now)
@@ -374,14 +420,19 @@ def run_once(cfg: Config, bot=None, now: Optional[float] = None,
 
 
 def run(cfg: Config, every: float = EVERY, once: bool = False,
-        sleep_fn: Callable[[float], None] = time.sleep) -> int:
+        sleep_fn: Callable[[float], None] = time.sleep,
+        listener_check: Optional[Callable[[], object]] = None) -> int:
     if not cfg.ready:
         return 1
     bot = Bot.from_config(cfg)
     from . import policy
     if once:
-        if policy.on():  # mirroring off: the round does nothing
-            run_once(cfg, bot=bot)
+        if listener_check is not None:
+            try:
+                listener_check()
+            except Exception:
+                logging.getLogger(__name__).warning("Listener LaunchAgent check could not finish")
+        run_once(cfg, bot=bot)
         return 0
     if cfg.session_auto_revive:
         revive.revive_in_background()
@@ -391,8 +442,13 @@ def run(cfg: Config, every: float = EVERY, once: bool = False,
     buildstamp.record_running("heartbeat")  # doctor tells when an install left this copy on older code
     try:
         while True:
-            if policy.on():  # mirroring off: this round does nothing (it looks again next round)
-                run_once(cfg, bot=bot)
+            # run_once gates on mirroring/policy itself, after the paid-spend watchdog (review #423g).
+            if listener_check is not None:
+                try:
+                    listener_check()
+                except Exception:
+                    logging.getLogger(__name__).warning("Listener LaunchAgent check could not finish")
+            run_once(cfg, bot=bot)
             if revive.revived.is_set():  # not before the revive finished: it must read the old record
                 try:
                     from .config import load

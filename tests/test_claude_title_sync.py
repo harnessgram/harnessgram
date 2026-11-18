@@ -1,98 +1,156 @@
-"""The Claude Code session title follows the Telegram topic name (2026-11-10).
-
-Claude Code 2.1.322 takes `hookSpecificOutput.sessionTitle` from a UserPromptSubmit hook, so the title is set
-by the next prompt's hook: nothing is typed into a terminal, never mid-turn and never into another pane."""
+"""Claude Code session names follow their Telegram topic titles through guarded fakes."""
 from __future__ import annotations
 
 import json
+import subprocess
+
+import pytest
 
 from conftest import FakeBot, GOOD_TOKEN
-from ctb import hooks as H, title_sync as TS, topic_names as N, topics
+from ctb import inbox as I, title_sync as TS, topic_names as N, topics, wake
 from ctb.config import Config, state_dir, write_private
 from ctb.topics import TopicMap, save_session_name
 
 SID = "sess-title-1"
 GROUP = -1001234567890
+REAL_SAFE_SEND = I.send_idle_text
 
 
 def cfg():
     return Config(bot_token=GOOD_TOKEN, owner_chat_id=42, chat_id=GROUP, target_language="he")
 
 
-def prompt(capsys, monkeypatch, **data):
-    monkeypatch.setattr(H, "load_config", lambda: Config())  # not ready: no Telegram work, only the title
-    H.hook_prompt(json.dumps({"session_id": SID, "prompt": "hi", "cwd": "/tmp", **data}))
-    out = capsys.readouterr().out.strip()
-    return json.loads(out).get("hookSpecificOutput", {}) if out else {}
+@pytest.fixture(autouse=True)
+def no_live_terminal(monkeypatch):
+    """Every rename test must opt into an explicit fake terminal result."""
+    monkeypatch.setattr(I, "send_idle_text", lambda session, text: False)
 
 
-def test_a_topic_rename_becomes_the_session_title_on_the_next_prompt(capsys, monkeypatch):
+def test_idle_session_receives_rename_once_per_title(monkeypatch):
+    sent = []
+    monkeypatch.setattr(I, "send_idle_text", lambda session, text: sent.append((session, text)) or True)
     TS.want(SID, "מסלול: תיקון ניתוב")
-    spec = prompt(capsys, monkeypatch, session_title="")
-    assert spec == {"hookEventName": "UserPromptSubmit", "sessionTitle": "מסלול: תיקון ניתוב"}
-    assert prompt(capsys, monkeypatch, session_title="מסלול: תיקון ניתוב") == {}  # already carried: sent once
-    assert prompt(capsys, monkeypatch) == {}  # the hook did not say: what we set last counts
+    assert TS.flush(SID)
+    assert not TS.flush(SID)
+    assert sent == [(SID, "/rename מסלול: תיקון ניתוב")]
 
 
-def test_no_rename_no_title(capsys, monkeypatch):
-    assert prompt(capsys, monkeypatch, session_title="whatever") == {}
+def test_busy_session_keeps_rename_queued(monkeypatch):
+    sent = []
+    monkeypatch.setattr(I, "send_idle_text", lambda session, text: sent.append(text) or False)
+    TS.want(SID, "גשר: עבודה")
+    assert not TS.flush(SID)
+    assert TS.due(SID) == "גשר: עבודה"
+    monkeypatch.setattr(I, "send_idle_text", lambda session, text: True)
+    assert TS.flush(SID)
+    assert TS.due(SID) == ""
 
 
-def test_the_owners_own_app_rename_is_never_overwritten(tmp_path, capsys, monkeypatch):
-    path = tmp_path / f"{SID}.jsonl"
-    path.write_text(json.dumps({"type": "custom-title", "customTitle": "השם שלי"}) + "\n", encoding="utf-8")
-    TS.want(SID, "אורה: משהו")
-    assert prompt(capsys, monkeypatch, session_title="השם שלי", transcript_path=str(path)) == {}
+def test_dialog_refusal_keeps_rename_queued(monkeypatch):
+    monkeypatch.setattr(I, "send_idle_text", lambda session, text: False)
+    TS.want(SID, "מזווה: ניהול")
+    assert not TS.flush(SID)
+    assert TS.due(SID) == "מזווה: ניהול"
 
 
-def test_title_joins_the_prompts_own_context():
-    TS.want(SID, "גשר: לוח")
-    out = TS.with_title({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "x"}},
-                        {"session_id": SID, "session_title": "Claude"})
-    assert out["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit", "additionalContext": "x",
-                                         "sessionTitle": "גשר: לוח"}
+def test_safe_send_uses_guarded_path(monkeypatch):
+    calls = []
+    monkeypatch.setattr(I, "pane_for_session", lambda session: "%7")
+    monkeypatch.setattr(I, "_claim_terminal", lambda session: True)
+    monkeypatch.setattr(I, "_release_terminal", lambda session: calls.append(("release", session)))
+    monkeypatch.setattr(I, "pane_raw", lambda pane: "idle")
+    monkeypatch.setattr(I, "_dialog_open", lambda body, session: False)
+    monkeypatch.setattr(I, "_type_command", lambda session, pane, text, **kw: calls.append(
+        (session, pane, text, kw)) or "sent")
+    assert REAL_SAFE_SEND(SID, "/rename גשר: בטוח")
+    assert calls == [(SID, "%7", "/rename גשר: בטוח",
+                      {"verify_session": True, "guard_held": True}), ("release", SID)]
 
 
-def test_manual_topic_rename_wants_the_title(monkeypatch):
+def test_safe_send_refuses_a_dialog(monkeypatch):
+    typed = []
+    monkeypatch.setattr(I, "pane_for_session", lambda session: "%7")
+    monkeypatch.setattr(I, "_claim_terminal", lambda session: True)
+    monkeypatch.setattr(I, "_release_terminal", lambda session: None)
+    monkeypatch.setattr(I, "pane_raw", lambda pane: "permission dialog")
+    monkeypatch.setattr(I, "_dialog_open", lambda body, session: True)
+    monkeypatch.setattr(I, "_type_command", lambda *args, **kwargs: typed.append(args) or "sent")
+    assert not REAL_SAFE_SEND(SID, "/rename גשר: אסור")
+    assert typed == []
+
+
+def test_safe_send_catches_terminal_timeout(monkeypatch):
+    monkeypatch.setattr(I, "pane_for_session", lambda session: "%7")
+    monkeypatch.setattr(I, "_claim_terminal", lambda session: True)
+    monkeypatch.setattr(I, "_release_terminal", lambda session: None)
+    monkeypatch.setattr(I, "pane_raw", lambda pane: (_ for _ in ()).throw(
+        subprocess.TimeoutExpired("tmux", 1)))
+    assert not REAL_SAFE_SEND(SID, "/rename safe")
+
+
+def test_manual_topic_rename_only_queues(monkeypatch):
+    sent = []
+    monkeypatch.setattr(I, "send_idle_text", lambda session, text: sent.append(text) or False)
     bot = FakeBot()
     write_private(state_dir() / "topics.json", json.dumps({SID: {"thread": 7, "name": "old"}}))
     assert topics.topic_rename(cfg(), "מזווה: ניהול", session=SID, bot=bot) == 0
-    assert TS.due(SID, "") == "מזווה: ניהול"
+    assert TS.due(SID) == "מזווה: ניהול"
+    assert sent == []
 
 
-def test_automatic_rename_wants_the_title():
+def test_automatic_topic_rename_only_queues(monkeypatch):
+    sent = []
+    monkeypatch.setattr(I, "send_idle_text", lambda session, text: sent.append(text) or False)
     bot = FakeBot()
     tmap = TopicMap(state_dir() / "topics.json", bot, GROUP, cfg=cfg())
     tmap.ensure(SID, "Documents: היי")
     save_session_name(SID, "Documents: היי")
     assert N.apply(cfg(), bot, tmap, SID, "Documents: היי", "גשר: פתיחה")
-    assert TS.ours(SID, "גשר: פתיחה") and not TS.ours(SID, "השם שלי")
-    assert TS.due(SID, "") == "גשר: פתיחה"
+    assert TS.due(SID) == "גשר: פתיחה"
+    assert sent == []
 
 
-def _namer_round(tmp_path, monkeypatch, app_title):
+def test_session_start_does_not_flush_queued_title(monkeypatch, capsys):
+    TS.want(SID, "גשר: חזרה")
+    sent = []
+    monkeypatch.setattr(TS, "flush", lambda session: sent.append(session) or True)
+    monkeypatch.setattr(wake, "_own_chain", lambda: [10])
+    monkeypatch.setattr(wake, "_is_session_process", lambda session, chain: True)
+    monkeypatch.setattr(wake, "_pane_is_ours", lambda pane, chain: True)
+    monkeypatch.setattr(wake, "load_config", lambda: Config())
+    monkeypatch.setenv("TMUX_PANE", "%3")
+    assert wake.hook_start(json.dumps({"session_id": SID, "source": "resume"})) == 0
+    assert sent == []
+    assert capsys.readouterr().out == ""
+
+
+def test_custom_title_prevents_queued_rename(tmp_path, monkeypatch):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({"type": "custom-title", "customTitle": "My title"}) + "\n")
+    monkeypatch.setattr("ctb.status.transcript_of", lambda session: str(transcript))
+    TS.want(SID, "גשר: בתור")
+    assert TS.due(SID) == ""
+
+
+def test_bidi_isolates_are_removed_for_send_and_ours(monkeypatch):
+    sent = []
+    monkeypatch.setattr(I, "send_idle_text", lambda session, text: sent.append(text) or True)
+    TS.want(SID, "גשר: \u2068API client\u2069")
+    assert TS.ours(SID, "גשר: API client")
+    assert TS.flush(SID)
+    assert sent == ["/rename גשר: API client"]
+
+
+def test_ours_accepts_english_and_legacy_isolated_names():
+    TS.want(SID, "Documents: routing fix")
+    assert TS.ours(SID, "Documents: routing fix")
+    assert TS.ours(SID, "Documents: \u2068routing fix\u2069")
+    assert not TS.ours(SID, "Documents: another fix")
+
+
+def test_title_sync_addon_off_does_not_queue(monkeypatch):
+    monkeypatch.setattr("ctb.addons.enabled", lambda config, key: False)
     bot = FakeBot()
-    tmap = TopicMap(state_dir() / "topics.json", bot, GROUP, cfg=cfg())
-    tmap.ensure(SID, "Documents: היי")
-    tmap.ensure(SID, "Documents: היי")
-    save_session_name(SID, "Documents: היי")
-    folder = tmp_path / "claude" / "projects" / "proj"
-    folder.mkdir(parents=True)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
-    rows = [{"type": "user", "message": {"role": "user", "content": "היי"}},
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
-            {"type": "custom-title", "customTitle": app_title}]
-    (folder / f"{SID}.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
-                                         encoding="utf-8")
-    N.run(cfg(), bot, tmap, ask_fn=lambda *a, **k: "גשר: משהו")
-    return N.records().get(SID) or {}
-
-
-def test_a_title_we_set_never_locks_the_namer(tmp_path, monkeypatch):
-    TS.want(SID, "גשר: ישן")  # our earlier name, carried by the session as its app title
-    assert _namer_round(tmp_path, monkeypatch, "גשר: ישן").get("why") != "app-title"
-
-
-def test_the_owners_app_title_still_locks_the_namer(tmp_path, monkeypatch):
-    TS.want(SID, "גשר: ישן")
-    assert _namer_round(tmp_path, monkeypatch, "השם שלי").get("why") == "app-title"
+    write_private(state_dir() / "topics.json", json.dumps({SID: {"thread": 7, "name": "old"}}))
+    assert topics.topic_rename(cfg(), "English legacy name", session=SID, bot=bot) == 0
+    assert TS.due(SID) == ""

@@ -1,4 +1,4 @@
-"""Sensitive-button markers for the Harnessgram iPhone app (defence in depth, never the only check).
+"""Sensitive-button markers for the HarnessGram iPhone app (defence in depth, never the only check).
 
 The app asks for Face ID or the passcode before it acts on a button the bridge marked as sensitive:
 
@@ -32,6 +32,7 @@ CALLBACK_LIMIT = 64  # Telegram's limit for callback_data, in bytes
 # The callback data (as the handlers read it) of every button that performs a sensitive action by itself. A button
 # that only opens the next step (a picker, a confirmation) is not listed: its confirmation is.
 SENSITIVE_CALLBACKS = tuple(re.compile(p) for p in (
+    r"cr:[0-9a-f]{16}:yes",                              # explicit paid-credit activation
     r"more:/account add(?: [a-z0-9][a-z0-9-]{0,19})?",    # starts a sign-in to a new Claude account (accounts)
     r"more:/account remove [a-z0-9][a-z0-9-]{0,19} yes",  # removes an account (accounts, deletion)
     r"more:/account use [a-z0-9][a-z0-9-]{0,19}",         # switches the default account of new sessions (accounts)

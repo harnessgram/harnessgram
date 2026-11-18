@@ -108,4 +108,4 @@ def test_now_json_names_the_station_while_the_radio_is_off(server, hls):
     radio_now.publish(radio.folder(), "An old line.")
     (hls / "live.m3u8").unlink()
     status, _, body = call(server, "GET", path + "/now.json")
-    assert status == 200 and json.loads(body) == {"title": "רדיו הצוות", "updated": 0}
+    assert status == 200 and json.loads(body) == {"title": "שידורי הקוקפיט", "updated": 0}

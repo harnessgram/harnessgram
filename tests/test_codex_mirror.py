@@ -76,6 +76,17 @@ def test_disabled_no_calls_or_state(rig, monkeypatch):
     assert not (state_dir() / "codex-mirror").exists()
 
 
+def test_enabled_listener_marker_skips_legacy_poll(rig, monkeypatch):
+    monkeypatch.setattr("ctb.codex_bridge.managed", lambda native_id: True)
+    adapters = Mock()
+    adapters.resolve.side_effect = AssertionError("marked session adapter was used")
+    registry = Mock(return_value=adapters)
+    monkeypatch.setattr(M, "registry", registry)
+    assert M.poll(rig.cfg, rig.bot) == 0
+    registry.assert_called_once()
+    adapters.resolve.assert_not_called()
+
+
 def test_topic_created_once_only_for_attached_session(rig):
     M.poll(rig.cfg, rig.bot)
     M.poll(rig.cfg, rig.bot)  # a new registry/adapter on every call

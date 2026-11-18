@@ -9,7 +9,7 @@ import urllib.parse
 import pytest
 
 from conftest import GOOD_TOKEN
-from ctb import panel, panel_page, panel_youtube as PY, radio_youtube as Y
+from ctb import radio, panel, panel_page, panel_youtube as PY, radio_youtube as Y
 from ctb.config import Config
 from test_panel import OWNER, call, signed
 
@@ -49,6 +49,11 @@ class Google:
         if "/liveBroadcasts" in url and method == "GET":
             return 200, {"items": []}
         return 404, {}
+
+
+@pytest.fixture(autouse=True)
+def no_real_launchctl(monkeypatch):
+    monkeypatch.setattr(radio, "job_pid", lambda: None)
 
 
 @pytest.fixture(autouse=True)

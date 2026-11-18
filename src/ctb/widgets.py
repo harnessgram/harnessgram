@@ -101,7 +101,8 @@ def handle_query(query, cfg, bot, inbox):
                     or panel.stale_reasons_now(cfg).get(ident) in ("ended", "replaced")
                     or current[0].get("perm")):  # a widget never answers a Claude Code permission request
                 return result
-            rec = decisions.answer(cfg, inbox, ident, ("yes", "no")[index])
+            # by: the callback's sender, checked above to be the owner in the owner's private chat
+            rec = decisions.answer(cfg, inbox, ident, ("yes", "no")[index], by=cfg.owner_chat_id, via="chat-widget")
         change = {"chat_id": cfg.owner_chat_id, "message_id": query["message_id"], "chat_data": str(index)}
         result = "widget-answered"
         if ident is not None:

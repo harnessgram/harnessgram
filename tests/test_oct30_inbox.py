@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from conftest import BoxedTmux
+from conftest import BoxedTmux, signed_in
 
 from ctb import accounts, compact, inbox as I
 from ctb.config import Config, state_dir, write_private
@@ -148,12 +148,21 @@ def test_auto_compact_inbox(tmp_path, bot, monkeypatch):
     messages = bot.methods("sendMessage")
     assert any("🗜️ דחיסה אוטומטית: ההקשר הגיע ל-250 אלף" in m["text"] for m in messages)
 
-    # Cold compaction Hebrew note
+    # A second automatic request must not submit while the first is in flight.
     tmux.sent.clear()
+    assert I.auto_compact("sess-1", 200_000, cold=True, cfg=cfg(), bot=bot, topics=topics,
+                          sleep_fn=lambda s: None) is False
+    assert tmux.sent == []
+
+    # After completion and the cooldown, a cold compaction can send its Hebrew note.
+    compact.mark_done("sess-1")
+    old = time.time() - compact.COMPACT_COOLDOWN - 1
+    os.utime(compact.ended_marker("sess-1"), (old, old))
     I.compact.marker("sess-1").unlink(missing_ok=True)
     I.compact.precompact_marker("sess-1").unlink(missing_ok=True)
     res_cold = I.auto_compact("sess-1", 200_000, cold=True, cfg=cfg(), bot=bot, topics=topics, sleep_fn=lambda s: None)
     assert res_cold is True
+    assert tmux.sent == ["/compact"]
     assert any("לפני ההודעה שלך" in m["text"] and "תוקף העותק" in m["text"] for m in bot.methods("sendMessage"))
 
 
@@ -286,6 +295,9 @@ def test_more_menu_close_dialog(tmp_path, bot, monkeypatch):
 
 def test_account_command_dual_mode(tmp_path, bot, monkeypatch):
     """Per-session menu has 📍 and moves this session; global menu has ⭐ and sets default."""
+    accounts.add("work")
+    accounts.add("personal")
+    signed_in("work", "personal")
     monkeypatch.setattr(accounts, "names", lambda: ["work", "personal"])
     monkeypatch.setattr(accounts, "current", lambda: "work")
     monkeypatch.setattr(accounts, "account_for", lambda session=None: "personal" if session else "work")

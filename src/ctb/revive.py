@@ -26,11 +26,13 @@ BOOT_WINDOW = 2 * 3600  # only a heartbeat started this soon after boot revives 
 FRESH = 15 * 60  # the record must have been written this soon before the boot (else the heartbeat was off)
 CRASH_MIN = 2  # a tmux crash closes them all at once; closing by hand goes one at a time
 CRASH_EVERY = 30 * 60  # at most one crash reopen this often: sessions that keep dying are not reopened forever
+RETRY_EVERY = 2 * 60  # failed reopens wait at least this long before another attempt
+RETRY_MAX = 3  # per recovery; a later boot gets a new budget, even during CRASH_EVERY
 CLOSED = "closed-sessions.json"  # sessions the owner closed (/exit, logout): never reopened as crash losses
 # Handed to each reopened session as the first prompt of the process the bridge starts (`claude --resume <id>
 # "<prompt>"`): reopening alone left ten sessions sitting at an empty prompt after the 15.11 reboot. Only that
 # process receives it, so nothing is typed into a pane and no other instance of the session can pick it up.
-WAKE_TEXT = ("[Harnessgram: The Mac restarted (or the terminal server crashed) and the bridge reopened this "
+WAKE_TEXT = ("[HarnessGram: The Mac restarted (or the terminal server crashed) and the bridge reopened this "
              "session. If you were in the middle of a task, continue it now from where it stopped: check your "
              "handoff file, the owner ledger and any agents or background jobs that died with the restart, and "
              "restart what is needed. Do not redo finished steps. If nothing was in progress, do nothing and do "
@@ -117,10 +119,19 @@ def _known() -> List[str]:
     return list(TopicMap(state_dir() / "topics.json", None, 0).all())
 
 
+def _pending(rec: dict, live: List[str], closed: set) -> dict:
+    retry = rec.get("retry")
+    if not isinstance(retry, dict):
+        return {}
+    return {s: attempt for s, attempt in retry.items()
+            if s in (rec.get("sessions") or []) and s not in live and s not in closed
+            and isinstance(attempt, dict) and isinstance(attempt.get("attempts"), int)
+            and isinstance(attempt.get("t"), (int, float))}
+
+
 def snapshot(now: Optional[float] = None, resume: Optional[Callable[[str], bool]] = None,
              background: bool = True) -> None:
-    """Record the open session windows. An empty list is never recorded: right after a boot the
-    record must still hold what was open before it."""
+    """Record live and pending sessions; preserve an empty pre-boot view until revived is set."""
     windows = open_windows()
     if windows is None or reviving.is_set():
         return
@@ -139,40 +150,82 @@ def snapshot(now: Optional[float] = None, resume: Optional[Callable[[str], bool]
         old = {}
     t = now or time.time()
     closed = _closed_recently(t)
-    lost = [s for s in old.get("sessions") or [] if isinstance(s, str) and s not in live and s not in closed]
+    live = [s for s in live if s not in closed]
+    retry = _pending(old, live, closed)
+    lost = [s for s in old.get("sessions") or []
+            if isinstance(s, str) and s not in live and s not in closed and s not in retry]
     crash_t = old.get("crash_t", 0) if isinstance(old.get("crash_t"), (int, float)) else 0
     if old.get("server") and server != old["server"] and len(lost) >= CRASH_MIN \
-            and t - old.get("t", 0) < FRESH and (not crash_t or t - crash_t >= CRASH_EVERY):
-        _revive_crash(lost, resume, background, t)
+            and t - old.get("t", 0) < FRESH:
+        if not crash_t or t - crash_t >= CRASH_EVERY:
+            _revive_crash(old, lost, resume, background, t, record_time=now)
+            return
+        # Throttling delays a new crash recovery; it must not erase the sessions it protects.
+        retry.update({s: {"attempts": 0, "t": t, "after": crash_t + CRASH_EVERY} for s in lost})
+    due = [s for s, attempt in retry.items()
+           if attempt["attempts"] < RETRY_MAX and t - attempt["t"] >= RETRY_EVERY
+           and t >= attempt.get("after", 0)]
+    if due:
+        # Use the same exclusion as crash recovery: snapshots cannot overwrite an in-flight retry.
+        _revive_crash({**old, "sessions": sorted(set(live) | set(retry)), "retry": retry}, due, resume,
+                      background, t, crash=any("after" in retry[s] for s in due), record_time=now)
         return
-    if old.get("sessions") == live and old.get("server") == server and t - old.get("t", 0) < 300:
+    sessions = sorted(set(live) | set(retry))
+    if old.get("sessions") == sessions and old.get("server") == server \
+            and old.get("retry", {}) == retry and t - old.get("t", 0) < 300:
         return
-    rec = {"t": t, "sessions": live, "server": server}
+    rec = {"t": t, "sessions": sessions, "server": server}
+    if retry:
+        rec["retry"] = retry
     if crash_t:
         rec["crash_t"] = crash_t
     write_private(path, json.dumps(rec))
 
 
-def _revive_crash(lost: List[str], resume: Optional[Callable[[str], bool]], background: bool,
-                  crash_t: float) -> None:
-    """Reopen sessions lost with the tmux server, then record what is open under the new one."""
+def _recover(rec: dict, todo: List[str], resume: Optional[Callable[[str], bool]],
+             now: Optional[float] = None, gap: float = 5.0,
+             sleep_fn: Optional[Callable[[float], None]] = None) -> List[str]:
+    """One attempt, then bind the entire recovery record to the current server, even on failure."""
+    closed = set()
+    try:
+        return reopen(todo, resume, gap, sleep_fn, rounds=1, closed=closed)
+    finally:
+        t = time.time() if now is None else now
+        closed.update(_closed_recently(t))
+        windows = open_windows()
+        live = sessions_of(windows, _known()) if windows else []
+        sessions = sorted((set(s for s in rec.get("sessions") or [] if isinstance(s, str))
+                           | set(live)) - closed)
+        retry = _pending(rec, live, closed)
+        for sid in sessions:
+            if sid not in live and (sid in todo or sid not in retry):
+                attempt = retry.get(sid, {"attempts": 0, "t": t})
+                retry[sid] = {"attempts": attempt["attempts"] + (sid in todo),
+                              "t": t if sid in todo else attempt["t"]}
+        # An unavailable server must not leave the pre-boot identity behind. The empty identity
+        # also covers an all-failed reopen with no tmux server yet.
+        record = {"t": t, "sessions": sessions, "server": server_start() or ""}
+        if retry:
+            record["retry"] = retry
+        if rec.get("crash_t"):
+            record["crash_t"] = rec["crash_t"]
+        write_private(state_dir() / RECORD, json.dumps(record))
+
+
+def _revive_crash(rec: dict, lost: List[str], resume: Optional[Callable[[str], bool]], background: bool,
+                  now: float, crash: bool = True, record_time: Optional[float] = None) -> None:
+    """Recover crash losses or retry pending sessions without discarding failed reopens."""
     reviving.set()
+    if crash:
+        rec = {**rec, "crash_t": now}
 
     def run():
         try:
-            reopen(lost, resume)
+            _recover(rec, lost, resume, record_time)
         except Exception:
             pass
         finally:
-            try:
-                server = server_start()
-                windows = open_windows()
-                if server is not None and windows is not None:
-                    write_private(state_dir() / RECORD, json.dumps(
-                        {"t": time.time(), "sessions": sessions_of(windows, _known()), "server": server,
-                         "crash_t": crash_t}))
-            finally:
-                reviving.clear()  # only after the write: a snapshot in between would see the old server
+            reviving.clear()  # only after the write: a snapshot in between would see the old server
     if background:
         threading.Thread(target=run, daemon=True).start()
     else:
@@ -183,9 +236,9 @@ def revive_after_boot(now: Optional[float] = None, resume: Optional[Callable[[st
                       boot: Optional[float] = None, gap: float = 5.0,
                       sleep_fn: Callable[[float], None] = time.sleep) -> List[str]:
     """Reopen the sessions that were open before the boot. Returns those reopened."""
-    now = time.time() if now is None else now
+    t = time.time() if now is None else now
     boot = boot_time() if boot is None else boot
-    if not boot or now - boot > BOOT_WINDOW:
+    if not boot or t - boot > BOOT_WINDOW:
         return []
     try:
         rec = json.loads((state_dir() / RECORD).read_text(encoding="utf-8"))
@@ -193,25 +246,42 @@ def revive_after_boot(now: Optional[float] = None, resume: Optional[Callable[[st
         return []
     if not isinstance(rec, dict) or not boot - FRESH < rec.get("t", 0) < boot:
         return []
-    return reopen([s for s in rec.get("sessions") or [] if isinstance(s, str)], resume, gap, sleep_fn)
+    closed = _closed_recently(t)
+    todo = [s for s in rec.get("sessions") or [] if isinstance(s, str) and s not in closed]
+    # Boot recovery is independent of crash throttling and resets exhausted retry budgets.
+    rec.pop("retry", None)
+    reviving.set()
+    try:
+        return _recover(rec, todo, resume, now, gap, sleep_fn)
+    finally:
+        reviving.clear()
 
 
 def reopen(todo: List[str], resume: Optional[Callable[[str], bool]] = None, gap: float = 5.0,
-           sleep_fn: Optional[Callable[[float], None]] = None) -> List[str]:
+           sleep_fn: Optional[Callable[[float], None]] = None, *, rounds: int = 3,
+           closed: Optional[set] = None) -> List[str]:
     """Reopen these sessions one by one, skipping open ones; returns those reopened. The real reopen starts
     each session with WAKE_TEXT as its first prompt; an injected `resume` (tests) gets none."""
     sleep_fn = sleep_fn or time.sleep
+    closed = closed if closed is not None else set()
     if resume is None:
         from .inbox import resume_session
 
         def resume(sid: str) -> bool:
             return resume_session(sid, first_prompt=WAKE_TEXT)  # the carry-on prompt starts with the process
     done: List[str] = []
-    for round_ in range(3):  # right after boot tmux or the Keychain may not be ready yet
+    for round_ in range(rounds):
         windows = set(open_windows() or [])
         todo = [s for s in todo if "tg-" + s[:8] not in windows]
         failed = []
         for sid in todo:
+            # Keep every observed close for this recovery, even after its FRESH marker expires.
+            closed.update(_closed_recently(time.time()))
+            if sid in closed:
+                continue
+            from . import credit_mode
+            if credit_mode.blocked(sid):
+                continue  # credit recovery belongs to the heartbeat, never an automatic paid prompt
             try:
                 ok = resume(sid)
             except Exception:
@@ -219,9 +289,9 @@ def reopen(todo: List[str], resume: Optional[Callable[[str], bool]] = None, gap:
             (done if ok else failed).append(sid)
             sleep_fn(gap)
         todo = failed
-        if not todo:
+        if not todo or round_ == rounds - 1:
             break
-        sleep_fn(60)
+        sleep_fn(RETRY_EVERY)
     return done
 
 

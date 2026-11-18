@@ -99,6 +99,18 @@ def _set_mark(session: str, thread: Optional[int], auto: bool = False, chat: Opt
         _write_marks(data)
 
 
+def forget_reopened(cfg: Config, session: str, chat: int, thread: int, expected) -> None:
+    """Clear only the unchanged close mark for a topic successfully reopened by a notice."""
+    if (not isinstance(expected, dict) or expected.get("thread") != thread
+            or (expected.get("chat") or home_chat(cfg)) != chat):
+        return
+    with _marks_lock():
+        data = closed_marks()
+        if data.get(session) == expected:
+            data.pop(session)
+            _write_marks(data)
+
+
 def _valid_at(mark: dict) -> Optional[float]:
     at = mark.get("at")
     if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at) or at <= 0:

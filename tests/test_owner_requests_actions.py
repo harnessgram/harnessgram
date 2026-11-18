@@ -69,6 +69,18 @@ def test_duplicate_completion_is_rejected_without_a_second_note(ledger, action):
     assert len(cfg.calls) == 2 and current(ledger) == before
 
 
+def test_drop_action_disappears_from_topics_but_done_remains_visible(ledger):
+    from ctb import topic_cards
+    cfg, folder = ledger
+    actions.act(cfg, 'project', 1, 'drop')
+    actions.act(cfg, 'project', 2, 'done')
+    rows = owner_requests.read(NOW, folder, history=True)
+    assert next(r for r in rows if r['id'] == 1)['note'] == 'dropped by owner'
+    cards = topic_cards.build(rows, NOW)
+    assert [c['ids'] for c in cards] == [[2]]
+    assert cards[0]['state'] == 'done'
+
+
 @pytest.mark.parametrize('action', ['done','drop'])
 def test_completion_racing_locate_is_checked_by_the_cli(ledger, monkeypatch, action):
     cfg, folder = ledger
@@ -174,16 +186,17 @@ def test_older_fold_uses_last_touch_seven_day_boundary(ledger):
     assert all(r['status'] == 'open' for r in rows)
 
 
-def test_older_only_in_collapsed_tail_with_same_actions():
+def test_long_waiting_items_fold_collapsed_with_the_same_actions():
     run_requests_js('''
-const old={...row('old',1,'owner'),older:true},fresh=row('new',2,'owner');
+const old={...row('old',1,'owner'),long:true,older:true,idle:9*86400},fresh=row('new',2,'owner');
 const host=renderRequests({requests:[old,fresh]});
-assert.equal(pick(pick(host,'requests-needs')[0],'request-row').length,1);
-const block=pick(host,'requests-older')[0];assert.equal(host.children.at(-1),block);
+const block=pick(host,'requests-fold').find(f=>f.attrs['data-requests']==='long');
 assert.equal(button(block).attrs['aria-expanded'],'false');
+assert.equal(pick(block,"request-row").length,1);
 assert.equal(pick(block,'request-actions').length,1);
-assert.equal(pick(block,'request-actions')[0].children.length,3);
+assert.equal(pick(block,'request-actions')[0].children.length,2);  // touch and drop replace the old actions
 assert.equal(pick(host,'requests-old-review').length,1);
+assert.equal(pick(pick(host,"request-groups")[0],"request-row").length,1);
 ''')
 
 
@@ -193,7 +206,7 @@ def test_requests_follow_cards_in_both_home_layouts():
     assert classic.index('cardSections') < classic.index('renderRequests')
     assert brief.index('waitBox') < brief.index('renderRequests')
     for lang in ('he','en'):
-        for key in ('requestDone','requestDrop','requestPush','requestConfirm','requestClosed','requestsOlder','requestsReviewOld','hint_cold_compact'):
+        for key in ('requestDone','requestDrop','requestPush','requestConfirm','requestClosed','hint_cold_compact'):
             assert panel_page.STRINGS[lang][key]
 
 
@@ -211,27 +224,6 @@ def handler(cfg, req, init):
     h.server = SimpleNamespace(cfg=cfg, bot_token=GOOD_TOKEN, owner_id=7)
     h.do_POST()
     return results[-1]
-
-
-def test_older_only_projects_remain_selectable_and_old_rows_obey_project_filter():
-    run_requests_js('''
-const rows=[{...row('old-only',1,'owner'),older:true},
- {...row('other-old',2,'owner'),older:true},row('fresh',3)];
-last={requests:rows};
-let host=renderRequests(last);
-const filters=pick(host,'requests-filter')[0];
-assert(pick(filters,'requests-pill-name').some(n=>n.textContent==='old-only'));
-pick(filters,'requests-pill-name').find(n=>n.textContent==='old-only').parent.click();
-host=app.children.at(-1);
-assert.equal(requestProject,'old-only');
-assert.equal(pick(pick(host,'requests-older')[0],'request-row').length,1);
-assert(text(pick(host,'requests-older')[0]).includes('old-only'));
-assert(!text(pick(host,'requests-older')[0]).includes('other-old'));
-requestProject='fresh';host=renderRequests(last);
-assert.equal(pick(host,'requests-older').length,0);
-''')
-
-
 
 
 @pytest.mark.parametrize('action', ['done','drop','push'])
@@ -320,3 +312,13 @@ def test_pushed_item_enters_existing_lead_gate_without_panel_queue(ledger, monke
     assert len(typed) == expected
     if typed:
         assert typed[0][2] == idle_lines.nudge_line('project')
+
+
+def test_touch_busy_is_a_retryable_response(ledger, monkeypatch):
+    from test_panel import signed
+    from ctb import request_sweep
+    cfg, _ = ledger
+    def busy(*args):
+        raise TimeoutError('request ledger busy')
+    monkeypatch.setattr(request_sweep, 'touch', busy)
+    assert handler(cfg, dict(project='project', id=1, action='touch'), signed()) == (503, {'error': 'unavailable'})

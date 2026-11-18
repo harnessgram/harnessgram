@@ -27,8 +27,21 @@ import pytest
 from ctb.telegram import TelegramError
 
 
+def signed_in(*names):
+    """Record the finished login addresses the bridge would have cached for profiles."""
+    import json
+    import time
+
+    from ctb.config import state_dir, write_private
+
+    write_private(state_dir() / "account-emails.json",
+                  json.dumps({name: f"{name}@example.test" for name in names}))
+    write_private(state_dir() / "account-emails-checked.json",
+                  json.dumps({name: time.time() for name in names}))
+
+
 class LiveProcessBlocked(OSError):
-    """A test tried to run tmux or claude outside a private, opted-in tmux server."""
+    """A test tried to start a live process."""
 
 
 VIOLATIONS = []  # every refused command: {"cmd", "thread", "why"}
@@ -37,8 +50,9 @@ _LOCK = threading.Lock()
 _REAL_POPEN_INIT = subprocess.Popen.__init__
 _PUBLIC_TMP = {"/tmp", "/private/tmp"}
 _SHELLS = {"sh", "bash", "zsh", "dash", "fish"}
-_CLAUDE_WORD = re.compile(r"(?:^|[\s;&|/(])claude(?:\s|$)")
+_CLAUDE_WORD = re.compile(r"(?:^|[\s;&|/(])(?:claude|codex)(?:\s|$)")
 _TMUX_WORD = re.compile(r"(?:^|[\s;&|/(])tmux(?:\s|$)")
+_LAUNCHCTL_WORD = re.compile(r"(?:^|[\s;&|/(])launchctl(?:\s|$)")
 
 
 def _argv(args):
@@ -102,14 +116,20 @@ def refusal(args, env=None, executable=None) -> str:
     if not argv:
         return ""
     name = os.path.basename(str(executable or argv[0]))
-    if name == "claude":
-        return "a real claude"
+    if name == "launchctl":
+        return "the real launchctl"
+    if name in ("claude", "codex"):
+        return "a real " + name
     if name in _SHELLS:
         rest = " ".join(argv[1:])
+        if _LAUNCHCTL_WORD.search(rest):
+            return "a shell that runs launchctl"
         if _CLAUDE_WORD.search(rest):
             return "a shell that starts claude"
         if _TMUX_WORD.search(rest):
             return "a shell that runs tmux"
+    if name == "launchctl" and len(argv) > 1 and argv[1] not in ("print", "list", "version", "help"):
+        return "launchctl that changes the user's real services"
     if name == "tmux":
         if not _STATE["private_tmux"]:
             return "tmux without the private_tmux fixture"
@@ -152,6 +172,11 @@ def pytest_configure(config):
     """Collection runs before any fixture: a test module that builds data at import time (e.g. from the Studio
     provider) must not read the owner's real config or state, so the sandbox variables are set this early too."""
     config.addinivalue_line("markers", "real_type_command: use the real inbox.type_command gate, not the plain typist")
+    if os.environ.get("CTB_REQUIRE_BROWSER") == "1":
+        try:
+            import playwright.sync_api
+        except ImportError as exc:
+            raise pytest.UsageError("CTB_REQUIRE_BROWSER=1 needs Playwright. See tests/README.md.") from exc
     root = tempfile.mkdtemp(prefix="ctb-collect-")
     for var in _SANDBOX_VARS:
         path = os.path.join(root, var.lower())
@@ -186,8 +211,20 @@ def no_state_keeping(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fresh_bot_username():
+    """panel_pin caches the bot's username per process; a test that seeds it must not hand later tests a Cockpit
+    link they did not set up (a gap-alert test rang twice when it ran after the pin tests)."""
+    from ctb import panel_pin
+    saved = dict(panel_pin._username)
+    panel_pin._username.clear()
+    yield
+    panel_pin._username.clear()
+    panel_pin._username.update(saved)
+
+
+@pytest.fixture(autouse=True)
 def no_live_processes():
-    """Fails the test in which tmux or claude was refused (also from a thread an earlier test left running)."""
+    """Fails tests that start a forbidden command, including from a leftover thread."""
     with _LOCK:
         start = len(VIOLATIONS)
     yield
@@ -195,7 +232,7 @@ def no_live_processes():
         new = VIOLATIONS[start:]
         del VIOLATIONS[start:]
     if new:
-        pytest.fail("tests must never reach the live tmux server or start claude: "
+        pytest.fail("tests must never reach live tmux, claude, or launchctl: "
                     + "; ".join(f"{v['why']} in thread {v['thread']}: {v['cmd']}" for v in new), pytrace=False)
 
 
@@ -248,6 +285,16 @@ class _RefusingKeychain:
         pass
 
 
+class _RefusingSignStore:
+    """Every test's Keychain for the decision-signing key: cannot be read, stores nothing."""
+
+    def get(self):
+        return "error", None
+
+    def add(self, seed):
+        return False
+
+
 def _refuse_google(*a, **kw):
     raise AssertionError("a test tried to reach Google")
 
@@ -257,6 +304,9 @@ def isolated(tmp_path, monkeypatch):
     """Every test gets its own config and state dirs; nothing touches the real home."""
     monkeypatch.setenv("CTB_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("CTB_STATE_DIR", str(tmp_path / "state"))
+    # Legacy feature tests exercise Telegram card delivery explicitly. Keep that test baseline without
+    # manufacturing state: tests which cover the production default remove this process-local override.
+    monkeypatch.setenv("CTB_LIVE_ACTIVITY_COCKPIT", "0")
     # no late spinner-closing timers leaking from one test into the next; its own tests turn it on
     import ctb.inbox
     monkeypatch.setattr(ctb.inbox, "TAP_GRACE", None)
@@ -298,6 +348,12 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(translate, "warm_later", lambda texts, cfg=None: False)  # never a detached process
     monkeypatch.setattr(accounts, "auth_status", lambda name, timeout=30: {})  # never run the real `claude`
     monkeypatch.setattr(accounts, "_keychain_read", lambda service, timeout=5.0: None)  # never the real Keychain
+    monkeypatch.setattr(accounts, "_keychain_item", lambda service, account, timeout=5.0: ("error", None))
+    monkeypatch.setattr(accounts, "_keychain_add", lambda service, account, secret, timeout=10.0: False)
+    # Decision signing (decision_sign.py): a Keychain that cannot be read, so answers are unsigned unless a test
+    # puts its own fake store in place.
+    from ctb import decision_sign
+    monkeypatch.setattr(decision_sign, "STORE", _RefusingSignStore())
     monkeypatch.setattr(accounts, "_http_json", lambda *a, **k: (0, {}, 0.0))  # never the network
     return tmp_path
 

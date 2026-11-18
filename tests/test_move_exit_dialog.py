@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot
+from conftest import GOOD_TOKEN, FakeBot, signed_in
 from ctb import accounts, dialogs, inbox as I, recover
 from ctb.config import Config
 
@@ -62,6 +62,7 @@ class ExitPane:
 @pytest.fixture
 def move(monkeypatch):
     accounts.add("small")
+    signed_in("main", "small")
     accounts.record(SID, "main")
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "pane_for_session", lambda s: "%1")
@@ -139,13 +140,23 @@ def test_a_limit_move_answers_the_dialog_with_one_escape_and_waits(monkeypatch, 
     assert move.killed == []                                # the process was not touched
 
 
-def test_a_manual_move_gets_the_same_escape_and_a_busy_notice(monkeypatch, move):
+def test_a_manual_move_that_cannot_exit_is_saved_for_retry(monkeypatch, move):
     pane = ExitPane()
     ok, said = run(monkeypatch, pane)
     assert ok is False and pane.keys().count("/exit") == 1 and pane.keys()[-1] == "Escape"
-    assert said == [I.t("account_move_busy_bg", lang="en")]
-    assert accounts.deferred_move(SID) is None              # a manual move is not retried on its own
+    assert said == [I.t("account_move_waits", lang="en")]
+    assert accounts.deferred_move(SID)["manual"] is True
     assert move.killed == []
+
+
+def test_the_move_worker_keeps_manual_intent_when_it_has_to_wait_again(monkeypatch, move):
+    accounts.defer_move(SID, "small", origin="main", limit=LIMIT, manual=True)
+    monkeypatch.setattr(accounts, "auto_enabled", lambda: False)
+    pane = ExitPane()
+    ok, said = run(monkeypatch, pane, defer=True, limit=LIMIT)
+    assert ok is False and said == []
+    assert accounts.deferred_move(SID)["manual"] is True
+    assert "2" not in pane.keys() and move.killed == []
 
 
 def test_the_dialog_is_never_answered_with_a_kill_even_at_a_limit(monkeypatch, move):

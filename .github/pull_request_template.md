@@ -2,6 +2,8 @@
 
 <!-- Plain English: the problem, then the change. One topic per pull request. -->
 
+CI class: Low / Medium / High — <!-- Choose one class and give a one-sentence reason. -->
+
 ## Checklist
 
 - [ ] A test that fails without this change (or a note on why none is possible).

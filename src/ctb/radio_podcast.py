@@ -1,13 +1,12 @@
-"""The radio's podcast queue: the owner puts an episode on the air, the radio's own talk waits, then goes on.
+"""The radio's private podcast queue and safely fetched owner-chosen RSS feeds.
 
 Sources: the owner's feed list (config `radio_podcasts`, default empty) and single episode links. A feed is read
 safely (https only, a size and a time limit, redirects checked hop by hop, and every address a name resolves to
 must be a public one, checked on the very connection that is used, so a name that changes its answer between a
 check and a connection cannot reach a private address). The queue is a small private file shared by the Cockpit,
 the `/podcast` command and the radio's job; the job (`Player`) downloads the head of the queue into a private
-cache (size capped, cleaned), decodes it with ffmpeg and hands it to the radio's mixer as a "show": while a show
-is attached the mixer plays it instead of the bed and the radio's queued clips wait (the clip on the air is never
-cut); when it ends or is stopped the bed fades in and the waiting clips go on.
+cache (size capped, cleaned), decodes it with ffmpeg and hands it to the private mixer as a "show". The station's
+PrivateMixer ducks it under speech immediately; the older standalone Mixer retains its exclusive-show behavior.
 
 Safety:
 - every episode passes the radio's child-suitability rules (`radio.room_suitability_file`, the same file the
@@ -15,15 +14,17 @@ Safety:
   never queued; a configured rule file that cannot be read refuses every episode (as it closes the rooms);
 - the audio is never spoken text of the radio: nothing about an episode reaches the captions, the headline or the
   alerts channel;
-- podcast audio goes to the owner's private Telegram radio only. The staff edition on YouTube
-  (radio_youtube / radio_staff) is a separate job with its own mixer and a deny-by-default allowlist that has no
-  audio section; it never imports this module, so an episode is never mirrored there (a test holds this).
+- episodes reach only the private listening HLS. The group uses SpeechMixer, and the YouTube mirror reads
+  public-hls, which contains only station speech. Neither route reads the private mix, even between episodes.
+- agent-created local media (radio_agent.py) uses that same private player. Its guarded file and fingerprint are
+  checked again immediately before decode, and its announcement is spoken before playback.
 """
 from __future__ import annotations
 
 import collections
 import email.utils
 import fcntl
+import functools
 import hashlib
 import html
 import http.client
@@ -332,7 +333,7 @@ def parse_feed(data: bytes, feed_url: str = "", feed_name: str = "") -> List[dic
             check_url(audio)
         except PodcastError:
             continue
-        if not (kind.startswith("audio/") or _AUDIO_EXT.search(urllib.parse.urlsplit(audio).path)):
+        if not (kind.startswith("audio/") or (not kind and _AUDIO_EXT.search(urllib.parse.urlsplit(audio).path))):
             continue
         guid = _text(item, "guid") or audio
         explicit = (_text(item, "explicit") or _text(channel, "explicit")).lower() in ("yes", "true", "explicit")
@@ -363,7 +364,29 @@ def feeds(cfg: Config) -> List[dict]:
             except PodcastError:
                 continue
             out.append({"name": plain(v["name"], 60), "url": v["url"]})
+    from .config import read_map
+    saved = read_map(folder() / "feeds.json")
+    out = [f for f in out if saved.get(f["url"]) is not False]
+    for url, on in saved.items():
+        if on is not True or any(f["url"] == url for f in out):
+            continue
+        try:
+            check_url(url)
+        except PodcastError:
+            continue
+        out.append({"name": plain(urllib.parse.urlsplit(url).hostname, 60), "url": url})
     return out[:20]
+
+
+def set_feed(cfg: Config, url: str, on: bool) -> List[dict]:
+    """An explicit owner choice; never edit or reload the bridge configuration."""
+    from .config import locked_map
+    check_url(url)
+    if on and len(feeds(cfg)) >= 20 and not any(f["url"] == url for f in feeds(cfg)):
+        raise PodcastError("full")
+    with locked_map(folder() / "feeds.json", keep=1000) as saved:
+        saved[url] = on
+    return feeds(cfg)
 
 
 def find_feed(cfg: Config, ref: str) -> Optional[dict]:
@@ -400,6 +423,26 @@ def _checker_says_ok(path: Path, text: str) -> bool:
         return False
 
 
+def _file_stamp(path: Path) -> tuple:
+    try:
+        st = path.stat()
+        return str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+    except OSError:
+        return str(path), None
+
+
+def _rules_stamp(cfg: Config) -> tuple:
+    from . import radio
+    custom = radio.settings(cfg).get("room_suitability_file") or ""
+    return _file_stamp(_checker_path(cfg)), _file_stamp(Path(os.path.expanduser(custom))) if custom else ()
+
+
+@functools.lru_cache(maxsize=256)
+def _checker_verdict(path: Path, stamp: tuple, text: str) -> bool:
+    """Cache by exact text and checker revision; a replaced or edited checker gets a fresh verdict."""
+    return _checker_says_ok(path, text)
+
+
 _LETTERS_OUTSIDE = re.compile("[^\\W\\d_a-zA-Z\u00C0-\u024F\u0590-\u05FF]")
 
 
@@ -431,7 +474,7 @@ def gate(cfg: Config, title: str, description: str, explicit: bool = False) -> N
     normalized = _SUIT_NORM.sub("", text.replace("\u05BE", " "))
     if _LETTERS_OUTSIDE.search(text):
         raise PodcastError("unsuitable")  # a script no rule covers
-    if not _checker_says_ok(path, text):
+    if not _checker_verdict(path, _file_stamp(path), text):
         raise PodcastError("unsuitable")
     if re.search("[a-zA-Z]", text) and radio_suitability.FALLBACK.search(normalized):
         raise PodcastError("unsuitable")
@@ -493,16 +536,19 @@ def update(fn: Callable[[dict], object]):
         return result
 
 
-def add_episode(cfg: Config, ep: dict, now: Optional[float] = None) -> dict:
-    """Queue one parsed episode after the suitability gate. PodcastError: explicit | notext | rules | unsuitable |
-    url | dup | full."""
+def prepare_episode(cfg: Config, ep: dict, now: Optional[float] = None) -> dict:
+    """Check intake metadata off the controller path, before handing it a ready queue item."""
     raw = ep.get("raw_title", ep.get("title", ""))
     gate(cfg, raw, ep.get("description", ""), bool(ep.get("explicit")))
     check_url(ep.get("audio_url"))
     item = {"id": ep["id"], "title": plain(ep.get("title"), MAX_TITLE) or "?", "raw_title": plain(raw, MAX_TITLE),
             "desc": plain(ep.get("description"), MAX_DESC), "feed": plain(ep.get("feed"), 60),
             "url": ep["audio_url"], "seconds": int(ep.get("seconds") or 0), "added": int(now or time.time())}
+    return item
 
+
+def _queue_episode(item: dict) -> dict:
+    """Enqueue already checked intake metadata; no suitability subprocess on the control path."""
     def put(st: dict):
         if any(i["id"] == item["id"] for i in st["items"]):
             raise PodcastError("dup")
@@ -511,6 +557,33 @@ def add_episode(cfg: Config, ep: dict, now: Optional[float] = None) -> dict:
         st["items"].append(item)
     update(put)
     return item
+
+
+def add_episode(cfg: Config, ep: dict, now: Optional[float] = None) -> dict:
+    """Queue one parsed episode after the suitability gate. PodcastError: explicit | notext | rules | unsuitable |
+    url | dup | full."""
+    return _queue_episode(prepare_episode(cfg, ep, now))
+
+
+def add_local(cfg: Config, item: dict) -> dict:
+    """Queue media already guarded and approved by radio_agent. PodcastError: dup | full."""
+    fresh = {"id": item["id"], "title": plain(item.get("title"), MAX_TITLE) or "?",
+             "raw_title": str(item.get("title") or "")[:MAX_TITLE], "text": str(item.get("text") or ""),
+             "desc": plain(item.get("text"), MAX_DESC), "feed": plain(item.get("project"), 60), "url": "",
+             "seconds": int(item.get("seconds") or 0), "added": int(item.get("added") or time.time()),
+             "agent": True, "approved": item.get("approved") is True}
+    if isinstance(item.get("path"), str) and item["path"]:
+        fresh["path"], fresh["fingerprint"] = item["path"], item.get("fingerprint")
+    if item.get("announce"):
+        fresh["announce"] = plain(item["announce"], 200)
+    def put(st: dict):
+        if any(i["id"] == fresh["id"] for i in st["items"]):
+            raise PodcastError("dup")
+        if len(st["items"]) >= MAX_QUEUE:
+            raise PodcastError("full")
+        st["items"].append(fresh)
+    update(put)
+    return fresh
 
 
 _META = re.compile(r"<meta\b[^>]*>", re.I)
@@ -670,6 +743,12 @@ def prune_cache(cache: Path, max_bytes: int = CACHE_MAX_BYTES, days: float = CAC
                 pass
 
 
+def _agent_cache_keep() -> frozenset:
+    """Owned local copies remain durable for as long as their queue entries do."""
+    return frozenset(i["id"] + ".audio" for i in _read()["items"]
+                     if i.get("agent") and not i.get("path") and isinstance(i.get("id"), str))
+
+
 # --- decoding and playing ---------------------------------------------------------------------------------------
 
 FORMATS = "mp3,mov,mp4,m4a,ogg,wav,aac,flac,matroska,webm,opus,adts,ac3"   # audio containers only: no playlists
@@ -755,8 +834,9 @@ class Feed:
 class _Download:
     """One episode being fetched on its own thread, so a slow download never holds up stop, skip or remove."""
 
-    def __init__(self, item: dict, dest: Path, get: Callable):
+    def __init__(self, item: dict, dest: Path, get: Callable, cfg: Optional[Config] = None):
         self.item, self.dest = item, dest
+        self.cfg, self.approval = cfg, None
         self.cancel = threading.Event()
         self.done = threading.Event()
         self.error = ""
@@ -764,8 +844,13 @@ class _Download:
 
     def _run(self, get: Callable) -> None:
         try:
+            self._approve()
+            if self.cancel.is_set():
+                return
             if not self.dest.exists() or self.dest.stat().st_size == 0:
                 get(self.item["url"], self.dest, cancel=self.cancel)
+            if self.cfg is not None and self.approval != _rules_stamp(self.cfg):
+                self._approve()  # rules may have changed during the download
         except PodcastError as e:
             self.error = e.kind
         except Exception:  # noqa: BLE001
@@ -775,25 +860,38 @@ class _Download:
                 self.dest.unlink(missing_ok=True)
             self.done.set()
 
+    def _approve(self) -> None:
+        if self.cfg is not None:
+            stamp = _rules_stamp(self.cfg)
+            title, desc = episode_text(self.item)
+            gate(self.cfg, title, desc)
+            if stamp != _rules_stamp(self.cfg):
+                raise PodcastError("rules")
+            self.approval = stamp
+
 
 class Player:
-    """The radio job's side: one `step()` a second turns the queue file into sound on the mixer. While an
-    episode is audible a marker file says so (radio.private_audio_on), so the YouTube mirror, which reads the
-    home radio's audio, holds instead of carrying it."""
+    """One `step()` a second turns the private queue into sound. The legacy audible marker is status only;
+    copyright isolation is enforced by separate sources, not an expiring marker."""
 
     def __init__(self, mixer, lock, blocked: Callable[[], bool] = lambda: False,
                  get: Optional[Callable] = None, make: Callable[[str], Feed] = Feed,
-                 clock: Callable[[], float] = time.time, cfg: Optional[Config] = None):
+                 clock: Callable[[], float] = time.time, cfg: Optional[Config] = None,
+                 announce: Optional[Callable[[str], object]] = None):
         self.mixer, self.lock, self.blocked, self.make, self.clock = mixer, lock, blocked, make, clock
-        self.cfg = cfg  # the suitability rules are applied again with it just before an episode is played
+        self.cfg = cfg  # checks run on the download worker; step only consumes its cached verdict
         self.get = get or (lambda url, dest, cancel=None: download(url, dest, cancel=cancel))
+        self.announce = announce
+        self.owned = True
+        self.said_at: Optional[float] = None
         self.cur: Optional[dict] = None
         self.feed: Optional[Feed] = None
         self.dl: Optional[_Download] = None
         self.path: Optional[Path] = None
+        self.agent_checked = False
         st = _read()
         self.seen = (st["skip"], st["stop"])
-        prune_cache(cache_dir())
+        prune_cache(cache_dir(), keep=_agent_cache_keep())
         self._mark(False)
         update(lambda s: s.update(status={}))
 
@@ -827,16 +925,20 @@ class Player:
 
     def _finish(self, drop: bool) -> None:
         item = self.cur
+        if drop and item is not None and self.feed is not None and self.feed.played > 0:
+            from .config import locked_map
+            with locked_map(folder() / "played.json", keep=100000) as played:
+                played[item["id"]] = self.clock()
         self._detach()
         if self.dl is not None:
             self.dl.cancel.set()
             self.dl = None
-        if self.path is not None:
+        if self.path is not None and self.owned and (drop or not (item or {}).get("agent")):
             self.path.unlink(missing_ok=True)
-        self.cur, self.path = None, None
+        self.cur, self.path, self.owned, self.said_at, self.agent_checked = None, None, True, None, False
         if item is not None and drop:
             update(lambda st: _drop(st, item["id"]))
-        prune_cache(cache_dir())
+        prune_cache(cache_dir(), keep=_agent_cache_keep())
 
     def stop_all(self) -> None:
         """The radio is going quiet (mirroring off, the job ending): nothing plays; the queue stays."""
@@ -850,24 +952,34 @@ class Player:
         if error:
             status["error"] = error
         update(lambda st: st.update(status=status))
+        if state == "playing" and status.get("title"):
+            # The existing private listen page exposes this as timed metadata to
+            # the iPhone lock screen; public outputs never read this file.
+            from . import radio, radio_now
+            if radio_now.read(radio.folder()).get("title") != status["title"]:
+                radio_now.publish(radio.folder(), status["title"])
 
     def _begin(self, item: dict) -> None:
-        """Start fetching the head of the queue; `step` goes on when the download is done. The suitability rules
-        are applied again first, so a word list changed since the episode was queued still holds."""
+        """Check and fetch on the worker; stop, skip and quiet-window control never wait for a checker."""
         self.cur = item
-        if not self._still_suitable(item):
+        if item.get("agent"):
+            self.path = Path(item["path"]) if item.get("path") else cache_dir() / (item["id"] + ".audio")
+            self.owned = not bool(item.get("path"))
+            self.dl = None
+            self._publish("downloading")
             return
         self.path = cache_dir() / (item["id"] + ".audio")
-        self.dl = _Download(item, self.path, self.get)
+        self.dl = _Download(item, self.path, self.get, self.cfg)
         self._publish("downloading")
 
     def _attach(self) -> bool:
         """The download is done: decode it and put it on the mixer. False when it failed."""
         dl, self.dl = self.dl, None
-        if dl.error:
+        if dl is not None and dl.error:
             self._failed(dl.error)
             return False
-        if self.cur is not None and not self._still_suitable(self.cur):  # the last look, right before it is heard
+        if dl is not None and self.cfg is not None and dl.approval != _rules_stamp(self.cfg):
+            self.dl = _Download(self.cur, self.path, self.get, self.cfg)  # recheck off-thread before attaching
             return False
         try:
             feed = self.make(str(self.path))
@@ -878,22 +990,46 @@ class Player:
             self._failed("decode")
             return False
         feed.paused = _read()["paused"]
-        self._mark(not feed.paused)  # before it can be heard: the mirror must already be holding
+        self._mark(not feed.paused)
         self.feed = feed
         with self.lock:
             self.mixer.show = feed
         return True
 
-    def _still_suitable(self, item: dict) -> bool:
-        if self.cfg is None:
-            return True
-        title, desc = episode_text(item)
-        try:
-            gate(self.cfg, title, desc)
-        except PodcastError as e:
-            self._failed(e.kind)
+    def _agent_ok(self, item: dict) -> bool:
+        """Final guard: switch, path policy, fingerprint, and suitability immediately before decode."""
+        from . import radio_agent
+        if self.cfg is not None and not radio_agent.enabled(self.cfg):
             return False
-        return True
+        if item.get("path"):
+            try:
+                radio_agent.check_file(self.cfg, item["path"])
+            except radio_agent.AgentMediaError:
+                return False
+            if not radio_agent.unchanged(item):
+                return False
+        return item.get("approved") is True or radio_agent.judged(str(item.get("raw_title") or ""),
+                                                                  str(item.get("text") or ""))
+
+    def _agent_ready(self) -> bool:
+        item = self.cur or {}
+        if item.get("announce") and self.announce is not None:
+            now = self.clock()
+            if self.said_at is None:
+                self.said_at = now
+                try:
+                    self.announce(item["announce"])
+                except Exception:  # noqa: BLE001 - speech failure must not strand the queue
+                    self.said_at = now - 45
+            if now - self.said_at < 45 and (now - self.said_at < 1 or self.mixer.pending()):
+                self._publish("downloading")
+                return False
+        if not self.agent_checked:
+            if not self._agent_ok(item):
+                self._failed("unsuitable")
+                return False
+            self.agent_checked = True
+        return self._attach()
 
     def _failed(self, kind: str) -> None:
         self._finish(drop=True)
@@ -919,6 +1055,9 @@ class Player:
                 self._publish("downloading")
                 return
             if not self._attach():
+                return
+        elif self.cur is not None and self.feed is None and self.cur.get("agent"):
+            if not self._agent_ready():
                 return
         if self.feed is not None:
             self.feed.paused = st["paused"]  # a paused episode leaves the mix: the radio's talk goes on

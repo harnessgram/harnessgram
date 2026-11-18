@@ -57,7 +57,7 @@ def write_usage(name: str, five_hour: float, weekly: float, five_resets: float =
         "weekly": weekly,
         "five_hour_resets": five_resets,
         "weekly_resets": weekly_resets,
-        "at": at or "2026-11-01T00:00:00Z"
+        "at": at or iso(five_resets - 3600 if five_resets else weekly_resets - 86400)
     }
     write_private(accounts.usage_path(name), json.dumps(data))
 
@@ -413,7 +413,7 @@ def test_stop_failure_keeps_a_newer_turn_and_ignores_agents(monkeypatch, tmp_pat
     assert states == []
 
 
-def test_big_plan_shows_no_five_hour_anywhere():
+def test_big_plan_shows_reported_five_hour_window():
     now = 1_000_000.0
     setup_account("ultra", "ultra@example.com", "default_claude_max_20x")
     write_usage("ultra", 0, 47, five_resets=now + 3600, weekly_resets=now + 86400, at=iso(now - 60))
@@ -423,14 +423,12 @@ def test_big_plan_shows_no_five_hour_anywhere():
         assert "47%" in qline and "5h" not in qline and "5 שעות" not in qline
         kb = M.live_keyboard(qline, lang=lang)
         assert "⏱️" not in " ".join(b["text"] for b in kb["keyboard"][0])
-    assert usage.claude_five_hour(account="ultra", now=now) is None
-    assert not any(w == "5h" for w, _, _, _ in usage.quota_rows(account="ultra", now=now))
-    assert "5h" not in "\n".join(usage.quota_lines(account="ultra", now=now))
+    assert usage.claude_five_hour(account="ultra", now=now) == 0
+    assert any(w == "5h" and p == 0 for w, _, p, _ in usage.quota_rows(account="ultra", now=now))
+    assert "5 hours" in "\n".join(usage.quota_lines(account="ultra", now=now, lang="en"))
 
 
-def test_every_account_shows_the_weekly_number_only():
-    # 2026-11-10: the plans have no 5-hour limit, only weekly (plus banked resets); even a record that
-    # still carries a 5-hour reading shows the weekly number alone.
+def test_account_shows_reported_five_hour_in_quota_rows():
     now = 1_000_000.0
     setup_account("pro1", "pro1@example.com", "default_claude_max_5x")
     write_usage("pro1", 12, 47, five_resets=now + 3600, weekly_resets=now + 86400, at=iso(now - 60))
@@ -439,4 +437,4 @@ def test_every_account_shows_the_weekly_number_only():
     assert "5 שעות" not in qline and "שבועית 47%" in qline and "↻" in qline
     kb = M.live_keyboard(qline, lang="he")
     assert "⏱️" not in " ".join(b["text"] for b in kb["keyboard"][0])
-    assert not any(w == "5h" for w, _, _, _ in usage.quota_rows(account="pro1", now=now))
+    assert any(w == "5h" and p == 12 for w, _, p, _ in usage.quota_rows(account="pro1", now=now))

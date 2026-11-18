@@ -6,6 +6,113 @@ change a setting or a command, and the change is listed here under "Changed" or 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-19
+
+### Added
+- Local MCP server for bridge automation: run over `stdio` or loopback HTTP with a Keychain bearer token to
+  list sessions, read replies, check status/cards/requests, send rate-limited messages, and answer routine
+  questions.
+- Questions and plan approvals from the phone: `AskUserQuestion` and plan-approval prompts now route through
+  `ctb hook-permission`, preserving the full original tool input for Telegram and Cockpit answers.
+- iOS Live Activity pushes: optional `live-activity` extra drains updates over APNs on heartbeat, adds token
+  and problem-report routes, checks HTTP/2 in `harnessgram doctor`, and windows up to 12 steps under 4 KB.
+- Emergency API credit mode: resume a usage-limited session on prepaid API credit via `apiKeyHelper` with one
+  tap in the topic or Cockpit, bounded by configurable daily spending caps and returning on reset.
+- Stuck-command phone rescue: foreground commands stalled for 3 minutes post a card with **Move to background**
+  (`Ctrl+B`) and **Stop** actions, paired with a `PreToolUse` advisory for long-running commands.
+- Codex CLI `app-server` transport (off by default): supports prompt delivery, `/compact`, approval guards,
+  localized failure notices when queued sends do not arrive, and detached server persistence on shutdown.
+- Headless session runner (behind a feature switch): runs API-key sessions using transcript UUIDs as delivery
+  truth for idempotent, crash-safe delivery, kernel peer-UID socket checks, and tool-aware stall detection.
+- Cockpit voice co-pilot (off by default): owner-only Gemini Live proxy and Tower page (`docs/voice-copilot.md`)
+  with read-only tools, daily/session time caps, and `relay_message` for forwarding your transcribed words.
+- Context-aware Cockpit home modes (off by default): `home_context` add-on computes the active mode
+  (`shabbat`, `night`, `family`, `morning`, `work`, `away`, `default`) and displays a mode chip in the header.
+- Cockpit Agent Packs (`/api/packs`, `/api/packs-edit`): transparency cards showing targets and excerpts,
+  revision-checked one-tap switching with automatic undo, and validated skill export. See `docs/panel.md`.
+- Hourly topic schedule and proactive day assistant: private calendar-anchored timeline (swap, extend, skip)
+  with private-stream bulletins, bounded daily reads, confirm-gated reminders, and spoken day summaries.
+- Private radio music, podcasts, and program grid: `ctb radio music add|list|like|skip` or `/music` private
+  audio on `private-hls`, ducking under speech, plus a program grid and fingerprint-bound agent media asks.
+- Hourly radio news edition (off by default): `news_edition_enabled` reads up to 20 broadcast channels, scrubs
+  and summarizes posts with suitability checks, and queues private-stream bulletins under a separate sub-cap.
+- Custom project artwork and My Music tile: `ctb art set|clear|missing` and a Cockpit upload sheet (512px via
+  Pillow or `sips`), plus an owner-only `/api/my-music` tile (`youtube-nocookie.com`) that ducks on broadcasts.
+- Default thinking level, working emoji, and widget summary: Cockpit Settings can update `settings.json`
+  effort levels across Claude profiles, toggle a session-activity topic emoji, toggle `appSwitches`, and serve
+  a `today` summary block with deep links in `/api/widget-state`.
+- Automatic progress cards and open-lines reminders: generates activity-based cards (with offline NLLB title
+  translation) and attaches nonce-fenced open-work summaries to session messages so in-flight work keeps moving.
+- Command topics, demo mode, and slow-state timing: bind a forum topic to a serial local command, run a
+  synthetic-data demo bridge (`429` pairing throttle), and log `/api/state` step timings over 3s to `launchd`.
+
+### Changed
+- Grouped Cockpit Requests and slim state payloads: group tracked requests by project (5 per group), fold
+  7-day untouched items, auto-close on linked PR/issue completion while retaining finished items for 7 days,
+  and fetch full details on demand.
+- Local-first radio voice and shared speech budget: `radio.voice_route` now defaults to `"local"` (`tts_command`
+  then system voice), reserving `"cloud"` routes with monthly free-tier caps for explicit opt-in; car-mode
+  summaries and the Listen button share the radio's voice settings and budget.
+- Routine Gemini routing and usage logging: step titles, interim prose, notices, cards, topic names, and radio
+  prompts now start on `gemini_routine_model` before falling back to `gemini_model`, and `gemini-usage.log`
+  records the model, calling feature, and request hash.
+- Live keyboard and Teams usage display: the Telegram keyboard shows context size without percentages and
+  prioritizes the short active usage window (showing the weekly window at 90% or above); the Teams card lists
+  both usage windows per profile.
+- Direct decision links and unified waiting counts: pending decisions, choices, and questions include exact
+  Telegram message links (with a **Go to message** Cockpit button), and one server count stays synchronized
+  across the Cockpit, widget, keyboard, pin, and menu button.
+- Quiet Claude Code notices and Hebrew copy: `✦ Heads up` suggestion notices relay once as quiet interactive
+  cards instead of blocking approvals, other notices relay Hebrew-first without terminal tips/padding, and
+  Hebrew Cockpit screens use consistent aviation wording.
+- Pinned board cleanup, classic return card, and icons: superseded build reminders and closed tracked-item
+  reminders auto-clear unless marked permanent **Keep**, old board pins migrate to link to the Cockpit pin,
+  the classic Cockpit shows a one-tap return card, and Cockpit PWA/browser icons are refreshed.
+
+### Fixed
+- Reply delivery and flood-gate yielding: reply outbox draining waits through short Telegram flood gates (up to
+  30s per gate, 60s per round) instead of skipping the round, and optional status or progress edits yield to a
+  chat while owner replies are queued.
+- Terminal typing, dialogs, and `/compact` safety: automated typing uses `terminal-input.lock`, verifies process
+  identity and typed text before `Enter`, offers **Send**/**Clear** for unsent drafts, handles Hebrew yes/no
+  and enlarged (`200x60`) permission dialogs, recognizes titled bottom prompt rules, and deduplicates `/compact`.
+- Usage-limit recovery and safe session moves: newer below-limit readings or completed turns clear stale limit
+  states, session moves fail closed unless the target profile has a verified completed sign-in, and messages to
+  limited sessions trigger or retry moves reliably.
+- Boot vs. crash revival and install LaunchAgent health: system reboots rebind full session records and retry
+  failed reopens up to 3 times instead of triggering crash recovery, `harnessgram install` and `harnessgram doctor`
+  verify and reload dead `KeepAlive` LaunchAgents, and panel startup refreshes installed Studio apps in `python -I`.
+- Live Activity APNs key decoding and queue resilience: normalized hex-encoded, escaped, and bare-base64 `.p8`
+  keys read from Keychain, isolated failing pushes so the queue keeps draining, recorded delivery per card
+  generation, and stopped repeating topic prefixes in lock-screen titles.
+- Cockpit scroll stability, mobile layout, and UI redraws: stopped poll scroll jumps, fixed full-screen
+  card image sizing and portrait grids, forced local UI picker redraws, fixed `settleAndRestore` strict-mode
+  errors, opened deep-linked folds, improved narrow request rows (`44px` buttons), and fixed Mini App safe areas.
+- Cockpit Hebrew translation and Gemini cache reliability: chunked translations above 1,600 characters, fixed
+  mixed/non-Latin detection and RTL isolates while keeping English pages untouched, added tier-scoped cache
+  keys with wrong-script/echo fallbacks, and deduplicated concurrent translations and step-title lookups.
+- Stretched vertical video mirrors: video uploads now pass `ffprobe` width and height (with rotation and sample
+  aspect ratio applied) to `sendVideo` and drop those fields cleanly on document fallback.
+- Radio stream continuity and player truth: kept HLS readers alive across restarts without replaying retired
+  playlists, restarted stalled segmenters after 15s and stale radio processes once per build, auto-stopped
+  idle private streams, and made Cockpit and Safari players report real audio progress.
+- Non-interactive Keychain, permission cleanup, and Hebrew hint: unified Keychain reads with 5s timeouts and
+  30-minute cooldowns to avoid GUI prompts, retired answered or expired permission cards cleanly, fixed the
+  inverted Hebrew `pq_reply_needed` hint, fixed session renames under locks, and fixed app-delivery checks.
+
+### Security
+- Per-session MCP binding: over HTTP every call carries a per-session HMAC bearer token and
+  `X-Harnessgram-Session`; a bound caller sees and answers only its own sessions, cards and decisions, matched on
+  the full session ID. Unbound `stdio` callers are scoped in a later release.
+- Ed25519-signed decision answers: answered control-panel decisions record an `answer_sig` signature over the
+  payload and verified responder identity/route using a Keychain-backed key (optional `sign` extra), verifiable
+  with `ctb decide public-key`.
+- Per-install committee key and signed filter policies: replaced the hardcoded committee key with per-install
+  `filter_committee_key` configuration (refusing publication when unset) and added signed filter policy storage.
+- Scoped topic pins, HMAC widget links, and export guards: topic pins carry only aggregate counts, widget
+  deep links use installation-keyed HMAC tokens (`request-links.key`), and pack skill exports reject symlinks,
+  non-UTF-8 files, secrets, contact details, and writes into agent config directories.
+
 ## [0.4.0] - 2026-11-16
 
 ### Added

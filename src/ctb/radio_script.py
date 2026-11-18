@@ -723,7 +723,7 @@ def build_script(snap: dict, last: dict, names: Dict[str, str], lang: str = "he"
     said = set(last.get("attention") or [])
     he = lang == "he"
     out: List[str] = []
-    out.append(f"רדיו הצוות, השעה {clock_he(when.tm_hour, when.tm_min)}." if he else
+    out.append(f"שידורי הקוקפיט, השעה {clock_he(when.tm_hour, when.tm_min)}." if he else
                f"Team radio, {when.tm_hour}:{when.tm_min:02d}.")
 
     attention, old = waiting_split(snap)
@@ -884,7 +884,7 @@ def card_foot(snap: dict, quota_rows: List[dict]) -> str:
 # --- the card's captions ----------------------------------------------------------------------
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
-_GREETING = re.compile(r"^(?:רדיו הצוות, השעה [^.]*|Team radio, [^.]*|עדכון קצר|A short update)\.\s*")
+_GREETING = re.compile(r"^(?:שידורי הקוקפיט, השעה [^.]*|Team radio, [^.]*|עדכון קצר|A short update)\.\s*")
 
 
 def caption_chunks(text: str, limit: int = 120) -> List[str]:

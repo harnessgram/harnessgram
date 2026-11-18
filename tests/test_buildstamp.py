@@ -63,7 +63,21 @@ def test_this_package_has_a_stamp():
 
 # --- what each service started with ---------------------------------------------------------------------------
 
-def test_a_service_running_older_code_is_named_and_a_clean_exit_clears_it():
+@pytest.fixture
+def fake_process_identity(monkeypatch):
+    """A deterministic process identity, also in sandboxes that cannot read `ps`. No OS process probe."""
+    pid = os.getpid()
+    monkeypatch.setattr(B, "_proc_start", lambda value: "fake-start" if value == pid else "")
+
+    def exists(value, sig):
+        assert sig == 0
+        if value != pid:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(B.os, "kill", exists)
+
+
+def test_a_service_running_older_code_is_named_and_a_clean_exit_clears_it(fake_process_identity):
     B.record_running("heartbeat", stamp="old", pid=os.getpid())
     B.record_running("panel", stamp="new", pid=os.getpid())
     assert B.stale(current="new") == ["heartbeat"]
@@ -95,7 +109,7 @@ def test_a_malformed_record_file_never_breaks_doctor_and_never_warns():
         assert B._alive(pid, "Mon Jan  1 00:00:00 2026") is False, pid  # no OverflowError, no TypeError
 
 
-def test_a_reused_pid_is_not_the_service():
+def test_a_reused_pid_is_not_the_service(fake_process_identity):
     """The service crashed and the system gave its pid to another process: no warning."""
     B.record_running("heartbeat", stamp="old", pid=os.getpid())
     rows = json.loads((C.state_dir() / B.RUNNING).read_text())

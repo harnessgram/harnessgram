@@ -10,7 +10,7 @@ from ctb.telegram import TelegramError
 def sends(monkeypatch):
     calls = []
     monkeypatch.setattr(C, "load", lambda: Config(bot_token=GOOD_TOKEN, owner_chat_id=1))
-    monkeypatch.setattr(mirror, "run_file", lambda cfg, title, session, path, caption, audio_title, performer: calls.append((title, session)) or 0)
+    monkeypatch.setattr(mirror, "run_file", lambda cfg, title, session, path, caption, audio_title, performer, **_: calls.append((title, session)) or 0)
     return calls
 
 

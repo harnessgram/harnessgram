@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs><linearGradient id="night" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#233C55"/><stop offset="1" stop-color="#101B2D"/></linearGradient></defs>
+  <rect width="1024" height="1024" fill="url(#night)"/>
+</svg>

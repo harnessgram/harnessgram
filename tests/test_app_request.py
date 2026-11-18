@@ -108,6 +108,33 @@ def test_last_json_line_wins_and_text_is_cleaned():
     assert got["app"] == "New name" and got["reason"] == "line one"
 
 
+@pytest.mark.parametrize("status,delivery,expected", [("approved", False, False), ("approved", True, True),
+                                                       ("pending_device", True, False), ("open", False, False),
+                                                       ("open", True, True)])
+def test_delivery_status_reaches_telegram(status, delivery, expected):
+    result = app_request.interpret(0, json.dumps({"status": status, "delivered": delivery,
+                                                  "until": "2026-11-14T12:35:00Z"}))
+    assert result["state"] == "approved" and result["delivered"] is expected
+    he = app_request.telegram_lines(result, "he")[0]
+    en = app_request.telegram_lines(result, "en")[0]
+    if expected:
+        assert "פתוח להתקנה עד" in he and "open for installing until" in en
+    else:
+        assert he == "אושר - ממתין שהאייפון יקבל את פתיחת החנות"
+        assert en == "Approved - waiting for the iPhone to receive the App Store opening"
+        assert "פתוח להתקנה" not in he and not any(c.isascii() and c.isalpha() for c in he)
+
+
+def test_legacy_approval_and_invalid_delivery_values():
+    legacy = app_request.interpret(0, '{"status":"approved"}')
+    assert "delivered" not in legacy
+    assert "פתוח להתקנה" in app_request.telegram_lines(legacy, "he")[0]
+    for value in (None, 0, "true"):
+        result = app_request.interpret(0, json.dumps({"delivered": value}))
+        assert result["delivered"] is False
+        assert "פתוח להתקנה" not in app_request.telegram_lines(result, "he")[0]
+
+
 def test_long_fields_are_cut():
     got = app_request.interpret(2, json.dumps({"app": "a" * 1000, "reason": "r" * 5000}))
     assert len(got["app"]) == 120 and len(got["reason"]) == 400
@@ -475,3 +502,15 @@ def test_the_connection_limit_still_applies_to_bad_input(make_server, tmp_path, 
         pass
     assert time.monotonic() - started < 5
     conn.close()
+
+
+@pytest.mark.parametrize("code", [1, 2, 3, 4, None])
+def test_status_never_turns_a_refusal_or_error_into_an_approval(code):
+    got = app_request.interpret(code, json.dumps({"status": "open", "delivered": True}))
+    assert got["state"] != "approved" or code == 0
+    assert "פתוח להתקנה" not in "\n".join(app_request.telegram_lines(got, "he"))
+
+
+def test_old_output_without_delivery_keeps_its_behaviour():
+    got = app_request.interpret(0, json.dumps({"status": "approved", "until": "2026-11-14T12:35:00Z"}))
+    assert "delivered" not in got and "פתוח להתקנה עד" in app_request.telegram_lines(got, "he")[0]

@@ -77,16 +77,16 @@ def run(action: str, assume_yes: bool = False, ask: Callable[[str], str] = input
     in the first 10 minutes after the bot's server instance started)."""
     from .telegram import Bot, TelegramError
     if action not in ACTIONS:
-        print(f"Harnessgram: unknown action {action!r}; use one of: {', '.join(ACTIONS)}", file=sys.stderr)
+        print(f"HarnessGram: unknown action {action!r}; use one of: {', '.join(ACTIONS)}", file=sys.stderr)
         return 2
     try:
         cfg = C.load()
         token = cfg.token()
     except C.ConfigError as e:
-        print(f"Harnessgram: {e}", file=sys.stderr)
+        print(f"HarnessGram: {e}", file=sys.stderr)
         return 1
     if action == "close" and not cfg.api_local:
-        print("Harnessgram: `close` talks to your own local Bot API server; set api_base and api_local first.",
+        print("HarnessGram: `close` talks to your own local Bot API server; set api_base and api_local first.",
               file=sys.stderr)
         return 1
     where = "Telegram's cloud server" if action == "logout" else "your local Bot API server"
@@ -102,7 +102,7 @@ def run(action: str, assume_yes: bool = False, ask: Callable[[str], str] = input
     try:
         bot.call("logOut" if action == "logout" else "close")
     except TelegramError as e:
-        print(f"Harnessgram: {safe(e.description, token)}", file=sys.stderr)
+        print(f"HarnessGram: {safe(e.description, token)}", file=sys.stderr)
         return 1
     print(f"Done: {action} sent to {where}. {AFTER[action]}")
     return 0

@@ -11,7 +11,7 @@ import re
 import threading
 import time
 
-from . import accounts, inbox, install
+from . import accounts, inbox, install, terminal_lock
 from .config import home_chat, private_dir, state_dir
 from .topics import TopicMap
 
@@ -75,7 +75,7 @@ def _restart(session, pane, pid, identity, cutoff):
     try:
         if not _idle(session, pane, pid, identity):
             return "busy"
-        if inbox.type_command(session, pane, "/exit", verify_session=True) != "sent":
+        if inbox.type_command(session, pane, "/exit", verify_session=True, guard_held=True) != "sent":
             return "busy"
         for _ in range(45):
             time.sleep(1)
@@ -171,7 +171,10 @@ def reload_sessions(cfg, session=None, dry_run=False):
                             elif dry_run:
                                 result["would_reload"].append(sid)
                             else:
-                                outcome = _restart(sid, pane, pid, started[1], cutoff)
+                                # Global order: per-session nudge guard, then terminal lock.
+                                with inbox._nudge_guard(sid):
+                                    with terminal_lock.locked():
+                                        outcome = _restart(sid, pane, pid, started[1], cutoff)
                                 if outcome == "reloaded":
                                     result["reloaded"].append(sid)
                                 else:

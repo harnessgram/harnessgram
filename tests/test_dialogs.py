@@ -84,11 +84,20 @@ class Screen:
 
     def __init__(self, body=""):
         self.body, self.sent, self.after, self.literal_args, self.sim = body, [], {}, (), None
+        self.after_resize = None
+        self.resizes = []
+        self.window_size = "@1 80 24\n"
 
     def get(self):
         return clean_raw(self.sim.render()) if self.sim is not None else self.body
 
     def tmux(self, *args):
+        if args[0] == "display-message":
+            return SimpleNamespace(returncode=0, stdout=self.window_size, stderr="")
+        if args[0] == "resize-window":
+            self.resizes.append(args)
+            if self.after_resize is not None and "200" in args:
+                self.body = self.after_resize
         if args[0] == "send-keys":
             keys = args[3:] if args[3:4] != ("-l",) else ("LIT:" + args[-1],)
             if args[3:4] == ("-l",):
@@ -784,6 +793,47 @@ def test_typed_number_or_name_selects_the_option(rig):
     assert say(rig, "yes, go live") == "dialog-typed" and rig.scr.sent == ["1"]
 
 
+def test_hebrew_yes_and_no_only_alias_exact_english_labels():
+    yes_no = {"options": [{"num": 1, "label": "Yes"}, {"num": 2, "label": "No"}]}
+    assert D._resolve("כן", yes_no) == [1]
+    assert D._resolve("כן.", yes_no) == [1]
+    assert D._resolve("לא", yes_no) == [2]
+    assert D._resolve("כן", {"options": [{"num": 1, "label": "Continue"}]}) == []
+
+
+def test_cut_permission_is_resized_and_requires_a_second_answer(rig):
+    full = fx("perm_rm_warning")
+    rig.scr.body = full[full.index(" Bash command"):]
+    rig.scr.after_resize = full
+    D.send_card(rig.cfg, rig.bot, "s", rig.thread)
+    rig.scr.after["1"] = ""
+    assert say(rig, "כן") == "dialog-cut"
+    assert rig.scr.sent == []
+    assert "Build contact sheets" in rig.bot.methods("editMessageText")[-1]["text"]
+    assert "Read the full command" in rig.bot.methods("sendMessage")[-1]["text"]
+    assert say(rig, "כן") == "dialog-typed"
+    assert rig.scr.sent == ["1"]
+    assert len(rig.scr.resizes) == 1
+
+
+def test_cut_permission_still_cut_after_resize_is_refused(rig):
+    cut = fx("perm_rm_warning")
+    cut = cut[cut.index(" Bash command"):]
+    rig.scr.body = rig.scr.after_resize = cut
+    D.send_card(rig.cfg, rig.bot, "s", rig.thread)
+    assert say(rig, "1") == "dialog-cut" and rig.scr.sent == []
+
+
+def test_cut_permission_with_unparsed_window_size_is_refused_without_resize(rig):
+    full = fx("perm_rm_warning")
+    rig.scr.body = full[full.index(" Bash command"):]
+    rig.scr.after_resize = full
+    rig.scr.window_size = "@1 unknown 24\n"
+    D.send_card(rig.cfg, rig.bot, "s", rig.thread)
+    assert say(rig, "1") == "dialog-cut" and rig.scr.sent == []
+    assert rig.scr.resizes == []
+
+
 def test_a_dialog_with_a_lasting_option_is_answered_by_typing_too(rig):
     rig.scr.body = PERMISSION
     D.send_card(rig.cfg, rig.bot, "s", rig.thread)
@@ -953,8 +1003,13 @@ def test_a_trailing_semicolon_survives_tmux(text, expected):
 def test_autopilot_types_after_double_dash(monkeypatch):
     from ctb import autopilot
     seen = []
+    boxes = iter([("", True), ("-R please;", True)])
+    monkeypatch.setattr(I, "dismiss_tip", lambda pane: True)
+    monkeypatch.setattr(I, "input_box", lambda pane: next(boxes))
+    monkeypatch.setattr(I, "pane_runs_session", lambda pane, session: True)
+    monkeypatch.setattr(I, "submitted", lambda *args: True)
     monkeypatch.setattr(I, "_tmux", lambda *a: seen.append(a) or SimpleNamespace(returncode=0, stdout=""))
-    autopilot.type_into("%1", "-R please;")
+    autopilot.type_into("%1", "-R please;", "session")
     typed = next(a for a in seen if a[0] == "send-keys")  # the screen is read first (a tip notice is closed)
     assert typed[-3:] == ("-l", "--", "-R please\\;")
 
@@ -1161,3 +1216,52 @@ def test_round7_only_long_left_edge_rules_are_the_clis_own():
     fake_short = clean_raw("────────\n x\n")
     assert own.startswith("────────") and "────────" not in fake_indented and "────────" not in fake_short
     assert clean_raw("  " + "─" * 100 + "\n x\n").startswith("────────")  # the plan screen's two-space indent
+
+
+
+_TITLED = "─" * 50 + " חנות: אזור תוכן ושיפורים ─"
+_PLAIN = D._RULE  # pane_text reads a long left-edge rule as this
+
+
+def test_a_titled_bottom_rule_still_reads_as_a_dialog():
+    """Claude Code draws the session title inside the bottom rule; an approval question above it is still a dialog."""
+    screen = "\n".join([
+        " Bash command", "", "   rm -rf build", "",
+        " Do you want to proceed?", " ❯ 1. Yes", "   2. No", "",
+        " Esc to cancel · Tab to amend · ctrl+x ctrl+k twice to stop background agents",
+        _TITLED,
+    ])
+    assert D.parse(screen) is not None
+
+
+def test_a_titled_rule_inside_a_reply_never_makes_it_a_dialog():
+    """Only the screen's last row is read as the CLI's titled rule: the same row inside a reply stays text."""
+    screen = "\n".join([
+        "⏺ Options I considered:", " ❯ 1. Yes", "   2. No", _TITLED, "",
+        _PLAIN, "❯ ", _PLAIN,
+    ])
+    assert D.parse(screen) is None
+    assert not D.selector_row(screen)
+
+
+def test_a_reply_ending_in_a_titled_looking_row_is_not_a_dialog():
+    """No input box drawn and the reply's own last row looks like the titled rule: it is still a reply."""
+    for tail in ("", "\n"):
+        screen = "\n".join(["⏺ Options I considered:", " ❯ 1. Yes", "   2. No", _TITLED]) + tail
+        assert D.parse(screen) is None
+        assert not D.selector_row(screen)
+
+
+def test_an_idle_titled_input_box_is_not_a_dialog():
+    for draft in ("❯ ", "❯ 1. please fix the header"):
+        screen = "\n".join(["⏺ Done.", "", _PLAIN, draft, _TITLED])
+        assert D.parse(screen) is None, draft
+        assert not D.selector_row(screen), draft
+        assert not D.bottom_hint(screen), draft
+
+
+def test_tip_and_agents_fixture_is_terminal_chrome_not_a_dialog():
+    body = (Path(__file__).parent / "fixtures" / "claude-agents-focus.txt").read_text()
+    assert D.parse(body) is None
+    assert D.bottom_hint(body) is False
+    assert D.non_dialog_overlay(body) == "tip"

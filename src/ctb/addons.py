@@ -1,4 +1,4 @@
-"""What Harnessgram adds to your agents: one fixed catalogue of everything the bridge puts into or around an agent
+"""What HarnessGram adds to your agents: one fixed catalogue of everything the bridge puts into or around an agent
 harness, with one switch each (docs/addons.md is generated from it).
 
 An add-on that already has its own setting keeps it: `enabled` reads that setting (a config key, a Cockpit setting
@@ -116,7 +116,7 @@ CATALOGUE: Tuple[Addon, ...] = (
        "Your standing sentence and the periodic reminder are added to the agent's prompts.", ("store",)),
     # --- memory and continuity ----------------------------------------------------------------------------------
     _a("knowledge_overlay", "memory", "רשימת הפריטים הכבויים", "Switched-off items list",
-       "הסוכנים מקבלים את רשימת הכללים והכלים שכיבית במסך „מה המערכת יודעת״.",
+       "הסוכנים מקבלים את רשימת הכללים והכלים שכיבית במסך „ספר נהלי הטיסה והכשירות״.",
        "Agents receive the list of rules and tools you switched off in “What the system knows”.",
        ("store",), ("claude", "codex")),
     _a("auto_compact", "memory", "דחיסה אוטומטית", "Automatic compaction",
@@ -166,6 +166,10 @@ CATALOGUE: Tuple[Addon, ...] = (
        "כפתור ברדיו פותח קישור פרטי לדף האזנה בספארי, שממשיך לנגן ברקע ובמסך הנעילה.",
        "A radio button opens a private link to a listening page in Safari, which keeps playing in the background "
        "and on the lock screen.", ("store",), ALL),
+    _a("radio_agent_media", "voice", "מדיה מהסוכנים ברדיו", "Agent media on the radio",
+       "סוכן יכול לשים קובץ שמע או וידאו שהכין בתור הרדיו שלך: בהקשה, או לבד כשמצב רכב פעיל.",
+       "An agent can put an audio or video file it made in your private radio queue: with one tap, or "
+       "automatically while car mode is on.", ("store",), ALL),
     _a("listen_button", "voice", "כפתור האזנה", "Listen button",
        "כפתור מתחת לתשובה משמיע אותה בקול.",
        "A button under a reply plays it aloud.", ("store",), pending="feat/listen-button"),
@@ -173,6 +177,10 @@ CATALOGUE: Tuple[Addon, ...] = (
     _a("morning_brief", "cockpit", "תדריך הבוקר", "Morning Brief",
        "מסך הבית של הקוקפיט מראה מה השתנה ומה מחכה לך.",
        "The Cockpit home shows what changed and what waits for you.", ("setting", "brief_home"), ALL, default=False),
+    _a("home_context", "cockpit", "מצב הבית", "Home mode",
+       "תג קטן מסביר איזה הקשר מנחה כרגע את מסך הבית.",
+       "A small chip explains which context currently guides the home screen.",
+       ("store",), ALL, default=False),
     _a("schedule_card", "cockpit", "הלו״ז שלי", "My schedule",
        "כרטיס של היום ומחר במסך עכשיו, עם הרשימה הפרטית שלך.",
        "A Today and Tomorrow card on Now, with your private list.", ("store",), ALL),
@@ -379,7 +387,7 @@ def _where(a: Addon) -> str:
 
 def markdown() -> str:
     """docs/addons.md, generated from the catalogue (tests/test_addons.py keeps the file in sync)."""
-    lines = ["# What Harnessgram adds to your agents", "",
+    lines = ["# What HarnessGram adds to your agents", "",
              "<!-- Generated from src/ctb/addons.py by `harnessgram addons docs`. Do not edit by hand. -->", "",
              "Every behaviour the bridge adds into or around an agent harness, with its switch. The Cockpit shows",
              "them under Settings; a switch takes effect at once. Locked safety rows are shown and never switched",

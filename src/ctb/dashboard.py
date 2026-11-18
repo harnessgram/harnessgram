@@ -17,6 +17,9 @@ from .usage import ended_on_limit, quota_line, quota_rows
 
 GEMINI_IN, GEMINI_OUT = 0.30, 2.50  # USD per 1M tokens (gemini-3.5-flash-lite list price)
 TTS_IN, TTS_OUT = 0.50, 10.00  # gemini-2.5-flash-tts text in / audio out
+# USD per 1M input / output tokens for the text models a log line names (translate._log_usage); a line without a
+# model, or with one not listed here, is priced at GEMINI_IN / GEMINI_OUT.
+GEMINI_PRICES = {"gemini-3.5-flash-lite": (0.30, 2.50), "gemini-3.8-flash": (1.50, 7.50)}
 
 
 def gemini_cost_line(now: Optional[float] = None, log_path: Optional[Path] = None, lang: Optional[str] = None) -> str:
@@ -33,7 +36,9 @@ def gemini_cost_line(now: Optional[float] = None, log_path: Optional[Path] = Non
                     continue
                 ts, i, o = int(f_parts[0]), int(f_parts[1]), int(f_parts[2])
                 tts = f_parts[3:4] == ["tts"]
-                usd = i * (TTS_IN if tts else GEMINI_IN) / 1e6 + o * (TTS_OUT if tts else GEMINI_OUT) / 1e6
+                price_in, price_out = (TTS_IN, TTS_OUT) if tts else GEMINI_PRICES.get(
+                    f_parts[4] if len(f_parts) > 4 else "", (GEMINI_IN, GEMINI_OUT))
+                usd = i * price_in / 1e6 + o * price_out / 1e6
                 if now_ts - ts <= 30 * 86400:
                     month += usd
                 if now_ts - ts <= 86400:
@@ -218,6 +223,25 @@ def quotas(accounts_flag: bool = True, full: bool = True, session: Optional[str]
     ui_lang = lang or (getattr(cfg, "ui_language", None) if cfg else None) or get_lang()
     from .usage import dot, quota_rows
     rows = quota_rows(full=full, session=session, account=account, now=now, lang=ui_lang, cfg=cfg)
+    if accounts_flag:
+        # The team card shows each account's own window, not the last writer's shared file.
+        from .usage import _parse_time, has_five_hour
+        now_ts = time.time() if now is None else now
+        # Both windows per account: the weekly row of the bridge's own account alone read as "Claude is
+        # spent" while the account in use still had room.
+        rows = [row for row in rows if not (row[0] in ("5h", "week") and row[1].startswith(("Claude", "קלוד"))
+                                            and " Opus" not in row[1] and " Sonnet" not in row[1]
+                                            and " Haiku" not in row[1] and " Fable" not in row[1])]
+        for name in accounts.names():
+            u = accounts._read(accounts.usage_path(name), {})
+            at = _parse_time(u.get("at"))
+            if at is None or not 0 <= now_ts - at <= 12 * 3600:
+                continue
+            who = "Claude · " + accounts.label(name)
+            if has_five_hour(u):
+                rows.append(("5h", who, float(u["five_hour"]), u.get("five_hour_resets")))
+            if isinstance(u.get("weekly"), (int, float)):
+                rows.append(("week", who, float(u["weekly"]), u.get("weekly_resets")))
     mark = L.RLM if ui_lang == "he" else ""
     lines: List[str] = []
     window_keys = (("5h", "quota_5h_title"), ("week", "quota_week_title"), ("month", "quota_month_title"))

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctb import autopilot, dialogs, inbox
+from ctb import autopilot, dialogs, inbox, usage
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXIT = (FIXTURES / "exit-dialog-real.txt").read_text()
@@ -22,6 +22,37 @@ def test_a_long_list_of_wrapped_scheduled_tasks_is_still_a_dialog():
     task = "   scheduled    · 17 8,11 * * * · Example schedule\n   task        every session, se…\n"
     screen = EXIT.replace(EXIT[EXIT.index("   scheduled"):EXIT.index("   ❯ 1.")], task * 20 + "\n")
     assert dialogs.exit_background_screen(screen)
+
+
+@pytest.mark.parametrize("fixture,stopped", [
+    ("cli2.1.314/exit_background.txt", ["sleep 600", "sleep 601"]),
+    ("exit-dialog-real.txt", []),
+    ("exit-dialog-scheduled-mixed.txt", ["sleep 600", "Inspect the example report"]),
+])
+def test_exit_variants_choose_only_option_one(monkeypatch, fixture, stopped):
+    screen = (FIXTURES / fixture).read_text()
+    monkeypatch.setattr(inbox, "pane_raw", lambda *a: screen)
+    monkeypatch.setattr(usage, "transcript_of", lambda s: None)
+    sent = []
+    monkeypatch.setattr(inbox, "_tmux", lambda *a: sent.append(a))
+    assert dialogs.exit_background_screen(screen)
+    assert dialogs.is_exit_background_dialog(screen)
+    assert inbox._answer_exit_dialog("%1", "fake-session") == stopped
+    assert sent == [("send-keys", "-t", "%1", "1")]
+
+
+@pytest.mark.parametrize("screen", [
+    (FIXTURES / "exit-dialog-scheduled-quoted.txt").read_text(),
+    EXIT.replace("1. Exit and stop tasks", "1. Delete scheduled tasks"),
+    EXIT.replace("1. Exit and stop tasks", "4. Exit and stop tasks"),
+])
+def test_exit_quotation_or_different_first_option_gets_no_key(monkeypatch, screen):
+    monkeypatch.setattr(inbox, "pane_raw", lambda *a: screen)
+    sent = []
+    monkeypatch.setattr(inbox, "_tmux", lambda *a: sent.append(a))
+    assert not dialogs.exit_background_screen(screen)
+    assert inbox._answer_exit_dialog("%1", "fake-session") is None
+    assert sent == []
 
 
 @pytest.mark.parametrize("suffix", ["\n❯ ", "\n────────────\n❯ owner draft\n────────────",

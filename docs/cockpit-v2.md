@@ -40,8 +40,9 @@ and Telegram home-indicator insets; page padding keeps the final content clear.
   disclosure contains only optional source text, topic links, age and notes.
 - Requests use the existing Done, Not relevant and Push forward actions. Each
   needs a second tap within four seconds. The project and request ID are passed
-  unchanged. The Older disclosure contains request history and old reminders;
-  open decisions are never hidden inside it.
+  unchanged. Requests are grouped by project (Needs you, Agents are on it,
+  Waiting a long time, Done); the Older disclosure contains old reminders only,
+  and open decisions are never hidden inside it.
 - Reminder clearing and restoring use their original opaque references and APIs.
 - Project status is computed by the bridge: waiting for the owner takes priority,
   then blocked, then explicitly completed, then on track. Progress comes from a
@@ -185,7 +186,35 @@ the decorative illustration.
 The existing persistent radio audio element is reused. It moves after the Now
 content rather than before the decision zone, so tab switches and polls do not
 interrupt listening. Media Session uses the approved `artwork.webp`, title
-`רדיו הצוות` and artist `Harnessgram`. It never starts or publishes a station.
+`שידורי הקוקפיט` and artist `HarnessGram`. It never starts or publishes a station.
+
+## Your own picture per project
+
+The shared scenes are the fallback. Each project can have its own picture, stored
+privately in `project-art/<name>.webp` under the bridge state directory (a plain
+project key is its own file name; any other key, such as a Hebrew name, is hashed).
+A custom picture wins over the config mapping and the automatic scene; remove it
+and the tile returns to today's logic.
+
+- **Validation.** webp, png or jpeg by magic bytes (the file name never counts), at
+  most 1 MB, and at most 40 megapixels. With Pillow installed (`pip install
+  'ctb[art]'`) the image is re-encoded to a square 512 px webp. Without Pillow, macOS
+  `sips` (the resize path of `card_media.py`) turns a png or jpeg into a square
+  512 px jpeg, so an iPhone upload works on a plain install; a webp of at most 1 MB
+  is stored as it is. With neither, png and jpeg are refused with a clear message.
+  The picture is served with the content type of what was stored.
+- **Reading.** `POST /api/project-art-image {"name"}` behind the owner login. The file
+  is opened like the radio's HLS files: strict name pattern, `O_NOFOLLOW`, regular
+  files only. There is no public URL for a custom picture.
+- **Changing.** `POST /api/project-art` (fresh owner login) with `set`, `scene` or
+  `clear`. In the Cockpit, long-press a project tile, or tap the pencil on its page,
+  to open **Change picture**: *Upload a photo*, *Pick a scene* or *Back to
+  automatic*. A before-and-after preview comes first and nothing is saved until the
+  one-tap approval. The page crops an uploaded photo to a 512 px square before it is
+  sent. The strings live under `art` in `cockpit_v2_strings.json`.
+- **CLI.** `ctb art set <project> <file>`, `ctb art clear <project>` and `ctb art
+  missing [--json]`, which lists the configured projects with no custom picture so
+  an agent on the Mac can create pictures for them.
 
 ## Validation and fidelity review
 
@@ -253,3 +282,41 @@ Hebrew/light comparison and difference images. Pixel differences are a visual
 aid, not an automatic acceptance threshold: source text, large touch targets
 and full open-decision coverage may change the page length. Independent fidelity
 review and approval are still required before rollout.
+
+### Personal hour timeline (wave 1)
+
+The existing private `/api/schedule-view` response includes `timeline.today` and
+`timeline.tomorrow`. `schedule_hours.py` proposes one hour for each project with
+open work-map lines and each open untimed personal task, filling 08:00–22:00 gaps
+around read-only calendar anchors. Calendar event durations, including overnight
+appointments, are retained; overlapping anchors are shown without inventing free
+time. All-day events remain notes in the original list. This is a proposal, not a
+claim that prayer, meal or family times have been configured.
+
+Plans and tap edits stay in the private state directory, under the existing
+schedule lock. Changing the calendar anchors or the topic roster rebuilds the
+proposal; a failed calendar hides the timeline rather than guessing free hours.
+`swap`, `extend` (15 or 30 minutes), and `skip` use the existing owner-authenticated
+schedule route. They cannot move anchors or rewrite past hours. A conflicting
+extension is rejected atomically. Skipping the current topic advances the next
+flexible topic immediately; it never pulls a calendar appointment earlier.
+
+The private radio job alone runs `schedule_bulletin.Conductor`. It uses the
+private-only speech queue (`PrivateMixer.add_private`), announces the topic, its plan and the next topic, and
+claims each day/topic before speech so restarts cannot replay it. Announcements
+are eligible only in the first minute; stale queued speech expires and active
+speech is cut at the deadline. No station or mirror is started by this feature.
+Group mode, a disabled schedule card or a bridge off switch prevent speech.
+Bulletin PCM reaches only `private-hls`, like the music filler. It never enters
+the shared speech mixer, `public-hls` or legacy `hls`. A YouTube mirror can run
+at the same time without holding, renewing a lease or waiting for private audio
+to expire; podcast marker ownership remains unchanged.
+Announcements stop thirty minutes before the existing candle-lighting time and
+remain silent until the existing Shabbat nightfall time. Unknown times fail
+closed.
+
+Every block currently has `visibility: private_work`. This is the seam for wave
+2, **not** sharing authorization. There is no family invitation, shared endpoint,
+recipient or new Google permission. Partner access and family-only views are
+wave 2; topic-specific shows, closing summaries, five-minute warnings and lock
+screen activities are later waves.

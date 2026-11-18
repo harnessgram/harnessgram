@@ -52,8 +52,7 @@ def _locked():
 
 
 def _blank() -> dict:
-    # "button": the index message carries the control-panel button (panel_pin then needs no pin of its own)
-    return {"id": 0, "pinned": False, "pin_retry_at": 0.0, "items": [], "button": False}
+    return {"id": 0, "pinned": False, "pin_retry_at": 0.0, "items": []}
 
 
 def _item(raw) -> Optional[dict]:
@@ -82,20 +81,9 @@ def _load(path) -> Dict[str, dict]:
         index = topic.get("id")
         retry = topic.get("pin_retry_at")
         out[str(key)] = dict(_blank(), id=index if _id(index) else 0, pinned=topic.get("pinned") is True, items=items,
-                             button=topic.get("button") is True,
                              pin_retry_at=float(retry) if isinstance(retry, (int, float)) and retry == retry
                              and not isinstance(retry, bool) else 0.0)
     return out
-
-
-def carries_button(chat: int, thread) -> bool:
-    """The topic's pinned replies index exists, is pinned and carries the control-panel button."""
-    try:
-        with _locked() as path:
-            topic = _load(path).get(f"{chat}:{thread}") or {}
-        return bool(topic.get("id") and topic.get("pinned") and topic.get("button"))
-    except OSError:
-        return False
 
 
 def enabled(cfg: Config, thread, chat: Optional[int] = None) -> bool:
@@ -167,6 +155,8 @@ def _pin(cfg: Config, bot, key: str, message_id: int, retry_at: float, now: floa
     except Exception:
         return
     _store(key, pinned=True, pin_retry_at=0.0)
+    from . import panel_pin
+    panel_pin.repin(bot, home_chat(cfg) if chat is None else chat, int(key.rpartition(":")[2]))
 
 
 def update_index(cfg: Config, bot, thread, message_id, text: str, now: Optional[float] = None,
@@ -189,12 +179,6 @@ def update_index(cfg: Config, bot, thread, message_id, text: str, now: Optional[
             retry_at = topic["pin_retry_at"]
         params = {"chat_id": chat, "text": render(cfg, thread, items, chat), "parse_mode": "HTML",
                   "link_preview_options": {"is_disabled": True}}
-        # The control-panel button rides on this message: Telegram's pinned bar shows the newest pinned message,
-        # so a separate, older panel pin was never the one in view (the owner, on the phone).
-        from . import panel_pin
-        button = panel_pin.button(cfg, chat, thread)
-        if button:
-            params["reply_markup"] = button
         if index:
             try:
                 flood.optional_call(bot, "editMessageText", dict(params, message_id=index),
@@ -204,10 +188,9 @@ def update_index(cfg: Config, bot, thread, message_id, text: str, now: Optional[
                     return True
                 if not _gone(e):
                     return False  # skipped by the gate or failed: the next reply re-renders the list
-                _store(key, id=0, pinned=False, pin_retry_at=0.0, button=False)  # the index was deleted: make a new one
+                _store(key, id=0, pinned=False, pin_retry_at=0.0)  # the index was deleted: make a new one
                 retry_at = 0.0
             else:
-                _store(key, button=bool(button))
                 if not pinned:
                     _pin(cfg, bot, key, index, retry_at, item["t"], chat)
                 return True
@@ -216,7 +199,7 @@ def update_index(cfg: Config, bot, thread, message_id, text: str, now: Optional[
         index = sent.get("message_id") if isinstance(sent, dict) else None
         if not _id(index):
             return False
-        _store(key, id=index, pinned=False, button=bool(button))
+        _store(key, id=index, pinned=False)
         _pin(cfg, bot, key, index, retry_at, item["t"], chat)
         return True
     except Exception:

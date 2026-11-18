@@ -1,4 +1,4 @@
-# What Harnessgram adds to your agents
+# What HarnessGram adds to your agents
 
 <!-- Generated from src/ctb/addons.py by `harnessgram addons docs`. Do not edit by hand. -->
 
@@ -44,6 +44,7 @@ off there. An add-on that already had a setting keeps it: the switch here is tha
 | `car_voice` | Read aloud in car mode | In car mode the summary is also sent as a voice message. | on | config `voice` | Claude |
 | `voice_echo` | Echo when sent without a preview | A recording that goes to the agent without the transcript preview (car mode or a failed preview) gets a quiet reply with what was heard. | on | `addons.json` | Claude |
 | `listen_link` | Listen in Safari | A radio button opens a private link to a listening page in Safari, which keeps playing in the background and on the lock screen. | on | `addons.json` | Claude, Codex |
+| `radio_agent_media` | Agent media on the radio | An agent can put an audio or video file it made in your private radio queue: with one tap, or automatically while car mode is on. | on | `addons.json` | Claude, Codex |
 | `listen_button` | Listen button | A button under a reply plays it aloud. | on | `addons.json` (gate in `feat/listen-button`) | Claude |
 
 ## Cockpit
@@ -51,6 +52,7 @@ off there. An add-on that already had a setting keeps it: the switch here is tha
 | Key | Add-on | What it does | Default | Switch | Applies to |
 |---|---|---|---|---|---|
 | `morning_brief` | Morning Brief | The Cockpit home shows what changed and what waits for you. | off | Cockpit setting `brief_home` | Claude, Codex |
+| `home_context` | Home mode | A small chip explains which context currently guides the home screen. | off | `addons.json` | Claude, Codex |
 | `schedule_card` | My schedule | A Today and Tomorrow card on Now, with your private list. | on | `addons.json` | Claude, Codex |
 | `work_map` | Work map | Each project gets a map of what the agents are doing, what waits for you and what it changes for you: in the Cockpit, in a pinned message and with /what. | on | `addons.json` | Claude, Codex |
 | `morning_briefing` | Morning briefing | At your morning time a short briefing arrives: the schedule, what finished overnight and what waits for you. A Cockpit card, a message and, when the radio is on, spoken on the private stream. | on | `addons.json` | Claude, Codex |

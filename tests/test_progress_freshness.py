@@ -73,7 +73,7 @@ def test_todo_snapshots_update_one_automatic_card_without_touching_other_session
     updated = cards.sync_todos("session-a", -100, 1, two, "Work plan", now=1010)
     assert updated["id"] == first["id"] and updated["percent"] == 50 and updated["updated"] == 1010
     updated = cards.sync_todos("session-a", -100, 1, [], "Work plan", now=1020)
-    assert updated["id"] == first["id"] and updated["percent"] == 0 and updated["steps"] == []
+    assert updated["id"] == first["id"] and updated["percent"] == 0 and len(updated["steps"]) == 3
     assert next(r for r in cards.open_cards() if r["id"] == other["id"])["updated"] == 1000
 
 
@@ -163,7 +163,7 @@ def test_large_list_window_manual_precedence_and_bad_items(tmp_path, monkeypatch
     todos = [{'content': str(i), 'status': 'completed' if i < 7 else 'in_progress' if i == 7 else 'pending'} for i in range(10)]
     todos.insert(0, {'content': ' ', 'status': 'pending'})
     rec = cards.sync_todos('s', -100, 1, todos, 'Plan', now=100)
-    assert '7' in rec['steps'] and rec['at'] < len(rec['steps']) and rec['percent'] == 70
+    assert 'שלב 7' in rec['steps'] and rec['at'] < len(rec['steps']) and rec['percent'] == 70
     manual = cards.publish('other', -100, 2, 'progress', 'Manual', percent=1, now=100)
     assert cards.sync_todos('other', -100, 2, todos, 'Plan', now=101) is None
     assert [r['id'] for r in cards.open_cards() if r['session'] == 'other'] == [manual['id']]

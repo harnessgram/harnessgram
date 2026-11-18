@@ -308,7 +308,7 @@ class Bot:
             raise
 
     def call(self, method: str, params: Optional[dict] = None, timeout: float = 15):
-        # Every keyboard leaves with its sensitive acting buttons marked for the Harnessgram app (sensitive_buttons.py).
+        # Every keyboard leaves with its sensitive acting buttons marked for the HarnessGram app (sensitive_buttons.py).
         params = mark_sensitive(full_width(params))
         if self.local:
             reject_file_uris(params)

@@ -23,7 +23,7 @@ from typing import Callable, Optional
 
 from . import agent_task, flood, menus
 from . import lang as L
-from .config import home_chat, private_dir, state_dir, write_private
+from .config import home_chat, live_activity_in_cockpit, private_dir, state_dir, write_private
 from .creds import redact
 from .telegram import TelegramError
 from .topics import chat_of, latest_reply
@@ -278,6 +278,11 @@ def _edit(cfg, bot, card: dict, text: str, markup, now: float) -> str:
 def _sync(cfg, bot, card: dict, now: float) -> None:
     """Bring the Telegram message in line with the card. The first post and the collapse may notify;
     everything else is silent. Whatever fails stays marked dirty for the next update."""
+    # Running detail lives in the Cockpit, but the completed announcement remains in Telegram: it is the
+    # durable, owner-only route to each agent's full result.
+    if live_activity_in_cockpit() and not card.get("collapsed"):
+        card.update(last_edit=now, dirty=False)
+        return
     if card.get("inactive") or card.get("dismissed"):
         card["dirty"] = False
         return

@@ -23,6 +23,8 @@ from .moves import _file_lock
 QUEUE_FILE = "reply-outbox.json"
 FAILED_FILE = "reply-outbox-failed.json"
 KEEP = 50
+GATE_WAIT = 30.0        # seconds: a closed flood gate this short is waited out instead of ending the round
+GATE_WAIT_TOTAL = 60.0  # seconds: every such wait of one drain together, so a heartbeat round always ends
 
 
 def locked():
@@ -110,16 +112,33 @@ def drain(cfg, bot, now=None) -> int:
     if not sessions:
         return 0
     sender = mirror.build(cfg, bot=bot)
+    wait_left = [GATE_WAIT_TOTAL]
     for session in sessions:
         with session_locked(session, blocking=False) as acquired:
             if not acquired:
                 continue
-            delivered += _drain_session(sender, session, now)
+            delivered += _drain_session(sender, session, now, wait_left)
     return delivered
 
 
-def _drain_session(sender, session, now) -> int:
-    from . import flood, lang, mirror, policy
+def _gate_open(chat, wait_left) -> bool:
+    """True once the shared flood gate for `chat` is open. A short pause is slept through: the gate
+    closes for half a minute whenever the group's traffic trips Telegram's limit, and a drain that gave
+    up on every closed gate looked only once per heartbeat round, so the outbox could miss each brief
+    opening for a long time while every later reply of its sessions queued behind it."""
+    from . import flood
+    while True:
+        left = flood.remaining(chat)
+        if left <= 0:
+            return True
+        if wait_left is None or left > GATE_WAIT or left > wait_left[0]:
+            return False
+        wait_left[0] -= left
+        time.sleep(left)
+
+
+def _drain_session(sender, session, now, wait_left=None) -> int:
+    from . import lang, mirror, policy
     delivered = 0
     while policy.on():
         with locked() as path:
@@ -132,7 +151,7 @@ def _drain_session(sender, session, now) -> int:
         try:
             found = sender.topics.place_of(entry["session"])
             chat = found.chat if found else entry["chat"]
-            if flood.remaining(chat) > 0:
+            if not _gate_open(chat, wait_left):
                 break
             # Retain the saved destination when the topic map has no entry.
             if not found and entry["thread"]:
@@ -181,7 +200,8 @@ def _drain_session(sender, session, now) -> int:
             if entry.get("index"):
                 try:
                     sender._index_reply(entry["session"], sender.first_reply_id,
-                                        entry["index"]["text"], entry["index"]["has_summary"])
+                                        entry["index"]["text"], entry["index"]["has_summary"],
+                                        reply_id=entry["index"].get("reply_id", ""))
                 except Exception:
                     mirror.log("delayed reply index update failed")
     return delivered

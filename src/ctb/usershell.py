@@ -95,6 +95,6 @@ def shell_argv(line: str, interactive: bool = True, program: str = "claude", bin
     prefix = _suffix(binary)
     if probe(shell, flag, prefix, program) is False:
         raise ClaudeNotFound(f"{program} was not found by {shell}")
-    guard = (f"command -v {program} >/dev/null 2>&1 || {{ echo \"Harnessgram: {program} was not found on PATH "
+    guard = (f"command -v {program} >/dev/null 2>&1 || {{ echo \"HarnessGram: {program} was not found on PATH "
              f"in this shell ($0).\" >&2; sleep {int(MISSING_PAUSE)}; " + GUARD_END)
     return [shell, flag, prefix + guard + line]

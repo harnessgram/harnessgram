@@ -1,4 +1,86 @@
-# Persisted Codex observer
+# Codex bridge
+
+The bridge now contains an opt-in app-server client alongside the persisted
+observer. Set `codex_harness_enabled: true` to enable either integration. The
+default remains off, and the observer described below keeps its existing
+behaviour.
+
+## App-server sessions
+
+Run `harnessgram codex start [--cwd DIR] [--model MODEL] [--effort EFFORT]`
+with `codex_harness_enabled: true` and mirroring enabled. The command starts or reuses a private
+app-server for the active `CODEX_HOME`, registers the new thread and prints
+a shell-quoted `codex --remote unix://… resume THREAD_ID` command for its TUI.
+The listener subscribes to registered threads and creates one topic per thread
+in the paired home chat. If Telegram has topic creation disabled, the bridge
+waits for a topic and never posts the thread's content to General. The stored
+observer skips registered app-server threads, so the two transports cannot
+forward the same thread.
+
+The socket is owner-only (`0600`) under a private directory. On systems with
+short Unix socket paths, the bridge uses a short owner-private directory under
+`/tmp`. A startup lock serializes reuse and replacement. A refused connection
+confirms an orphaned socket. A responding socket is reused, and an endpoint
+that fails the handshake or stops answering RPCs is disconnected and retried
+without removing its live socket. Shutdown closes the listener's connection
+and leaves the detached app-server running, so other clients and the next
+start reuse it.
+
+The client uses the Codex CLI 0.169.0 generated v2 schema and the
+[app-server reference](https://github.com/openai/codex/tree/main/codex-rs/app-server).
+`--effort` sets `config.model_reasoning_effort` on the thread and is sent as
+`effort` on subsequent Telegram-started turns. The runtime model and effort
+appear in the Cockpit alongside the thread's state and reported token usage.
+
+## Telegram controls
+
+- Send ordinary text as the paired owner in a registered topic. The bridge
+  starts an idle thread with `turn/start` and steers an active one with
+  `turn/steer` and its exact `expectedTurnId`. Steer failures never fall back
+  to starting a turn. The turn's progress message offers **Interrupt turn**,
+  bound to that turn. Send `/compact` in the same topic to request compaction.
+  When a queued message or `/compact` fails, the bridge replies to it: "not
+  delivered" after a refusal, "may not have been delivered" after a timeout or
+  a lost connection.
+- The existing topic indicator shows activity and the progress message shows
+  when Codex begins streaming a reply. Final assistant messages go through the
+  existing reply mirror with the Codex label. Commentary is opt-in through
+  `codex_commentary`. Tool output and reasoning are excluded.
+- Command, file-change and permission requests use the existing dialog card
+  styling. Reply directly to the current card with the option number to answer
+  a permission request. Sensitive and incomplete approvals require the native
+  Codex client for a grant. MCP elicitation cards can decline or cancel, with
+  forms and URL flows handled in Codex.
+- User-input cards offer the request's choices. Reply directly to the card for
+  free text when offered. Multiple questions are submitted together. Secret
+  questions require the native client. No prompt is approved by the bridge.
+  Card actions are bound to the paired owner, chat, topic, posted message,
+  connection and pending request. Resolution, an answered request, turn
+  completion and disconnect all invalidate its cards.
+- Cockpit lists the native sessions with model, effort, token usage and live
+  state. Its open, interrupt and answer links open the corresponding Telegram
+  topic or current card. Codex sessions have no Claude terminal controls.
+
+## Reconnect and delivery limits
+
+After a disconnect the listener resumes registered threads without starting a
+turn. It obtains the active turn ID before allowing steering. When a turn it
+observed as active finished while disconnected, it checks recent persisted
+turns and tries to recover that turn's final reply. The per-thread reply ledger
+stores the newest 512 turn/item identities before sending. This prevents a
+retry after an ambiguous Telegram result, at the cost of losing a reply if
+the listener stops after recording the identity and before Telegram accepts it.
+Cockpit shows when a reply delivery could not be confirmed. A turn wholly
+missed while offline is outside this recovery window. If a pending request is
+replayed by Codex, it gets fresh cards.
+
+Synthetic coverage uses a fake app-server over a socketpair and a fake
+Telegram bot. Live app-server, Telegram and TUI interoperability remain
+unverified. Structured command/network policy amendments, positive MCP
+elicitation responses, secret input, media and Claude-specific controls
+stay outside the Telegram app-server bridge.
+
+## Persisted observer
 
 `ctb.harness_codex.CodexHarness` implements the shared Harness boundary for
 existing local sessions. It does not launch a model or attach a second writer.
@@ -19,6 +101,10 @@ assistant text events. Commentary requires its own opt-in. `CODEX_HOME` selects
 the CLI home; `codex_sessions_dir` may override the observation directory, but
 queueing is unavailable if that directory does not match the CLI home. Direct
 adapter construction can bind a different home/profile explicitly.
+
+When Harnessgram starts the app-server, it uses a minimal environment. Alongside basic process variables,
+it passes configured proxy and TLS certificate variables plus existing `CODEX_*` and `OPENAI_*` variables.
+Unset variables are not added.
 
 ## Observed format and canonical output
 
@@ -80,11 +166,11 @@ The verified queue surface has no stdin/file input, so framed text uses argv wit
 a random fence independent of the receipt key. Framed text over 64 KiB, embedded
 NULs and OS argument-size errors are definite rejections, never unknown acceptance.
 
-Start/resume, steering, interrupt, approvals, panel request answers, child
-control and media/log parity are unsupported and fail closed. The adapter
+The persisted observer provides text queueing. Native start, resume, steering,
+interrupt and approvals are available for registered app-server threads. The observer
 does not drain any inbox or send Telegram messages itself.
 
-## Attached sessions in Telegram (Stage 2b)
+## Persisted observer topics
 
 The existing heartbeat calls `ctb.codex_mirror.poll` once per round (normally
 every 30 seconds), only with `codex_harness_enabled: true`. With the flag off,

@@ -55,11 +55,46 @@ function scList(box){
  box.textContent="";
  if(!scData){var f=el("div","v2-empty sc-note",scErr?scT("loadFailed"):"…");f.setAttribute("data-sc-state",scErr?"error":"loading");box.appendChild(f);
   if(scErr){var r=el("button","btn sm sc-retry",scT("retry"));r.type="button";r.addEventListener("click",function(){haptic("sel");scLoad(true);scRerender();});box.appendChild(r);}return;}
+ if(scTab==="today"&&scData.day_card){var dc=el("section","sc-day-card");dc.appendChild(el("h3",null,scData.day_card.title));
+  (scData.day_card.lines||[]).forEach(function(line){var p=el("p",null,line);p.dir="auto";dc.appendChild(p);});box.appendChild(dc);}
+ if(scData.timeline)box.appendChild(scTimeline(scData.timeline[scTab]));
  var rows=(scData.days&&scData.days[scTab])||[];
  if(!rows.length){var e=el("div","v2-empty sc-empty",scT(scTab==="today"?"empty":"emptyTomorrow"));e.setAttribute("data-sc-state","empty");box.appendChild(e);}
  else{var ul=el("ul","sc-rows");rows.forEach(function(it){ul.appendChild(scRow(it));});box.appendChild(ul);}
  if(scData.calendar&&scData.calendar.configured&&!scData.calendar.ok)box.appendChild(el("div","safe sc-warn",scT("calendarFailed")));
  if(scData.google&&scData.google.configured)box.appendChild(scGoogle(scData.google));}
+function scClock(n){n=Math.floor(n);return String(Math.floor(n/60)).padStart(2,"0")+":"+String(n%60).padStart(2,"0");}
+function scHourChange(it,action,minutes,button){
+ if(scBusy.timeline)return;scBusy.timeline=true;button.disabled=true;haptic("tap");
+ var body={action:action,id:it.id,date:scData[scTab]};if(minutes)body.minutes=minutes;
+ post("/api/schedule",body).then(function(r){if(!r.ok)throw r.status;return r.json();})
+ .then(function(j){scTake(j);scRerender();haptic("n","success");})
+ .catch(function(st){toast(st===403?S.reopen:st===409?scT("conflict"):scT("failed"),true);})
+ .then(function(){delete scBusy.timeline;button.disabled=false;});}
+function scTimeline(plan){
+ var box=el("section","sc-timeline");box.setAttribute("aria-label",scT("hoursTitle"));
+ box.appendChild(el("h3","sc-hours-heading",scT("hoursTitle")));
+ box.appendChild(el("p","sc-hours-hint",scT("hoursHint")));
+ if(!plan||!plan.available){box.appendChild(el("p","sc-hours-hint",scT("hoursUnavailable")));return box;}
+ if(!plan.blocks.length){box.appendChild(el("p","sc-hours-hint",scT("hoursEmpty")));return box;}
+ var list=el("ol","sc-hours");
+ plan.blocks.forEach(function(it,i){
+  var row=el("li","sc-hour"+(it.current?" current":"")+(it.fixed?" fixed":"")+(it.past?" past":""));row.setAttribute("data-sc-hour",it.id);
+  if(it.current)row.setAttribute("aria-current","time");
+  var range=el("bdi","sc-hour-time",scClock(it.start)+"–"+scClock(it.end));range.dir="ltr";row.appendChild(range);
+  var title=el("bdi","sc-hour-title",it.title);title.dir="auto";row.appendChild(title);
+  if(it.current||it.fixed)row.appendChild(el("span","sc-hour-state",scT(it.current?"current":"fixed")));
+  if(it.summary){var note=el("bdi","sc-hour-summary",it.summary);note.dir="auto";row.appendChild(note);}
+  if(!it.fixed&&!it.past){
+   var actions=el("div","sc-hour-actions");
+   [["extend15","extend",15],["extend30","extend",30],["swap","swap",0],["skip","skip",0]].forEach(function(a){
+    if(a[1]==="swap"&&(it.current||!plan.blocks[i+1]||plan.blocks[i+1].fixed))return;
+    var b=el("button","btn sm",scT(a[0]));b.type="button";b.setAttribute("data-sc-hour-action",a[0]);
+    b.setAttribute("aria-label",scT(a[0])+": "+it.title);b.addEventListener("click",function(){scHourChange(it,a[1],a[2],b);});actions.appendChild(b);
+   });row.appendChild(actions);
+  }list.appendChild(row);
+ });box.appendChild(list);return box;
+}
 function v2ScheduleCard(){
  scLoad(false);
  var card=el("section","v2-schedule");card.setAttribute("data-v2-section","schedule");card.setAttribute("aria-label",scT("title"));

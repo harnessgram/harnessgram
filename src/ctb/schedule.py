@@ -274,6 +274,35 @@ def add(cfg, text, now: Optional[datetime] = None) -> dict:
         raise ScheduleError("unavailable") from None
 
 
+def add_structured(cfg, title: str, day: date, clock: Optional[str] = None,
+                   now: Optional[datetime] = None) -> dict:
+    """Store a caller-validated item without routing structured fields through natural-language parsing."""
+    if not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE:
+        raise ScheduleError("text")
+    if not isinstance(day, date) or (clock is not None and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", clock)):
+        raise ScheduleError("text")
+    parsed = Parsed(title.strip(), day.isoformat(), clock)
+    stamp = int((now or datetime.now(timezone.utc)).timestamp())
+    try:
+        with _locked():
+            rows = _prune(_read(), stamp)
+            for row in rows:
+                if not row["done"] and (row["title"], row["date"], row["time"]) == (parsed.title, parsed.date, parsed.time):
+                    return dict(row)
+            while len(rows) >= MAX_ITEMS:
+                done = [r for r in rows if r["done"]]
+                if not done:
+                    raise ScheduleError("full")
+                rows.remove(min(done, key=lambda r: r["done_at"] or r["created"]))
+            row = {"id": secrets.token_hex(6), "title": parsed.title, "date": parsed.date, "time": parsed.time,
+                   "done": False, "created": stamp, "done_at": None}
+            rows.append(row)
+            _write(rows)
+            return dict(row)
+    except OSError:
+        raise ScheduleError("unavailable") from None
+
+
 def set_done(ident, done, now: Optional[datetime] = None) -> dict:
     if not isinstance(ident, str) or not ID_RE.fullmatch(ident) or not isinstance(done, bool):
         raise ScheduleError("text")
@@ -312,6 +341,8 @@ class Event:
     title: str
     day: str                   # YYYY-MM-DD in the owner's zone
     time: Optional[str]        # HH:MM, None for an all-day event
+    end: Optional[datetime] = None  # real timed duration for the private hourly plan
+    start: Optional[datetime] = None  # preserve the instant when a local hour repeats
 
 
 class ScheduleSource:
@@ -613,16 +644,33 @@ def _expand(one, start, end, tz, days, budget, moved_days, moved_times) -> List[
             if any(hit(d - timedelta(days=offset)) for offset in range(span)):
                 found.append(Event(title, d.isoformat(), None))
             continue
-        for cand in (d - timedelta(days=1), d, d + timedelta(days=1)):  # the event's day can differ from ours
+        # DTEND denotes an instant, including when its zone differs from DTSTART.
+        # Both subtraction and addition must use UTC: local arithmetic loses or
+        # invents an hour when an overnight event crosses a DST transition.
+        duration = (end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
+                    if isinstance(end, datetime) else timedelta(hours=1))
+        duration = max(duration, timedelta(minutes=1))
+        if duration.days > MAX_SPAN_DAYS:
+            continue
+        day_start = datetime.combine(d, datetime.min.time(), tzinfo=tz)
+        day_end = day_start + timedelta(days=1)
+        # Recurrence dates belong to the source zone. Derive the search window
+        # there, including starts whose duration overlaps this entire local day.
+        earliest = (day_start.astimezone(timezone.utc) - duration).astimezone(ev_tz).date()
+        latest = day_end.astimezone(ev_tz).date()
+        for offset in range((latest - earliest).days + 1):
+            cand = earliest + timedelta(days=offset)
             if not hit(cand):
                 continue
             moment = datetime.combine(cand, wall, tzinfo=ev_tz)
             if moment in skip_times:
                 continue
             local = moment.astimezone(tz)
-            if local.date() == d:
-                found.append(Event(title, d.isoformat(), local.strftime("%H:%M")))
-                break
+            # Datetimes sharing a ZoneInfo compare wall times, ignoring fold.
+            beginning = max(local.astimezone(timezone.utc), day_start.astimezone(timezone.utc)).astimezone(tz)
+            finish = (moment.astimezone(timezone.utc) + duration).astimezone(tz)
+            if beginning.date() == d and beginning.astimezone(timezone.utc) < finish.astimezone(timezone.utc):
+                found.append(Event(title, d.isoformat(), beginning.strftime("%H:%M"), finish, beginning))
     return found
 
 
@@ -666,6 +714,10 @@ def view(cfg, now: Optional[datetime] = None, source_list: Optional[List[Schedul
     t0, t1 = today.isoformat(), tomorrow.isoformat()
     midnight = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     rows: Dict[str, List[Tuple[Tuple, dict]]] = {"today": [], "tomorrow": []}
+
+    def time_key(day, clock):
+        return datetime.fromisoformat(day + "T" + clock).replace(tzinfo=local.tzinfo).timestamp() if clock else 0
+
     for it in items(local.timestamp()):
         when = it["date"]
         if when == t1:
@@ -678,7 +730,7 @@ def view(cfg, now: Optional[datetime] = None, source_list: Optional[List[Schedul
             continue
         late = bool(when and when < t0)
         group = 1 if late else 2 if it["time"] else 3
-        rows[bucket].append(((group, when if late else "", it["time"] or "", it["created"]),
+        rows[bucket].append(((group, when if late else "", time_key(when, it["time"]), it["created"]),
                              {"id": it["id"], "title": it["title"], "time": it["time"], "done": it["done"],
                               "kind": "own", "late": late, "allday": False}))
     configured = sources(cfg) if source_list is None else source_list
@@ -693,13 +745,22 @@ def view(cfg, now: Optional[datetime] = None, source_list: Optional[List[Schedul
         for event in found[:MAX_EVENTS]:
             bucket = "today" if event.day == t0 else "tomorrow" if event.day == t1 else None
             if bucket:
-                rows[bucket].append(((0 if event.time is None else 2, "", event.time or "", 0),
+                end_minute = None
+                if event.time and event.end:
+                    finish = event.end.astimezone(zone(cfg))
+                    end_minute = (finish.date() - date.fromisoformat(event.day)).days * 1440 + finish.hour * 60 + finish.minute
+                instant = event.start.timestamp() if event.start else time_key(event.day, event.time)
+                rows[bucket].append(((0 if event.time is None else 2, "", instant, 0),
                                      {"id": "", "title": event.title, "time": event.time, "done": False,
-                                      "kind": "cal", "late": False, "allday": event.time is None}))
+                                      "kind": "cal", "late": False, "allday": event.time is None,
+                                      "end_minute": end_minute}))
     days = {k: [r for _, r in sorted(v, key=lambda p: p[0])] for k, v in rows.items()}
-    return {"today": t0, "tomorrow": t1, "days": days,
+    out = {"today": t0, "tomorrow": t1, "days": days,
             "open": {k: sum(1 for r in v if r["kind"] == "own" and not r["done"]) for k, v in days.items()},
             "calendar": {"configured": bool(configured), "ok": calendar_ok}, "google": _google_status(cfg)}
+    from . import schedule_hours
+    out["timeline"] = schedule_hours.plans(cfg, out, local)
+    return out
 
 
 def _google_status(cfg) -> dict:

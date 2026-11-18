@@ -32,7 +32,7 @@ from .telegram import Bot, TelegramError, clean_token, find_token, holds_token
 BOTFATHER_STEPS = """\
 Step 1 of 4: create your bot (about 1 minute, in the Telegram app)
   1. Open @BotFather (https://t.me/BotFather) and send /newbot.
-     When it asks, send a name, for example: Harnessgram
+     When it asks, send a name, for example: HarnessGram
      Then a username that ends in "bot", for example: {username}
   2. BotFather answers with a message that holds the token (it looks like 123456789:AAE...).
      Tap the token to copy it, or copy the whole message. Setup reads it from the clipboard.
@@ -452,7 +452,7 @@ def run(*, owner_id: Optional[int] = None, language: Optional[str] = None, assum
     before = copy.deepcopy(raw)
     if not path.exists():
         new_install_defaults(raw)
-    say("Harnessgram setup\n")
+    say("HarnessGram setup\n")
     say(botfather_steps())
     prompted, token = [], None
 

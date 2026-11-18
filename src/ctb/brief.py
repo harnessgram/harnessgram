@@ -325,7 +325,7 @@ def build(cfg: Config, state: dict, entries, now: float, provider: Optional[work
         if d.get("stale") and d.get("stale") != "old":
             continue
         waiting.append({"kind": "decision", "id": d["id"], "line": session_line(cfg, None, d.get("topic") or ""),
-                        "text": d.get("title", ""),
+                        "text": d.get("title", ""), "link": d.get("link", d.get("url", "")),
                         "note": asks_note.get(d["id"], ("", ""))[0],
                         "note_by": asks_note.get(d["id"], ("", ""))[1], "created": now - (d.get("age") or 0),
                         "age": d.get("age"), "stale": d.get("stale") == "old"})
@@ -335,7 +335,7 @@ def build(cfg: Config, state: dict, entries, now: float, provider: Optional[work
         short = {e.session[:8]: session_key.get(e.session, "") for e in entries}
         waiting.append({"kind": "card", "id": c["id"],
                         "line": short.get(c.get("session"), "") or session_line(cfg, None, c.get("topic") or ""),
-                        "text": c.get("title", ""),
+                        "text": c.get("title", ""), "link": c.get("link", c.get("topic_url", "")),
                         "note": asks_note.get(c["id"], ("", ""))[0],
                         "note_by": asks_note.get(c["id"], ("", ""))[1], "created": now - (c.get("age") or 0),
                         "age": c.get("age"), "stale": bool(c.get("old"))})

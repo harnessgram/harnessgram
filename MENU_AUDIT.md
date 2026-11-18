@@ -15,6 +15,7 @@ Each line denotes a keyboard construction site; empty keyboards that remove butt
 - src/ctb/board.py:325 — _sync — EXEMPT: permanent pinned board; closing would remove its controls.
 - src/ctb/board.py:335 — _sync — EXEMPT: permanent pinned board; closing would remove its controls.
 - src/ctb/board.py — refresh_dirty — EXEMPT: permanent pinned board; closing would remove its controls.
+- src/ctb/board.py — pin_content — EXEMPT: permanent pinned board; closing would remove its controls.
 - src/ctb/dashboard.py:167 — stuck_check — not-now
 - src/ctb/delivery.py:85 — markup — cancel
 - src/ctb/delivery.py:95 — cancel_markup — cancel

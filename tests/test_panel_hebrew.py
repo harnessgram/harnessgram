@@ -138,6 +138,39 @@ def test_cached_reads_the_disk_cache_without_any_engine(monkeypatch):
     assert translate.cached("Hold the release", cfg) == "לעצור את השחרור"
 
 
+def test_morning_ledger_uses_cache_and_queues_missing_without_blocking(monkeypatch):
+    from ctb import briefing, panel_settings
+    cfg = gemini_cfg()
+    panel_settings.write("ui_v2", "on")
+    cache("Finished overnight", "הושלם בלילה", cfg)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def translate_in_background(text, cfg, **kwargs):
+        calls.append((text, threading.current_thread().name))
+        started.set()
+        assert release.wait(3)
+        return "ממתין לאישור"
+
+    monkeypatch.setattr(translate, "translate_text", translate_in_background)
+    monkeypatch.setattr(briefing, "card", lambda *a: {
+        "overnight": [{"what": "Finished overnight"}],
+        "waiting": [{"what": "Awaiting approval"}]})
+    tr = panel_text.Translator(cfg)
+    try:
+        first = panel.build_state(cfg, tr=tr, light=True)
+        assert first["morning"]["overnight"][0]["what_he"] == "הושלם בלילה"
+        assert first["morning"]["waiting"][0] == {"what": "Awaiting approval", "what_he": None}
+        assert first["pending"] >= 1 and started.wait(2)
+        assert calls == [("Awaiting approval", "panel-translate")]
+    finally:
+        release.set()
+    wait_idle(tr)
+    second = panel.build_state(cfg, tr=tr, light=True)
+    assert second["morning"]["waiting"][0]["what_he"] == "ממתין לאישור"
+    assert second["pending"] == 0 and len(calls) == 1
+
+
 # --- the signed login is still required everywhere --------------------------------------------------
 
 def test_every_route_still_needs_the_signed_owner_login(hebrew_server):

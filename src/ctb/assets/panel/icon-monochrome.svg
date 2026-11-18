@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs>
+    <mask id="face-cutouts" x="0" y="0" width="1024" height="1024" maskUnits="userSpaceOnUse" style="mask-type:luminance">
+      <rect width="1024" height="1024" fill="#FFFFFF" />
+      <rect x="264" y="444" width="496" height="248" rx="124" fill="#000000" />
+      <ellipse cx="382" cy="300" rx="74" ry="44" fill="#000000" transform="rotate(-18 382 300)" />
+      <ellipse cx="642" cy="300" rx="74" ry="44" fill="#000000" transform="rotate(18 642 300)" />
+    </mask>
+  </defs>
+  <g id="aviator-robot" transform="translate(0 -10)">
+    <g mask="url(#face-cutouts)">
+      <rect id="goggle-strap" x="184" y="326" width="656" height="116" rx="58" fill="#FFFFFF" />
+      <path id="head" fill="#FFFFFF" d="M512 326 C306 326 200 412 200 560 C200 636 224 690 272 730 L252 806 Q248 824 268 816 L354 778 C400 790 454 796 512 796 C718 796 824 710 824 560 C824 412 718 326 512 326Z" />
+      <rect id="goggle-bridge" x="460" y="274" width="104" height="54" rx="20" fill="#FFFFFF" />
+      <g id="left-goggle" transform="rotate(-18 382 300)">
+        <ellipse cx="382" cy="300" rx="116" ry="86" fill="#FFFFFF" />
+        <ellipse cx="382" cy="300" rx="74" ry="44" fill="#FFFFFF" />
+      </g>
+      <g id="right-goggle" transform="rotate(18 642 300)">
+        <ellipse cx="642" cy="300" rx="116" ry="86" fill="#FFFFFF" />
+        <ellipse cx="642" cy="300" rx="74" ry="44" fill="#FFFFFF" />
+      </g>
+    </g>
+    <g id="friendly-face" fill="#FFFFFF">
+      <ellipse id="eye-left" cx="410" cy="542" rx="30" ry="42" />
+      <ellipse id="eye-right" cx="614" cy="542" rx="30" ry="42" />
+      <path id="smile" d="M448 604 Q512 644 576 604 Q572 660 512 660 Q452 660 448 604Z" />
+    </g>
+  </g></svg>

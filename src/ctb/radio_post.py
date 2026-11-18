@@ -25,8 +25,12 @@ _ICONS = {"new": "🔔", "done": "✅", "team": "👥", "quota": "⚠️", "repl
 
 def bulletin_report(records: List[dict]) -> dict:
     """The report of a bulletin of replies: one (name, text) line per session reply."""
-    return {"kind": "bulletin", "lines": [(str(r.get("name") or ""), str(r.get("say") or r.get("text") or ""))
-                                          for r in records if str(r.get("say") or r.get("text") or "").strip()]}
+    from . import radio_talk
+    items = [r for r in records if str(r.get("say") or r.get("text") or "").strip()
+             and not radio_talk.working_only(str(r.get("say") or r.get("text") or ""))]
+    return {"kind": "bulletin",
+            "lines": [(str(r.get("name") or ""), str(r.get("say") or r.get("text") or "")) for r in items],
+            "reply_ids": [str(r.get("reply_id") or "") for r in items]}
 
 
 def _line(text: str, he: bool = False) -> str:
@@ -111,6 +115,14 @@ def post(cfg, rep: dict, lang: str, state: dict, bot=None, clock: Optional[str] 
     the same body as the last post, no channel, the owner's switch off, or a failure: logged, never raised).
     `state["last"]` keeps the fingerprint of the last body that went out."""
     try:
+        if rep.get("kind") == "bulletin":
+            from . import radio_dedupe
+            channel = alerts.channel()
+            if channel:
+                ids = rep.get("reply_ids") or []
+                rep = dict(rep, lines=[(name, text) for i, (name, text) in enumerate(rep.get("lines", []))
+                                      if not radio_dedupe.duplicate(channel["id"], text,
+                                                                   reply_id=ids[i] if i < len(ids) else "")])
         body = render(rep, lang, time.strftime("%H:%M") if clock is None else clock)
         if not body:
             return False

@@ -56,10 +56,15 @@ def command(cfg, project, ident, verb, note):
 
 
 def act(cfg, project, ident, action):
-    if action not in ("done", "drop", "push"):
+    if action not in ("done", "drop", "push", "touch"):
         raise ValueError("bad action")
     stem = locate(cfg, project, ident)
-    note = {"done": "done by owner", "drop": "dropped by owner", "push": "pushed by owner"}[action]
+    if action == "touch":
+        from . import request_sweep
+        if not request_sweep.touch(owner_requests.ledger_dir(cfg) / (stem + ".json"), ident):
+            raise AlreadyClosed("request changed")
+        return
+    note = {"done": "done by owner", "drop": owner_requests.DROPPED_NOTE, "push": "pushed by owner"}[action]
     command(cfg, stem, ident, "note" if action == "push" else "done", note)
 
 

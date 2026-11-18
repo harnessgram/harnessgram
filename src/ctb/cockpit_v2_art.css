@@ -1,0 +1,23 @@
+/* "Change picture": a bottom sheet over the Cockpit, logical properties only so the Hebrew page mirrors. */
+.cockpit-v2 .v2-art-sheet{color:var(--v2-ink);font-family:var(--v2-font);overflow:auto;max-inline-size:560px}
+:root.cockpit-v2[data-theme="dark"] .v2-art-sheet{background:var(--v2-page)}
+.cockpit-v2 .v2-art-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:18px}
+.cockpit-v2 .v2-art-x{inline-size:44px;block-size:44px;border-radius:50%;border:1px solid var(--v2-line);background:var(--v2-glass);color:var(--v2-ink);display:grid;place-items:center}
+.cockpit-v2 .v2-art-x svg{inline-size:20px;block-size:20px}
+.cockpit-v2 .v2-art-x[data-back] svg{transform:scaleX(-1)}
+.cockpit-v2 .v2-art-name{display:block;margin-block:2px 8px;color:var(--v2-muted);font-weight:700}
+.cockpit-v2 .v2-art-hint{margin-block:4px 12px;color:var(--v2-muted);font-size:14px}
+.cockpit-v2 .v2-art-list,.cockpit-v2 .v2-art-actions{display:grid;gap:var(--v2-gap-sm)}
+.cockpit-v2 .v2-art-btn{display:flex;align-items:center;gap:10px;min-block-size:48px;padding-inline:16px;border-radius:var(--v2-radius);border:1px solid var(--v2-line);background:var(--v2-glass);color:var(--v2-ink);font:inherit;font-weight:750;box-shadow:var(--v2-shadow)}
+.cockpit-v2 .v2-art-btn svg{inline-size:20px;block-size:20px;flex:none}
+.cockpit-v2 .v2-art-btn.ok{background:var(--v2-yes);color:#fff;border-color:transparent}
+.cockpit-v2 .v2-art-btn[disabled]{opacity:.6}
+.cockpit-v2 .v2-art-file{display:none}
+.cockpit-v2 .v2-art-scenes{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:var(--v2-gap-sm)}
+.cockpit-v2 .v2-art-scene{display:grid;gap:4px;padding:6px;border-radius:var(--v2-small);border:1px solid var(--v2-line);background:var(--v2-glass);color:var(--v2-ink);font:inherit;font-size:13px}
+.cockpit-v2 .v2-art-scene img,.cockpit-v2 .v2-art-pic img{inline-size:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;display:block}
+.cockpit-v2 .v2-art-compare{display:grid;grid-template-columns:1fr 1fr;gap:var(--v2-gap);margin-block-end:var(--v2-gap)}
+.cockpit-v2 .v2-art-pane{margin:0;display:grid;gap:6px;text-align:center;font-size:13px;color:var(--v2-muted)}
+.cockpit-v2 .v2-art-pic{display:block;border-radius:14px;overflow:hidden;border:2px solid var(--v2-line);box-shadow:var(--v2-shadow)}
+.cockpit-v2 .v2-art-edit{position:absolute;inset-block-start:10px;inset-inline-end:10px;inline-size:44px;block-size:44px;border-radius:50%;border:1px solid #fff;background:#fffffff0;color:var(--v2-blue-deep);display:grid;place-items:center;box-shadow:0 2px 6px #1f3d7a33}
+.cockpit-v2 .v2-art-edit svg{inline-size:20px;block-size:20px}

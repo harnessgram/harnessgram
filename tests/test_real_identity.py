@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot
+from conftest import GOOD_TOKEN, FakeBot, signed_in
 from ctb import accounts, identity, inbox as I
 from ctb.config import Config, state_dir, write_private
 
@@ -120,14 +120,14 @@ def test_the_real_identity_replaces_a_stale_record_and_regroups_the_twins(trio, 
 
 def test_the_roomy_account_is_no_longer_hidden_behind_a_full_twin(trio):
     now = time.time()
-    set_json("claude-usage-main.json", {"at": "2026-11-02T10:00:00Z", "five_hour": 10, "five_hour_resets": now + 3600,
+    set_json("claude-usage-main.json", {"at": now, "five_hour": 10, "five_hour_resets": now + 3600,
                                         "weekly": 100, "weekly_resets": now + 86400})
-    set_json("claude-usage-account6.json", {"at": "2026-11-02T10:00:00Z", "five_hour": 5, "five_hour_resets": now + 3600,
+    set_json("claude-usage-account6.json", {"at": now, "five_hour": 5, "five_hour_resets": now + 3600,
                                             "weekly": 31, "weekly_resets": now + 86400})
     assert accounts.used("account6", now) == 100                      # before: shares main's 100%
     # main's stale usage file is dropped on the identity change, so put a (different) reading back after it
     accounts.refresh_emails(now=NOW)
-    set_json("claude-usage-main.json", {"at": "2026-11-02T10:00:00Z", "five_hour": 10, "five_hour_resets": now + 3600,
+    set_json("claude-usage-main.json", {"at": now, "five_hour": 10, "five_hour_resets": now + 3600,
                                         "weekly": 100, "weekly_resets": now + 86400})
     assert accounts.used("account6", now) == 31 and accounts.used("main", now) == 100
 
@@ -269,7 +269,8 @@ def test_iso_epoch_handles_the_server_shapes():
 
 def test_an_idle_account_gets_the_same_record_a_status_line_writes(trio):
     trio.usage_api["T-six"] = usage_body()
-    assert accounts.refresh_usage(now=NOW, only=["account6"]) == ["account6"]
+    checked_at = accounts.iso_epoch("2026-11-02T10:00:00Z")
+    assert accounts.refresh_usage(now=checked_at, only=["account6"]) == ["account6"]
     rec = get_json("claude-usage-account6.json")
     assert rec["source"] == "oauth" and rec["five_hour"] in (12, 13) and rec["weekly"] == 31
     assert rec["five_hour_resets"] == accounts.iso_epoch("2026-11-02T18:00:00Z")
@@ -363,13 +364,14 @@ REAL_LOGIN_TERMINAL_RUNNING = accounts.login_terminal_running
 
 @pytest.fixture
 def removable(world, monkeypatch, request):
+    signed_in("main", "account2", "account4")
     if "private_tmux" not in request.fixturenames:  # no real tmux here: the sign-in terminal check is not the point
         monkeypatch.setattr(accounts, "login_terminal_running", lambda name: False)
     accounts.add("account2")
     accounts.add("account4")
     set_json("account-emails.json", {"main": "m@example.org", "account2": "two@example.org", "account4": "three@example.org"})
     set_json("account-limits.json", {"account2": 5.0, "account4": 6.0})
-    set_json("account-status.json", {"account2": "out"})
+    set_json("account-status.json", {})
     (accounts.config_dir("account2") / "marker.txt").write_text("keep me")
     monkeypatch.setattr(accounts, "live_session_records", lambda: [])
     return world
@@ -698,7 +700,8 @@ def test_a_failing_token_call_leaks_the_token_into_neither_state_nor_poll_log(tr
     assert SECRET not in blob and not any(SECRET in line for line in blob.splitlines())
 
 
-@pytest.mark.skipif(not __import__("shutil").which("tmux"), reason="needs tmux")
+@pytest.mark.skipif(not (__import__("shutil").which("tmux") and __import__("shutil").which("zsh")),
+                    reason="needs tmux and zsh (the sign-in shell is zsh)")
 def test_an_unfinished_sign_in_terminal_closes_by_itself(private_tmux, removable, monkeypatch):
     """A link nobody finished kept `claude auth login` open for hours and blocked removing the account."""
     import shutil

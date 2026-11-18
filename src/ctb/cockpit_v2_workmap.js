@@ -3,27 +3,35 @@
 // first) and state.morning (today's briefing, absent once dismissed). Nothing is computed here but the grouping.
 var wmOpen={},wmGone="";
 function wmT(k){return (V2.workmap||{})[k]||k;}
-function wmLine(it){
+function wmLine(it,key){
  var li=el("li","wm-line");li.setAttribute("data-wm-status",it.status);
- var what=el("bdi","wm-what",it.what);what.dir="auto";li.appendChild(what);
- if(it.impact){var im=el("div","wm-impact");im.appendChild(el("span","wm-impact-label",wmT("impact")));var tx=el("bdi",null,it.impact);tx.dir="auto";im.appendChild(tx);li.appendChild(im);}
+ var w=wmText(it,"what"),what=el("bdi","wm-what",w.text);what.dir=w.dir;li.appendChild(what);
+ if(it.impact){var m=wmText(it,"impact"),im=el("div","wm-impact");im.appendChild(el("span","wm-impact-label",wmT("impact")));var tx=el("bdi",null,m.text);tx.dir=m.dir;im.appendChild(tx);li.appendChild(im);}
+ source(key,it,li);
  return li;}
 function v2WorkMapCard(p){
  if(!last||!last.cockpit_v2||last.cockpit_v2.work_map_off)return null;
  var lines=p.work_map||[],card=v2Card("project-workmap",wmT("title"),"list");
  if(!lines.length){card.appendChild(el("div","v2-empty",wmT("empty")));return card;}
  var limit=6,open=!!wmOpen[p.key],shownLines=open?lines:lines.slice(0,limit),status="",ul=null;
- shownLines.forEach(function(it){
+ shownLines.forEach(function(it,i){
   if(it.status!==status){status=it.status;card.appendChild(el("div","v2-sub wm-head wm-"+status,wmT(status)));ul=el("ul","wm-lines");card.appendChild(ul);}
-  ul.appendChild(wmLine(it));});
+  ul.appendChild(wmLine(it,"workmap:"+p.key+":"+i));});
  if(lines.length>limit){var b=el("button","btn sm wm-more",open?wmT("less"):wmT("all")+" ("+nf.format(lines.length)+")");b.type="button";b.setAttribute("data-wm","more");
   b.addEventListener("click",function(){haptic("sel");wmOpen[p.key]=!open;render(last,true);});card.appendChild(b);}
  return card;}
-function wmList(title,rows,fmt,proj){
+// Preserve existing isolates from the translator and isolate any remaining English identifiers.
+function wmIsolate(s){return String(s||"").split(/([\u2066-\u2068][^\u2069]*\u2069)/g).map(function(p){
+ return /^[\u2066-\u2068]/.test(p)?p:p.replace(/[A-Za-z0-9][A-Za-z0-9_./:@#-]*/g,"\u2068$&\u2069");}).join("");}
+// A ledger line in Hebrew when its translation is ready (isolated, RTL); the original as is until then.
+function wmText(r,f){var t=shown(r,f),he=t!==r[f];return {text:he?wmIsolate(t):(r[f]||""),dir:he&&LANG==="he"?"rtl":"auto"};}
+function wmList(title,rows,fmt,proj,ledger){
  var box=el("div","wm-sec");box.appendChild(el("div","v2-sub wm-head",title));var ul=el("ul","wm-lines");
- rows.forEach(function(r){var li=el("li","wm-line"),w=el("bdi","wm-what",fmt(r));w.dir="auto";li.appendChild(w);
+ rows.forEach(function(r,i){var lw=ledger?wmText(r,"what"):{text:fmt(r),dir:"auto"},li=el("li","wm-line"),w=el("bdi","wm-what",lw.text);w.dir=lw.dir;li.appendChild(w);
   var pn=proj?proj(r):"";if(pn){var pe=el("bdi","wm-proj",pn);pe.dir="auto";li.appendChild(pe);}
-  if(r.impact){var im=el("div","wm-impact"),tx=el("bdi",null,r.impact);tx.dir="auto";im.appendChild(tx);li.appendChild(im);}ul.appendChild(li);});
+  if(r.impact){var lm=ledger?wmText(r,"impact"):{text:r.impact,dir:"auto"},im=el("div","wm-impact"),tx=el("bdi",null,lm.text);tx.dir=lm.dir;im.appendChild(tx);li.appendChild(im);}
+  if(ledger)source("morning:"+title+":"+i,[[r.what,r.what_he],[r.impact,r.impact_he]],li);
+  ul.appendChild(li);});
  box.appendChild(ul);return box;}
 function v2MorningCard(d){
  var m=d&&d.morning;if(!m||wmGone===m.date)return null;
@@ -37,8 +45,8 @@ function v2MorningCard(d){
  if(m.schedule.length)card.appendChild(wmList(wmT("schedule"),m.schedule,function(r){return (r.time?r.time+" ":"")+r.title;}));
  else card.appendChild(el("div","wm-none",wmT("noSchedule")));
  if(m.chores.length)card.appendChild(wmList(wmT("chores"),m.chores.map(function(c){return {title:c};}),function(r){return r.title;}));
- if(m.overnight.length)card.appendChild(wmList(wmT("overnight"),m.overnight,function(r){return r.what;}));
- if(m.waiting.length)card.appendChild(wmList(wmT("waiting"),m.waiting,function(r){return r.what;},function(r){return r.what===r.project?"":r.project;}));
+ if(m.overnight.length)card.appendChild(wmList(wmT("overnight"),m.overnight,function(r){return r.what;},null,true));
+ if(m.waiting.length)card.appendChild(wmList(wmT("waiting"),m.waiting,function(r){return r.what;},function(r){return r.what===r.project?"":r.project;},true));
  else card.appendChild(el("div","wm-none",wmT("quiet")));
  return card;}
 ICONS.v2sun="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4";

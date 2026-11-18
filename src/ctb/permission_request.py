@@ -36,6 +36,7 @@ import signal
 import time
 from typing import Optional, Tuple
 
+from . import menus
 from .config import Config, home_chat, private_dir, state_dir, write_private
 from .i18n import t
 
@@ -43,12 +44,15 @@ STATE_FILE = "permission-requests.json"
 HOOK_TIMEOUT = 300        # seconds: the hook's timeout in the settings (install.desired_hooks)
 WAIT = HOOK_TIMEOUT - 30  # the hook gives up well before Claude Code would kill it
 POLL = 0.25
+SWEEP_GRACE = 10         # let a live waiter retire its own expired request
+ORPHAN_GRACE = 60
+STOP_LOCK_WAIT = 0.5
 KEEP_CLOSED = 30
 SHOWN_CHARS = 1500        # a request longer than this is never shown in full, so never approved from the phone
 SHOWN_HTML = 3000         # and its HTML-escaped form must fit a Telegram message with the card's words
 CLIPPED_CHARS = 1000      # what a card shows of a request it cannot show in full
 ID_RE = re.compile(r"[0-9a-f]{16}")
-CALLBACK = re.compile(r"pq:n:([0-9a-f]{16})")  # the card's only button: No
+CALLBACK = re.compile(r"pq:(?:n:[0-9a-f]{16}|[qmd]:[0-9a-f]{16}:[0-9a-f]{8}|x:[0-9a-f]{16}|p:[ary]:[0-9a-f]{16})")
 YES_WORDS = {"yes", "y", "כן", "אשר", "מאשר", "אישור"}
 NO_WORDS = {"no", "n", "לא", "דחה", "ביטול"}
 # Sessions that really show a prompt to a person. Never dontAsk (assistant sessions: every prompt is refused, and a
@@ -92,6 +96,15 @@ def describe(tool_input) -> Tuple[str, bool]:
     # change a single character, the request can only be declined from the phone.
     complete = (plain and safe == shown and redact_channel(shown) == shown and len(shown) <= SHOWN_CHARS
                 and len(html.escape(shown, quote=False)) <= SHOWN_HTML)
+    if len(shown) > SHOWN_CHARS or len(html.escape(shown, quote=False)) > SHOWN_HTML:
+        value = tool_input if isinstance(tool_input, str) else next(
+            (tool_input.get(k) for k in ("command", "file_path", "path", "description")
+             if isinstance(tool_input, dict) and isinstance(tool_input.get(k), str)), "")
+        line = next((line.strip() for line in value.splitlines() if line.strip()), "")
+        line = re.sub(r"(?<![\w.])/(?:[^\s/]+/){2,}([^\s/]+)", r"…/\1", line)
+        line = json.dumps(line, ensure_ascii=True)[1:-1]
+        line = redact_channel(redact(line))
+        return line[:180] + ("…" if len(line) > 180 else ""), False
     return (safe if complete else safe[:CLIPPED_CHARS] + ("\n…" if len(safe) > CLIPPED_CHARS else "")), complete
 
 
@@ -113,9 +126,16 @@ def _path():
     return private_dir(state_dir()) / STATE_FILE
 
 
-def _update(fn):
+def _update(fn, until=None, trim=True):
     with open(private_dir(state_dir()) / "permission-requests.lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX if until is None else fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= until:
+                    return None
+                time.sleep(min(0.05, max(0, until - time.monotonic())))
         try:
             data = json.loads(_path().read_text(encoding="utf-8"))
             if not isinstance(data, dict):
@@ -123,9 +143,10 @@ def _update(fn):
         except (OSError, ValueError):
             data = {}
         out = fn(data)
-        closed = sorted((k for k, r in data.items() if isinstance(r, dict) and r.get("state") != "open"),
+        closed = sorted((k for k, r in data.items() if isinstance(r, dict) and r.get("state") != "open"
+                         and (r.get("state") not in ("gone", "expired") or r.get("retired"))),
                         key=lambda k: data[k].get("closed_at", 0), reverse=True)
-        for gone in closed[KEEP_CLOSED:]:
+        for gone in closed[KEEP_CLOSED:] if trim else ():
             del data[gone]
         write_private(_path(), json.dumps(data, ensure_ascii=False))
         return out
@@ -190,16 +211,34 @@ def answer(ident: str, choice: str, via: str, message: Optional[int] = None, now
 
 
 def _close(ident: str, state: str, now: Optional[float] = None) -> Optional[dict]:
-    """Close an open request (expired or gone); the record as it was, or None when it was not open."""
     now = time.time() if now is None else now
 
     def put(data):
         rec = data.get(ident)
         if not isinstance(rec, dict) or rec.get("state") != "open":
             return None
-        data[ident] = dict(rec, state=state, closed_at=now)
-        return rec
+        rec.update(state=state, closed_at=now)
+        return dict(rec)
     return _update(put)
+
+
+def supersede(session: str, agent_id=None) -> None:
+    """Mark this session's requests gone; never delay a Stop hook for a busy lock."""
+    if not isinstance(session, str) or not session:
+        return
+    now = time.time()
+    def put(data):
+        for rec in data.values():
+            if (isinstance(rec, dict) and rec.get("state") == "open" and rec.get("session") == session
+                    and rec.get("agent_id") == agent_id):
+                rec.update(state="gone", closed_at=now)
+    _update(put, until=time.monotonic() + STOP_LOCK_WAIT, trim=False)
+
+
+def pending(ident: str, now: Optional[float] = None) -> bool:
+    rec = get(ident)
+    now = time.time() if now is None else now
+    return rec.get("state") == "open" and now < rec.get("deadline", 0) and _alive(rec.get("pid"))
 
 
 # --- the card -------------------------------------------------------------------------------------
@@ -216,23 +255,63 @@ def card_markup(ident: str, lang: str) -> dict:
                                   "style": "danger"}]]}
 
 
-def _edit(cfg, bot, rec: dict, text: str) -> None:
+def _question_text(question: dict, lang: str) -> str:
+    return (f"❓ <b>{html.escape(t('pq_question_title', lang=lang))}</b>\n"
+            f"{html.escape(question['question'])}")
+
+
+def _question_markup(ident: str, rec: dict, index: int, lang: str) -> dict:
+    question = rec["questions"][index]
+    selected = set(rec.get("selected", {}).get(str(index), []))
+    rows = []
+    for option in question["options"]:
+        mark = "☑️ " if option["token"] in selected else ""
+        action = "m" if question["multi"] else "q"
+        rows.append([{"text": mark + option["label"],
+                      "callback_data": f"pq:{action}:{ident}:{option['token']}"}])
+    if question["multi"]:
+        rows.append([{"text": t("pq_btn_done", lang=lang), "callback_data": f"pq:d:{ident}:{question['token']}"}])
+    rows.append([{"text": t("pq_btn_terminal", lang=lang), "callback_data": f"pq:x:{ident}"}])
+    rows.append(menus.close_row(lang))
+    return {"inline_keyboard": rows}
+
+
+def _plan_text(plan: str, lang: str) -> str:
+    head = f"📋 <b>{html.escape(t('pq_plan_title', lang=lang))}</b>\n"
+    suffix = "\n…" if len(plan) > 3500 else ""
+    return head + html.escape(plan[:3500], quote=False) + suffix
+
+
+def _plan_markup(ident: str, lang: str) -> dict:
+    return {"inline_keyboard": [
+        [{"text": t("pq_btn_approve", lang=lang), "callback_data": f"pq:p:a:{ident}"},
+         {"text": t("pq_btn_reject", lang=lang), "callback_data": f"pq:p:r:{ident}", "style": "danger"}],
+        [{"text": t("pq_btn_terminal", lang=lang), "callback_data": f"pq:p:y:{ident}"}],
+        menus.close_row(lang),
+    ]}
+
+
+def _edit(cfg, bot, rec: dict, text: str) -> bool:
     if not isinstance(rec.get("message_id"), int):
-        return
+        return True
     try:
         bot.call("editMessageText", {"chat_id": rec.get("chat") or home_chat(cfg), "message_id": rec["message_id"],
                                      "text": text, "reply_markup": {"inline_keyboard": []}})
+        return True
+    except Exception as exc:
+        description = str(exc).lower()
+        return "message is not modified" in description or "message to edit not found" in description
+
+
+def _settle_decision(rec: dict, state: str, choice: str = "") -> bool:
+    if not rec.get("decision"):
+        return True
+    from . import decisions
+    try:
+        decisions.settle_permission(rec["decision"], state, choice)
+        return True
     except Exception:
-        pass
-
-
-def _settle_decision(rec: dict, state: str, choice: str = "") -> None:
-    if rec.get("decision"):
-        from . import decisions
-        try:
-            decisions.settle_permission(rec["decision"], state, choice)
-        except Exception:
-            pass
+        return False
 
 
 def finish(cfg, bot, ident: str) -> None:
@@ -245,10 +324,11 @@ def finish(cfg, bot, ident: str) -> None:
     _settle_decision(rec, "answered", rec.get("choice", ""))
 
 
-def retire(cfg, bot, rec: dict, key: str) -> None:
+def retire(cfg, bot, rec: dict, key: str) -> bool:
     lang = getattr(cfg, "ui_language", None) or "en"
-    _edit(cfg, bot, rec, t(key, lang=lang))
-    _settle_decision(rec, "cancelled")
+    edited = _edit(cfg, bot, rec, t(key, lang=lang))
+    settled = _settle_decision(rec, "cancelled")
+    return edited and settled
 
 
 # --- the hook -------------------------------------------------------------------------------------
@@ -256,6 +336,87 @@ def retire(cfg, bot, rec: dict, key: str) -> None:
 def _decision(choice: str) -> dict:
     out = {"behavior": "allow"} if choice == "yes" else {"behavior": "deny", "message": t("pq_denied_note", lang="en")}
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": out}}
+
+
+def _structured_decision(rec: dict) -> Optional[dict]:
+    if rec.get("kind") == "questions" and rec.get("state") == "answered":
+        decision = {"behavior": "allow", "updatedInput": {**rec["tool_input"], "answers": rec["answers"]}}
+    elif rec.get("kind") == "plan" and rec.get("state") == "answered":
+        decision = ({"behavior": "allow", "updatedInput": rec["tool_input"]}
+                    if rec.get("choice") == "yes" else
+                    {"behavior": "deny", "message": t("pq_plan_denied_note", lang="en")})
+    else:
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+
+
+def _make_questions(tool_input) -> Optional[list]:
+    """Validate UI fields while retaining the original input separately for updatedInput."""
+    if not isinstance(tool_input, dict) or not isinstance(tool_input.get("questions"), list) or not tool_input["questions"]:
+        return None
+    result = []
+    for raw in tool_input["questions"]:
+        if (not isinstance(raw, dict) or not isinstance(raw.get("question"), str)
+                or not raw["question"] or not isinstance(raw.get("options"), list) or not raw["options"]):
+            return None
+        options = []
+        for option in raw["options"]:
+            if not isinstance(option, dict) or not isinstance(option.get("label"), str) or not option["label"]:
+                return None
+            options.append({"label": option["label"], "token": secrets.token_hex(4)})
+        multi = raw.get("multiSelect", False)
+        if not isinstance(multi, bool):
+            return None
+        result.append({"question": raw["question"], "options": options, "multi": multi,
+                       "token": secrets.token_hex(4)})
+    return result
+
+
+def _publish_structured(data: dict, session: str, tool: str, found, cfg: Config, bot, lang: str,
+                        wait: float) -> Optional[str]:
+    tool_input = data.get("tool_input")
+    questions = _make_questions(tool_input) if tool == "AskUserQuestion" else None
+    if tool == "AskUserQuestion" and questions is None:
+        return None
+    if tool == "ExitPlanMode" and not isinstance(tool_input, dict):
+        return None
+    ident = secrets.token_hex(8)
+    now = time.time()
+    rec = {"session": session, "kind": "questions" if questions is not None else "plan",
+           "tool_input": tool_input, "created": now, "deadline": now + wait, "pid": os.getpid(),
+           "state": "open", "chat": found.away, "thread": found.thread, "agent_id": data.get("agent_id")}
+    if questions is not None:
+        rec.update(questions=questions, answers={}, selected={}, message_ids=[])
+    else:
+        plan = tool_input.get("plan", "")
+        if not isinstance(plan, str):
+            plan = json.dumps(plan, ensure_ascii=False)
+
+    def publish(records):
+        records[ident] = rec
+        write_private(_path(), json.dumps(records, ensure_ascii=False))
+        messages = []
+        cards = ([( _question_text(q, lang), _question_markup(ident, rec, i, lang))
+                  for i, q in enumerate(questions)] if questions is not None
+                 else [(_plan_text(plan, lang), _plan_markup(ident, lang))])
+        for text, markup in cards:
+            try:
+                mid = (bot.call("sendMessage", {"chat_id": found.chat, "message_thread_id": found.thread,
+                       "text": text, "parse_mode": "HTML", "reply_markup": markup,
+                       "disable_notification": False}) or {}).get("message_id")
+            except Exception:
+                mid = None
+            if not isinstance(mid, int):
+                rec.update(state="gone", closed_at=time.time())
+                write_private(_path(), json.dumps(records, ensure_ascii=False))
+                return False
+            messages.append(mid)
+        rec["message_ids"] = messages
+        rec["message_id"] = messages[0]
+        rec["sent_at"] = time.time()
+        write_private(_path(), json.dumps(records, ensure_ascii=False))
+        return True
+    return ident if _update(publish) else None
 
 
 def run_hook(stdin_text: str, cfg: Optional[Config] = None, bot=None, wait: float = WAIT, out=None) -> int:
@@ -284,37 +445,48 @@ def run_hook(stdin_text: str, cfg: Optional[Config] = None, bot=None, wait: floa
         from .telegram import Bot
         bot = bot or Bot.from_config(cfg)
         lang = getattr(cfg, "ui_language", None) or "en"
-        text, complete = describe(data.get("tool_input"))
-        tool_shown = tool if visible(tool) and len(tool) <= 120 else json.dumps(tool)[:120]
-        complete = complete and tool_shown == tool and tool_exact(tool)
-        now = time.time()
-        ident = secrets.token_hex(8)
-        rec = {"session": session, "tool": tool_shown, "text": text, "complete": complete, "created": now,
-               "deadline": now + wait, "pid": os.getpid(), "state": "open", "chat": found.away, "thread": found.thread}
-        # Each surface filters the whole string it shows, not its parts: the Cockpit's "tool\ntext" and the topic
-        # card. If any redaction would change either joined string, the phone may only decline.
-        rec["complete"] = complete = complete and surfaces_exact(tool_shown + "\n" + text, card_text(rec, lang))
-        _update(lambda d: d.__setitem__(ident, rec))
-        params = {"chat_id": found.chat, "message_thread_id": found.thread, "text": card_text(rec, lang),
-                  "parse_mode": "HTML", "reply_markup": card_markup(ident, lang), "disable_notification": False}
-        try:
-            mid = (bot.call("sendMessage", params) or {}).get("message_id")
-        except Exception:
-            mid = None
-        if not isinstance(mid, int):
-            _close(ident, "unsent")
-            return 0
-        decision = None
-        try:
-            from . import decisions
-            decision = decisions.create(session, found.chat, found.thread, t("pq_decision_title", lang=lang),
-                                        t("pq_decision_detail" if complete else "pq_decline_only", lang=lang),
-                                        lang=lang, perm=ident, request=tool_shown + "\n" + text,
-                                        decline_only=not complete)["id"]
-        except Exception:
-            decision = None
-        sent_at = time.time()
-        _update(lambda d: d.get(ident, {}).update(message_id=mid, decision=decision, sent_at=sent_at))
+        if tool in ("AskUserQuestion", "ExitPlanMode"):
+            ident = _publish_structured(data, session, tool, found, cfg, bot, lang, wait)
+            if ident is None:
+                return 0
+            rec = get(ident)
+        else:
+            text, complete = describe(data.get("tool_input"))
+            tool_shown = tool if visible(tool) and len(tool) <= 120 else json.dumps(tool)[:120]
+            complete = complete and tool_shown == tool and tool_exact(tool)
+            now = time.time()
+            ident = secrets.token_hex(8)
+            rec = {"session": session, "tool": tool_shown, "text": text, "complete": complete, "created": now,
+                   "deadline": now + wait, "pid": os.getpid(), "state": "open", "chat": found.away, "thread": found.thread,
+                   "agent_id": data.get("agent_id")}
+            rec["complete"] = complete = complete and surfaces_exact(tool_shown + "\n" + text, card_text(rec, lang))
+            def publish(d):
+                d[ident] = rec
+                write_private(_path(), json.dumps(d, ensure_ascii=False))
+                try:
+                    from . import decisions
+                    rec["decision"] = decisions.create(
+                        session, found.chat, found.thread, t("pq_decision_title", lang=lang),
+                        t("pq_decision_detail" if complete else "pq_decline_only", lang=lang),
+                        lang=lang, perm=ident, request=tool_shown + "\n" + text,
+                        decline_only=not complete)["id"]
+                except Exception:
+                    pass
+                write_private(_path(), json.dumps(d, ensure_ascii=False))
+                params = {"chat_id": found.chat, "message_thread_id": found.thread, "text": card_text(rec, lang),
+                          "parse_mode": "HTML", "reply_markup": card_markup(ident, lang), "disable_notification": False}
+                try:
+                    mid = (bot.call("sendMessage", params) or {}).get("message_id")
+                except Exception:
+                    mid = None
+                if not isinstance(mid, int):
+                    rec.update(state="gone", closed_at=time.time())
+                    return False
+                rec.update(message_id=mid, sent_at=time.time())
+                write_private(_path(), json.dumps(d, ensure_ascii=False))
+                return True
+            if not _update(publish):
+                return 0
 
         def gone(*_a):
             raise SystemExit(0)
@@ -325,6 +497,11 @@ def run_hook(stdin_text: str, cfg: Optional[Config] = None, bot=None, wait: floa
                 pass
         while time.time() < rec["deadline"]:
             cur = get(ident)
+            structured = _structured_decision(cur)
+            if structured is not None:
+                out.write(json.dumps(structured, ensure_ascii=False))
+                out.flush()
+                return 0
             if cur.get("state") == "answered" and cur.get("choice") in ("yes", "no"):
                 out.write(json.dumps(_decision(cur["choice"])))
                 out.flush()
@@ -333,15 +510,11 @@ def run_hook(stdin_text: str, cfg: Optional[Config] = None, bot=None, wait: floa
             if cur.get("state") != "open":
                 return 0
             time.sleep(POLL)
-        closed = _close(ident, "expired")
-        if closed:
-            retire(cfg, bot, dict(closed, message_id=mid, decision=decision), "pq_expired")
+        _close(ident, "expired")
     except BaseException as exc:  # noqa: BLE001 - nothing may escape into Claude Code; never an allow
         if ident:
             try:
-                closed = _close(ident, "gone")
-                if closed and cfg is not None and bot is not None:
-                    retire(cfg, bot, closed, "pq_gone")
+                _close(ident, "gone")
             except Exception:
                 pass
         if isinstance(exc, KeyboardInterrupt):
@@ -359,17 +532,80 @@ def button(q: dict, cfg: Config, bot, m: dict, session: str, data: str) -> str:
     match = CALLBACK.fullmatch(data or "")
     sender = q.get("from") or {}
     found = place(cfg, session)
-    rec = get(match[1]) if match else {}
+    parts = (data or "").split(":")
+    ident = parts[-1] if len(parts) == 3 and parts[1] in ("x",) else (
+        parts[3] if len(parts) == 4 and parts[1] == "p" else parts[2] if len(parts) >= 3 else "")
+    rec = get(ident) if match else {}
     if (not match or sender.get("id") != cfg.owner_user_id or sender.get("is_bot") or not found
             or found.chat != (m.get("chat") or {}).get("id") or found.thread != m.get("message_thread_id")
-            or rec.get("session") != session or rec.get("message_id") != m.get("message_id")):
+            or rec.get("session") != session or m.get("message_id") not in rec.get("message_ids", [rec.get("message_id")])):
         I._answer_button(bot, q, t("toast_not_available", lang=lang))
         return "ignored"
-    result = answer(match[1], "no", "button")
+    if rec.get("kind") in ("questions", "plan"):
+        result = _structured_button(ident, parts, rec, m.get("message_id"), cfg, bot, lang)
+        I._answer_button(bot, q, t("pq_toast_sent" if result == "ok" else "toast_question_closed", lang=lang))
+        return "permission-" + result
+    result = answer(ident, "no", "button")
     I._answer_button(bot, q, t("pq_toast_sent" if result == "ok" else "toast_question_closed", lang=lang))
     if result == "ok":
-        finish(cfg, bot, match[1])
+        finish(cfg, bot, ident)
     return "permission-" + result
+
+
+def _structured_button(ident: str, parts: list, snapshot: dict, message_id: int,
+                       cfg: Config, bot, lang: str) -> str:
+    now = time.time()
+    redraw = None
+
+    def choose(records):
+        nonlocal redraw
+        rec = records.get(ident)
+        if (not isinstance(rec, dict) or rec.get("state") != "open" or now >= rec.get("deadline", 0)
+                or not _alive(rec.get("pid"))):
+            return "closed"
+        action = parts[1]
+        if action == "x" or (action == "p" and parts[2] == "y"):
+            rec.update(state="terminal", closed_at=now)
+            return "ok"
+        if rec.get("kind") == "plan" and action == "p" and parts[2] in ("a", "r"):
+            rec.update(state="answered", choice="yes" if parts[2] == "a" else "no", closed_at=now)
+            return "ok"
+        if rec.get("kind") != "questions" or action not in ("q", "m", "d"):
+            return "closed"
+        index = next((i for i, mid in enumerate(rec["message_ids"]) if mid == message_id), None)
+        if index is None:
+            return "closed"
+        question = rec["questions"][index]
+        token = parts[3]
+        if action == "d":
+            selected = rec.get("selected", {}).get(str(index), [])
+            if token != question["token"] or not question["multi"] or not selected:
+                return "closed"
+            labels = [o["label"] for o in question["options"] if o["token"] in selected]
+            rec["answers"][question["question"]] = ", ".join(labels)
+        else:
+            option = next((o for o in question["options"] if o["token"] == token), None)
+            if option is None or question["multi"] != (action == "m"):
+                return "closed"
+            if action == "m":
+                selected = rec.setdefault("selected", {}).setdefault(str(index), [])
+                selected.remove(token) if token in selected else selected.append(token)
+                redraw = (index, dict(rec))
+                return "ok"
+            rec["answers"][question["question"]] = option["label"]
+        if len(rec["answers"]) == len(rec["questions"]):
+            rec.update(state="answered", closed_at=now)
+        return "ok"
+
+    result = _update(choose)
+    if result == "ok" and redraw:
+        index, current = redraw
+        try:
+            bot.call("editMessageReplyMarkup", {"chat_id": current["chat"], "message_id": message_id,
+                     "reply_markup": _question_markup(ident, current, index, lang)})
+        except Exception:
+            pass
+    return result or "closed"
 
 
 def _word(text: str) -> str:
@@ -440,12 +676,31 @@ def sweep(cfg: Config, bot, now: Optional[float] = None) -> int:
     now = time.time() if now is None else now
     n = 0
     for ident, rec in list(_all().items()):
-        if not isinstance(rec, dict) or rec.get("state") != "open":
+        if not isinstance(rec, dict):
             continue
-        if _alive(rec.get("pid")) and now < rec.get("deadline", 0) + 10:
-            continue
-        closed = _close(ident, "gone", now)
-        if closed:
-            retire(cfg, bot, closed, "pq_gone")
+        if rec.get("state") == "open":
+            alive = _alive(rec.get("pid"))
+            if alive and now < rec.get("deadline", 0) + SWEEP_GRACE:
+                continue
+            rec = _close(ident, "expired" if alive else "gone", now)
+            if not rec:
+                continue
             n += 1
+        if rec.get("state") in ("gone", "expired") and not rec.get("retired"):
+            if retire(cfg, bot, rec, "pq_expired" if rec["state"] == "expired" else "pq_gone"):
+                def mark(data):
+                    current = data.get(ident)
+                    if isinstance(current, dict) and current.get("state") == rec["state"]:
+                        current["retired"] = True
+                _update(mark)
+
+    # Hold the publication lock while checking the unfiltered decisions: a publisher
+    # must not be between creating its decision and saving its request here.
+    def cancel_orphans(data):
+        from . import decisions
+        for decision in decisions._load(state_dir() / decisions.STATE_FILE).values():
+            if (decision["state"] == "open" and decision.get("perm")
+                    and decision["perm"] not in data and decision["created"] <= now - ORPHAN_GRACE):
+                decisions.settle_permission(decision["id"], "cancelled", now=now)
+    _update(cancel_orphans)
     return n

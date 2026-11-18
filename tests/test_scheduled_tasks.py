@@ -435,22 +435,32 @@ def limit_ready(monkeypatch):
     monkeypatch.setattr(mirror.alerts, "alert", lambda *a, **k: None)
 
 
-def test_limit_offer_of_a_muted_task_is_sent_into_its_topic(claude, wired, limit_ready):
+@pytest.mark.parametrize("credit", [False, True])
+def test_limit_offer_of_a_muted_task_is_sent_into_its_topic(claude, wired, limit_ready, credit):
     run(claude, "run-m")
     thread = tmap(wired).ensure("run-m", "t")
     scheduled.set_muted(TASK, True)
-    assert mirror.limit_offer(cfg(), wired, "run-m", "You've hit your limit · resets 5pm") is True
+    config = cfg()
+    config.emergency_credit = credit
+    assert mirror.limit_offer(config, wired, "run-m", "You've hit your limit · resets 5pm", api_error=True) is True
     sent = wired.methods("sendMessage")[-1]
     assert (sent["chat_id"], sent["message_thread_id"]) == (OWNER, thread)
-    assert "more:/account move spare" in [b["callback_data"] for row in sent["reply_markup"]["inline_keyboard"]
-                                           for b in row]
+    callbacks = [b["callback_data"] for row in sent["reply_markup"]["inline_keyboard"] for b in row]
+    if credit:
+        assert any(c.startswith("cr:") and c.endswith(":yes") for c in callbacks)
+        assert any(c.startswith("cr:") and c.endswith(":no") for c in callbacks)
+    else:
+        assert "more:/account move spare" in callbacks
 
 
-def test_limit_offer_reopens_a_closed_topic_and_retries(claude, wired, limit_ready):
+@pytest.mark.parametrize("credit", [False, True])
+def test_limit_offer_reopens_a_closed_topic_and_retries(claude, wired, limit_ready, credit):
     run(claude, "run-m")
     thread = tmap(wired).ensure("run-m", "t")
     scheduled.set_muted(TASK, True)
     wired.fail["sendMessage"] = "Bad Request: TOPIC_CLOSED"
-    assert mirror.limit_offer(cfg(), wired, "run-m", "You've hit your limit · resets 5pm") is True
+    config = cfg()
+    config.emergency_credit = credit
+    assert mirror.limit_offer(config, wired, "run-m", "You've hit your limit · resets 5pm", api_error=True) is True
     assert wired.methods("reopenForumTopic") == [{"chat_id": OWNER, "message_thread_id": thread}]
     assert [p["message_thread_id"] for p in wired.methods("sendMessage")] == [thread, thread]  # refused, then sent

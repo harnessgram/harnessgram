@@ -162,6 +162,7 @@ def test_a_resume_after_a_restart_reads_the_switch_again_because_it_is_a_start(m
 
 def test_status_shows_the_mode_and_skips_telegram_when_private(monkeypatch):
     c = cfg()
+    monkeypatch.setattr(radio, "job_pid", lambda: None)
     monkeypatch.setattr(radio, "call_helper", lambda s, action, call=None, **k: {"ok": True, "active": False})
     assert radio.status(c)["mode"] == "group+private" and radio.status(c)["group_live"] is True
     assert "call" in radio.status(c, live=True)
@@ -257,7 +258,34 @@ def test_an_audio_only_pipeline_publishes_nothing_and_feeds_only_the_private_str
                                                                                       marker=radio.MARKER)
     assert all(flag not in args for flag in VIDEO_FLAGS)
     seg = FakeSegmenter.made[0]
-    assert seg.path == radio.folder() / "hls" and seg.data.startswith(b"FLV") and seg.closed
+    assert seg.path == radio.folder() / "private-hls" and seg.data.startswith(b"FLV") and seg.closed
+
+
+@pytest.mark.parametrize("source", ["background", "show"])
+def test_legacy_hls_never_receives_library_or_podcast_segments(monkeypatch, source):
+    legacy = radio.folder() / "hls"
+    legacy.mkdir()
+    (legacy / "segment-1.ts").write_bytes(b"old station speech")
+    FakeSegmenter.made = []
+    public = radio.SpeechMixer(bytes(4))
+    private = radio.PrivateMixer(bytes(4), public)
+    private.background_enabled = True
+    setattr(private, source, SimpleNamespace(paused=False, read=lambda size: b"\x20\x00" * (size // 2)))
+    music = private.next()
+    assert music != bytes(len(music)) and public.next() == bytes(len(music))
+
+    class EncodedPrivate(FakeProc):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.stdout = io.BytesIO(b"FLV" + music)  # fake encoding, no ffmpeg
+
+    monkeypatch.setattr(radio.subprocess, "Popen", EncodedPrivate)
+    monkeypatch.setattr(radio_rtmp, "PlayerSegmenter", FakeSegmenter)
+    pipe = radio.Pipeline("", "", radio.folder() / "card", "", private, lambda pid: None, audio_only=True)
+    assert pipe.run() == "the encoder stopped"
+    assert [(seg.path, seg.data) for seg in FakeSegmenter.made] == [(radio.folder() / "private-hls", b"FLV" + music)]
+    assert (legacy / "segment-1.ts").read_bytes() == b"old station speech"
+    assert len(list(legacy.iterdir())) == 1
 
 
 def test_an_audio_only_pipeline_never_starts_a_picture_writer(monkeypatch):
@@ -333,6 +361,7 @@ def station(monkeypatch, no_launchd):
     monkeypatch.setattr(radio, "_secret", lambda command: "secret-" + command[0])
     monkeypatch.setattr(radio.radio_card, "plain", lambda path: None)
     monkeypatch.setattr(radio, "_sync_copy", lambda *a: None)
+    monkeypatch.setattr(radio.Station, "_start_audio", lambda *a, **kw: None)
     st = radio.Station(c)
     for loop in ("listener_loop", "content_loop", "caption_loop", "talk_loop", "room_loop", "podcast_loop"):
         monkeypatch.setattr(st, loop, lambda: None)
@@ -426,9 +455,8 @@ def test_the_call_listener_is_not_asked_while_private(monkeypatch, tmp_path):
 
 # --- the YouTube mirror ------------------------------------------------------------------------------------------
 
-def test_the_mirror_reads_the_home_hls_audio_so_it_needs_no_home_picture():
-    """The mirror draws its own picture and takes only the home radio's private HLS audio; so with the group stream
-    off, the home radio's audio-only private stream is exactly what it needs, even when radio_player was false."""
+def test_the_mirror_reads_separate_speech_hls_so_it_needs_no_home_picture():
+    """A separate local speech-only output exists even when the group has no video pipeline."""
     from ctb import radio_youtube as Y
     from test_radio_youtube_mirror import live_home
     c = cfg(radio_player=False)
@@ -437,7 +465,7 @@ def test_the_mirror_reads_the_home_hls_audio_so_it_needs_no_home_picture():
     assert Y.mirror_ready(c) is False       # the owner switched the private stream off and the group stream is on
     radio._write(radio.folder() / "state.json", {"on": True, "group_live": False})
     assert Y.mirror_ready(c) is True        # private is the only output now, so it is always made
-    assert Y.mirror_playlist() == radio.folder() / "hls" / "live.m3u8"
+    assert Y.mirror_playlist() == radio.folder() / "public-hls" / "live.m3u8"
 
 
 # --- the add-on --------------------------------------------------------------------------------------------------

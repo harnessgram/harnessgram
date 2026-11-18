@@ -32,7 +32,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import accounts, alerts, compact, delivery, dialogs, flood, framing, identity, listen, members, pins, replay, sessions_menu, voice
+from . import accounts, alerts, compact, delivery, dialogs, flood, framing, identity, listen, members, notices, pins, progress, radio_agent, replay, sessions_menu, voice
 from . import lang as L
 from . import status
 from . import scheduled
@@ -264,14 +264,19 @@ class Inbox:
             return
         # Panel answers cannot be reconstructed from a drop notice: their cards have already closed.
         # Preserve them in order, and use the remaining slots for the newest other messages.
-        panel = [i for i in real if i.get("source") == "panel"]
-        others = [i for i in real if i.get("source") != "panel"]
+        panel = [i for i in real if i.get("source") == "panel" or i.get("decision")]
+        # Connector suggestions are the first expendable items. Preserve owner/team traffic before using
+        # any remaining capacity for the newest MCP suggestions.
+        others = [i for i in real if i not in panel and i.get("source") != "mcp"]
+        mcp = [i for i in real if i.get("source") == "mcp" and i not in panel]
         slots = max(0, self.max_items - len(panel))
-        keep_ids = {id(i) for i in panel + (others[-slots:] if slots else [])}
+        keep_other = others[-slots:] if slots else []
+        mcp_slots = max(0, slots - len(keep_other))
+        keep_ids = {id(i) for i in panel + keep_other + (mcp[-mcp_slots:] if mcp_slots else [])}
         kept = [i for i in real if id(i) in keep_ids]
         dropped = sum(i.get("dropped", 0) for i in items if i.get("dropped")) + len(real) - len(kept)
-        note = {"text": f"({dropped} older Telegram message(s) were dropped because the queue was full)",
-                "dropped": dropped}
+        note = {"text": f"({dropped} older queue item(s) were dropped because the queue was full)",
+                "source": "queue", "dropped": dropped}
         tmp = queue.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -403,7 +408,9 @@ class Inbox:
                 try:
                     answer_dir = private_dir(state_dir() / "answer-to")
                     write_private(answer_dir / safe_name(session), json.dumps(
-                        {"id": target["id"], "chat": target["chat"], "at": time.time()}))
+                        {"id": target["id"], "chat": target["chat"], "at": time.time(),
+                         "text": str(target.get("text") or target.get("caption") or ""),
+                         "source": str(target.get("source") or "")}))
                 except OSError:
                     pass  # Optional reply metadata must never discard the delivered messages.
         finally:
@@ -675,7 +682,7 @@ class Inbox:
         finally:
             fh.close()
 
-    def consume_answer_to(self, session: str, until: Optional[float] = None) -> Optional[dict]:
+    def consume_answer_to(self, session: str, until: Optional[float] = None, include_text: bool = False) -> Optional[dict]:
         """Freeze this turn's chat/message pair before spawning a detached reply.
         Writers and consumers use the same session lock, so a new target cannot be deleted.
         `until`: a time.monotonic() deadline for the lock (LockBusy), so a hook never hangs on it.
@@ -694,7 +701,12 @@ class Inbox:
             if (isinstance(target, dict) and time.time() - target.get("at", 0) < 600
                     and type(target.get("chat")) is int and type(target.get("id")) is int
                     and target["id"] > 0):
-                return {"chat": target["chat"], "id": target["id"]}
+                result = {"chat": target["chat"], "id": target["id"]}
+                if include_text and target.get("text"):
+                    result["text"] = str(target["text"])
+                if include_text and target.get("source"):
+                    result["source"] = str(target["source"])
+                return result
             return None
         finally:
             fh.close()
@@ -932,7 +944,7 @@ def react(bot, chat_id: int, m: dict, emoji: str, optional: bool = False) -> boo
 
 
 def limit_notice(bot, chat_id: int, m: dict, session: str, cfg: Optional[Config] = None) -> bool:
-    """Acknowledge a limited session, throttling replies across listener processes."""
+    """Recover a limited owner's session before promising to hold its queued message."""
     from .usage import limit_of
     error = limit_of(session)
     if not error:
@@ -943,19 +955,74 @@ def limit_notice(bot, chat_id: int, m: dict, session: str, cfg: Optional[Config]
         path = root / safe_name(session)
         with open(root / (safe_name(session) + ".lock"), "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                last = float(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                last = 0
             now = time.time()
-            if now - last >= 600:
+            try:
+                previous = json.loads(path.read_text(encoding="utf-8"))
+                previous = previous if isinstance(previous, dict) else {"at": float(previous)}
+            except (OSError, ValueError, TypeError):
+                previous = {}
+            if (previous.get("auto") and previous.get("limit") == error["id"]
+                    and now - previous.get("at", 0) < accounts.DEFER_RETRY):
+                return True  # a launched move owns this message too, even while its account record changes
+            target = None
+            automatic = False
+            if cfg is not None:
+                try:
+                    identity.check(cfg, bot, force=True, timeout=accounts.IDENTITY_QUICK_TIMEOUT)
+                except Exception:
+                    pass
+                error = limit_of(session)
+                if not error:
+                    return False  # recovery may have completed while identity.check waited
+                waiting = accounts.deferred_move(session)
+                if waiting and waiting.get("manual"):
+                    return True  # recovery owns the owner's chosen target, even with auto enabled
+                plan = accounts.fallback_plan(session)
+                if not plan["fresh"]:
+                    # Idle/disconnected accounts may have days-old files. Try the existing bounded,
+                    # backoff-aware refresh, then require a fresh reading before choosing any of them.
+                    accounts.ensure_usage(max_age=accounts.MOVE_USAGE_MAX_AGE, timeout=3.0)
+                    error = limit_of(session)
+                    if not error:
+                        return False
+                    if (accounts.deferred_move(session) or {}).get("manual"):
+                        return True
+                    plan = accounts.fallback_plan(session)
+                if plan["fresh"]:
+                    target = plan["fresh"][0]
+                    automatic = plan["auto"]
+                    duplicate = (previous.get("target") == target and previous.get("limit") == error["id"]
+                                 and previous.get("auto") == automatic
+                                 and now - previous.get("at", 0) < accounts.DEFER_RETRY)
+                    if duplicate:
+                        return True
+                    if automatic:
+                        from .hooks import spawn
+                        spawn(["account", "auto-move", f"--session={session}",
+                               f"--thread={m.get('message_thread_id', 0)}", f"--target={target}"])
+                        # The recovery tick must not race this owner-triggered move.
+                        offered = private_dir(state_dir() / "limit-offered") / safe_name(session)
+                        offered.touch()
+                        poll_log(f"owner message to {session[:8]}: starting limit move to {target}")
+            if target or previous.get("target") or now - previous.get("at", 0) >= 600:
                 ui_lang = getattr(cfg, "ui_language", None) if cfg else get_lang()
+                if target:
+                    key = "limit_offer_auto" if automatic else "limit_offer_ask"
+                    text = t(key, lang=ui_lang, here=plan["here"], target=target)
+                else:
+                    text = t("limit_notice_text", lang=ui_lang, clock=error['clock'])
                 params = {"chat_id": chat_id, "reply_to_message_id": m["message_id"],
-                          "text": t("limit_notice_text", lang=ui_lang, clock=error['clock'])}
+                          "text": text}
                 if m.get("message_thread_id") is not None:
                     params["message_thread_id"] = m["message_thread_id"]
+                if target and not automatic:
+                    from . import menus
+                    params["reply_markup"] = {"inline_keyboard": [[{
+                        "text": t("limit_offer_move_btn", lang=ui_lang, name=target),
+                        "callback_data": f"more:/account move {target}"}], menus.not_now_row(ui_lang)]}
                 bot.call("sendMessage", params)
-                write_private(path, str(now))
+                write_private(path, json.dumps({"at": now, "target": target, "limit": error["id"],
+                                                "auto": automatic}))
     except (OSError, TelegramError):
         pass
     return True
@@ -1512,29 +1579,16 @@ def pane_for_session(session: str) -> Optional[str]:
 def pane_runs_session(pane: str, session: str, known_pid: Optional[int] = None) -> bool:
     """True only when this tmux pane still hosts this session. A saved %N id outlives a tmux restart and
     is then reused by another window, so keys (Escape) are sent only after this check: the pane's
-    process is the session's Claude process or one of its ancestors (the shell around it), or the pane
-    lives in the bridge's own `tg-<session>` tmux session. `known_pid`: the session's process as read
-    earlier, for when its record has vanished since (a hung exit)."""
+    foreground process tree contains the session's Claude process.  Tmux names are
+    not identity: a window can be renamed or a stale pane id reused. ``known_pid``
+    is the session process read earlier, for when its record vanished during exit."""
     if not re.fullmatch(r"%[0-9]+", pane or "") or not session:
         return False
     try:
-        res = _tmux("display", "-p", "-t", pane, "#{pane_pid} #{session_name}")
-        if res.returncode != 0:
-            return False
-        pane_pid, _, name = res.stdout.strip().partition(" ")
-        if name == "tg-" + session[:8]:
-            return True
         pid = session_pid(session) or known_pid
-        if not pid or not pane_pid.isdigit():
+        if not pid:
             return False
-        for _ in range(6):  # the process itself, then its parents up to the pane's first process
-            if str(pid) == pane_pid:
-                return True
-            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
-                                 capture_output=True, text=True, timeout=5).stdout.strip()
-            if not out.isdigit() or int(out) <= 1:
-                return False
-            pid = int(out)
+        return any(target_pid == pid for target_pid, _ in _pane_claude_targets(pane))
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return False
@@ -2198,7 +2252,7 @@ def project_chosen(cfg, bot, m, topics, token, index):
     cwd = os.path.dirname(folder) if fresh else folder
     try:
         model = _models.launch_flag(job.get("model"))  # the exact model chosen on the picker, else the default
-        result = _tmux("new-session", "-d", "-s", tmux_name, "-c", cwd,
+        result = _tmux("new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "60", "-c", cwd,
                        *shell_argv(f"{setup}{accounts.shell_command(sid, remember=True)}{model} --remote-control --session-id {sid}"))
         if result.returncode:
             raise OSError("tmux failed")
@@ -2524,11 +2578,11 @@ def history_open(cfg, bot, m, topics, item):
                 accounts.record(sid, better)
             try:
                 # Never kill an existing tmux session to make room for a resume.
-                result = _tmux("new-session", "-d", "-s", "tg-" + sid[:8], "-c", item["folder"],
+                result = _tmux("new-session", "-d", "-s", "tg-" + sid[:8], "-x", "200", "-y", "60", "-c", item["folder"],
                                *shell_argv(f"{accounts.shell_command(sid)} --remote-control --resume {sid}"))
                 if result.returncode:
                     raise OSError("resume failed")
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError, accounts.CreditActivationUnavailable):
                 _history_edit(bot, cfg, m, t("history_open_failed", lang=ui_lang), [])
                 return
     notice = t("history_already_open", lang=ui_lang) if running else t("history_open_request_sent", lang=ui_lang)
@@ -2666,6 +2720,26 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
             and chat.get("type", _home_type(cfg) if chat_id == home_chat(cfg) else None) == _chat_type(cfg, chat_id)
             and not (q.get("from") or {}).get("is_bot"))
     home_mine = mine and chat_id == home_chat(cfg)  # the buttons of the home group's global menus
+    if data.startswith("cr:"):
+        from . import decisions
+        match = re.fullmatch(r"cr:([0-9a-f]{16}):(yes|no)", data)
+        if not mine or not session or not match or "forward_origin" in m:
+            return "ignored"
+        def credit_only(rec):
+            if (rec.get("action") != "emergency_credit" or rec["session"] != session
+                    or rec["chat"] != chat_id or rec["thread"] != m.get("message_thread_id")
+                    or type(rec.get("notice_message")) is not int or rec["notice_message"] <= 0
+                    or m.get("message_id") != rec["notice_message"]):
+                raise decisions.DecisionError("wrong credit decision")
+        try:
+            rec = decisions.answer(cfg, inbox, match[1], match[2], check=credit_only,
+                                   by=sender_id, via="telegram")
+        except decisions.DecisionError:
+            _answer_button(bot, q, "הבקשה כבר אינה זמינה.")
+            return "credit-closed"
+        decisions.announce(cfg, bot, inbox, rec)
+        _answer_button(bot, q, "הבחירה נשמרה.")
+        return "credit-answered"
     if data.startswith("cold:"):
         token = data[5:]
         if not mine or not session or not re.fullmatch(r"[0-9a-f]{16}", token):
@@ -2845,6 +2919,9 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
             threading.Thread(target=lambda: command_when(q, cfg, bot, m, session), daemon=True).start()
         return "held"
 
+    if radio_agent.CALLBACK.fullmatch(data):
+        return radio_agent.press(q, cfg, bot, session, mine)
+
     if listen.CALLBACK.fullmatch(data):  # the listen button under a final reply: owner only, this topic's session
         return listen.press(q, cfg, bot, session, mine)
 
@@ -2858,7 +2935,7 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
             return "ignored"
         return "agent-result:" + agents_card.press(cfg, bot, q, session)
 
-    if data.startswith("bd:"):  # a pin board button (board.py checks owner, chat, topic, message and item)
+    if data.startswith(("bd:", "bk:")):  # board clear/tick or stale-reminder keep
         from . import board
         return board.button(q, cfg, bot, inbox)
 
@@ -2870,11 +2947,20 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         return PQ.button(q, cfg, bot, m, session, data)
 
     if data.startswith("dg:"):  # a dialog card: owner only, this topic's own session, one press per screen
-        if not mine or not session or not re.fullmatch(r"dg:(?:s|[ebd]:[0-9a-f]{12}|[oxt]:\d{1,2}:[0-9a-f]{12}|k:(?:up|down|enter):[0-9a-f]{12})", data):
+        if not mine or not session or not re.fullmatch(r"dg:(?:s|[ebdz]:[0-9a-f]{12}|[oxt]:\d{1,2}:[0-9a-f]{12}|k:(?:up|down|enter):[0-9a-f]{12})", data):
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
         if _terminal_background(session, lambda: dialogs.button(q, cfg, bot, m, session)):
             return "dialog"
+        _answer_button(bot, q, t("toast_busy", lang=ui_lang))
+        return "busy"
+
+    if data.startswith("nt:"):  # a Claude Code notice relayed to the topic: owner only, this topic's own session
+        if not mine or not session or not re.fullmatch(r"nt:\d:[0-9a-f]{12}", data):
+            _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
+            return "ignored"
+        if _terminal_background(session, lambda: notices.button(q, cfg, bot, m, session)):
+            return "notice"
         _answer_button(bot, q, t("toast_busy", lang=ui_lang))
         return "busy"
 
@@ -2884,6 +2970,15 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
             return "ignored"
         if _terminal_background(session, lambda: resume_button_press(q, cfg, bot, m, session)):
             return "resume"
+        _answer_button(bot, q, t("toast_busy", lang=ui_lang))
+        return "busy"
+
+    if data.startswith("ib:"):
+        if not mine or not session or not re.fullmatch(r"ib:[sc]:[0-9a-f]{16}", data):
+            _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
+            return "ignored"
+        if _terminal_background(session, lambda: draft_button(q, cfg, bot, session)):
+            return "input-box"
         _answer_button(bot, q, t("toast_busy", lang=ui_lang))
         return "busy"
 
@@ -3119,7 +3214,7 @@ _KEYBOARD_KEYS = ("fixed_btn_stop", "fixed_btn_continue", "fixed_btn_screen", "f
 _LIVE_ICONS = ("📏 ", "🎚 ", "🧠 ", "🔐 ", "👤 ", "⏱ ", "📅 ")
 # The number cells, by their exact shapes (today's and older ones): "📏 182k · 18%", "📏 184 אלף", "📅 41% · ↻ 14.11",
 # "📅 41% · ↻ 14.11 16:00", "⏱ 64%", "⏱ 70% · 📅 30%".
-_CONTEXT_CELL = re.compile(r"📏 ([1-9]\d{0,2}(?:,\d{3})*|0)(?: אלף| ?k)(?: · (?:100|[1-9]?\d)%)?")
+_CONTEXT_CELL = re.compile(r"📏 ([1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+|0)(?: אלף| ?k)(?: · (?:100|[1-9]?\d)%)?")
 _QUOTA_CELL = re.compile(r"(?:⏱ \d{1,3}%(?: · 📅 \d{1,3}%)?|📅 \d{1,3}%)(?: · ↻ (?:\d{1,2}\.\d{1,2}(?: \d{1,2}:\d{2})?|\d{1,2}:\d{2}))?")
 
 
@@ -3138,14 +3233,16 @@ def live_button(text: str, session: Optional[str] = None) -> str:
     if _QUOTA_CELL.fullmatch(bare):
         return "quota"
     return sent_labels(session).get(bare, "")
-# The Cockpit button's label never changes while shown, so it is known by its exact words: today's in both
-# languages, and the name it had before the rename (a keyboard sent then still shows it). Review of #188: by
-# its icon alone, a short message of the owner that began with it was taken as a tap and lost.
+# Match only complete Cockpit labels, including a numeric badge on current labels. Older labels remain valid.
 _OLD_PANEL_BUTTONS = ("🎛 לוח בקרה", "🎛 Control panel")
 
 
 def _panel_button(text: str) -> bool:
-    return text in both_langs("fixed_btn_panel") or text in _OLD_PANEL_BUTTONS
+    from .mirror import bare_label
+    bare = bare_label(text)
+    labels = [bare_label(label) for label in both_langs("fixed_btn_panel")]
+    return bool(re.fullmatch(r"🎛 (?:[1-9][0-9]{0,2}|999\+)", bare)) or bare in map(bare_label, _OLD_PANEL_BUTTONS) or any(
+        re.fullmatch(re.escape(label) + r"(?: · [1-9][0-9]*)?", bare) for label in labels)
 
 
 def context_answer(tapped: str, session: Optional[str], lang: str) -> Optional[str]:
@@ -3164,10 +3261,7 @@ def context_answer(tapped: str, session: Optional[str], lang: str) -> Optional[s
                 return None
             tokens = int(found.group(1).replace(",", "")) * 1000
         k = round(tokens / 1000)
-        if window:
-            return t("context_info_title", lang=lang, k=f"{k:,}", window=f"{window // 1000:,}",
-                     pct=min(100, round(tokens * 100 / window)))
-        return t("context_info_size", lang=lang, k=f"{k:,}")
+        return t("context_info_size", lang=lang, k=f"{k:,}")  # the size only, never a percent
     except (ValueError, TypeError, ZeroDivisionError):
         return None
 
@@ -3177,7 +3271,7 @@ def _keyboard_word(text: str, session: Optional[str] = None) -> bool:
     `session`: the topic's session, whose current values its live buttons show."""
     if live_button(text, session):
         return True
-    return any(text in both_langs(k) for k in _KEYBOARD_KEYS) or text in _OLD_PANEL_BUTTONS
+    return _panel_button(text) or any(text in both_langs(k) for k in _KEYBOARD_KEYS)
 
 
 def _unmarked(update: dict) -> dict:
@@ -3193,7 +3287,7 @@ def _unmarked(update: dict) -> dict:
 
 
 def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media, started: float,
-           team_topics: Optional[TopicMap] = None, off_until: float = 0.0) -> str:
+           team_topics: Optional[TopicMap] = None, off_until: float = 0.0, codex_bridge=None) -> str:
     """Process one update. Returns what happened (for tests and logs):
     ignored | unsupported | refused | queued | status | mode | edited | pin-notice.
     `off_until`: the second mirroring was last switched on (0 when it never was off); an edit made at or
@@ -3203,6 +3297,10 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
     if update.get("widget_query"):
         from .widgets import handle_query
         return handle_query(update["widget_query"], cfg, bot, inbox)
+    from . import command_topic
+    command_result = command_topic.handle(update, cfg, bot, started, from_owner)
+    if command_result is not None:
+        return command_result
     q = update.get("callback_query") or {}
     service = update.get("message") or {}
     if service.get("forum_topic_edited") is not None and pins.drop_rename_notice(service, cfg, bot):
@@ -3229,16 +3327,58 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
             except ValueError:
                 return _refuse_harness(bot, cfg, incoming, q if update.get("callback_query") else None)
             text = (incoming.get("text") or "").strip()
-            attached = (cfg.codex_harness_enabled is True and ref.harness == "codex"
-                        and ref.profile == "default" and ref.native_id in cfg.codex_attached_sessions)
-            if (not attached or not update.get("message") or text.startswith("/")
+            native = (cfg.codex_harness_enabled is True and ref.harness == "codex" and ref.profile == "default")
+            if native:
+                from .codex_bridge import managed
+                app_server = managed(ref.native_id)
+            else:
+                app_server = False
+            if app_server and codex_bridge is None:
+                return _refuse_harness(bot, cfg, incoming, q or None)
+            if app_server and q:
+                from .codex_app_server import ProtocolError
+                data = q.get("data") or ""
+                if not data.startswith("cx:") and data != "more:unbuttons":
+                    return _refuse_harness(bot, cfg, incoming, q)
+                try:
+                    accepted = codex_bridge.callback(ref.native_id, q)
+                except (OSError, ProtocolError, TelegramError):
+                    _answer_button(bot, q, t("toast_question_closed", lang=cfg.ui_language))
+                    return "stale-codex"
+                if accepted:
+                    _answer_button(bot, q, "")
+                    return "codex-action"
+                return "ignored"
+            if app_server and update.get("message") and text == "/compact" and from_owner(incoming, cfg, started):
+                from .codex_app_server import ProtocolError
+                try:
+                    codex_bridge.compact(ref.native_id, actor["id"], chat_id, incoming)
+                except (OSError, ProtocolError):
+                    return _refuse_harness(bot, cfg, incoming)
+                react(bot, chat_id, incoming, "\U0001F440")
+                return "codex-action"
+            if (not (app_server or native and ref.native_id in cfg.codex_attached_sessions)
+                    or not update.get("message") or text.startswith("/")
                     or _keyboard_word(text, session) or is_mode_command(text)):
-                return _refuse_harness(bot, cfg, incoming, q if update.get("callback_query") else None)
+                return _refuse_harness(bot, cfg, incoming, q or None)
+            if app_server and from_owner(incoming, cfg, started):
+                from .codex_app_server import ProtocolError
+                try:
+                    if codex_bridge.answer_message(ref.native_id, incoming):
+                        react(bot, chat_id, incoming, "\U0001F440")
+                        return "codex-answer"
+                except (OSError, ProtocolError, TelegramError):
+                    _terminal_say(bot, cfg, incoming, t("toast_question_closed", lang=cfg.ui_language))
+                    return "stale-codex"
             if any(incoming.get(k) for k in _SPEECH_KEYS):
                 if not (from_owner(incoming, cfg, started) or _owner_forward(incoming, cfg, started)):
                     return "ignored"
                 _terminal_say(bot, cfg, incoming, t("codex_voice_unsupported", lang=cfg.ui_language))
                 return "unsupported-harness"
+            if app_server and any(incoming.get(k) for k in _OFFER_MEDIA_KEYS):
+                if not (from_owner(incoming, cfg, started) or _owner_forward(incoming, cfg, started)):
+                    return "ignored"
+                return _refuse_harness(bot, cfg, incoming)
             # Keep the existing owner, forward and media policy, but
             # never run Claude dialogs, commands or terminal controls for Codex.
             m = incoming
@@ -3249,7 +3389,8 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
                 m["_forwarded"] = True
             if not from_owner(m, cfg, started):
                 return "ignored"
-            return _queue_topic_input(cfg, bot, inbox, m, session, media, topic_session=session)
+            return _queue_topic_input(cfg, bot, inbox, m, session, media, topic_session=session,
+                                      codex_bridge=codex_bridge if app_server else None)
     sessions_menu.note_input(cfg, bot, update)
     if update.get("my_chat_member"):
         return "alerts-" + alerts.joined(update["my_chat_member"], cfg, bot)
@@ -3275,6 +3416,27 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
         groups[str(chat.get("id"))] = {"title": chat.get("title", ""), "is_forum": bool(chat.get("is_forum"))}
         write_private(seen, json.dumps(groups, ensure_ascii=False))
         return "ignored"
+    caption = (m.get("caption") or "").strip()
+    music_command = bool(caption and (caption == "לרדיו" or caption.split(maxsplit=1)[0].split("@")[0].lower() == "/music"))
+    if (chat.get("type") == "private" and chat.get("id") == cfg.owner_chat_id
+            and (m.get("from") or {}).get("id") == cfg.owner_chat_id and _base_ok(m, started) and music_command):
+        from . import radio_music
+        audio = m.get("audio") or m.get("document") or {}
+        try:
+            if m.get("video") or m.get("animation") or not audio.get("file_id"):
+                raise ValueError("יש לשלוח קובץ שמע ללא וידאו")
+            if audio.get("file_size", 0) > radio_music.MAX_BYTES:
+                raise ValueError("הקובץ גדול מ־60 מגה־בייט")
+            with tempfile.NamedTemporaryFile() as source:
+                bot.download_to(audio["file_id"], source, radio_music.MAX_BYTES)
+                source.flush()
+                result = radio_music.add(source.name, audio.get("title", ""), audio.get("performer", ""), cfg=cfg)
+            reply = ("היצירה נוספה לספריית המוזיקה הפרטית." if result["checked_ok"] else
+                     "היצירה לא אושרה להשמעה: " + result["reason"] + ".")
+        except Exception:  # a failed download or unknown file is refused
+            reply = "לא הצלחתי להוסיף את הקובץ. יש לוודא שזה קובץ שמע עד 60 מגה־בייט."
+        _terminal_say(bot, cfg, m, reply)
+        return "music"
     if _owner_forward(m, cfg, started):
         if not any(m.get(k) for k in FORWARD_KINDS) or m.get("animation"):  # Telegram also sets document on an animation
             return _refuse_forward(m, cfg, bot)
@@ -3336,7 +3498,7 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
               "btn_stop", "btn_continue", "btn_screen",
               "btn_status", "btn_compact", "btn_more", "btn_escape"):
         fixed_buttons.update(both_langs(k))
-    if tapped in fixed_buttons and isinstance(m.get("message_thread_id"), int):
+    if (tapped in fixed_buttons or _panel_button(tapped)) and isinstance(m.get("message_thread_id"), int):
         # A tap folds the keyboard and on the phone its icon can vanish for good:
         # the status message with the keyboard comes back under whatever the tap produces.
         keyboard_back(m["message_thread_id"], delay=4.0, cfg=cfg, bot=bot, chat=_chat_arg(cfg, m))
@@ -3355,7 +3517,7 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
                       reply_markup=live_keyboard(footer,
                                                  lang=cfg.ui_language, thread=m.get("message_thread_id"),
                                                  fresh=True, session=topics.session_at(chat.get("id"), m.get("message_thread_id")),
-                                                 chat=_chat_arg(cfg, m)))
+                                                 chat=_chat_arg(cfg, m), cfg=cfg))
         return "keyboard"
 
     # The fixed keyboard's buttons arrive as plain text.
@@ -3593,7 +3755,7 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
 
 
 def _queue_topic_input(cfg, bot, inbox, m, session, media, *, topic_session=None,
-                       dispatch=False, corrected=None) -> str:
+                       dispatch=False, corrected=None, codex_bridge=None) -> str:
     """Shared own-topic input: media, review, quotes and provenance for every harness."""
     # One pass over the media: the stored context and the delivered text come from the same download
     # and transcription (review of PR #9).
@@ -3651,6 +3813,18 @@ def _queue_topic_input(cfg, bot, inbox, m, session, media, *, topic_session=None
     typed = (bool(topic_session) and session == topic_session and not dispatch and isinstance(m.get("text"), str)
              and not m.get("_button") and not m.get("_forwarded") and not corrected_voice
              and not any(m.get(k) for k in _OFFER_MEDIA_KEYS))
+    if codex_bridge is not None:
+        from .codex_app_server import ProtocolError
+        from .harness import SessionRef
+        item = {"text": text or forwarded_text, "forwarded": bool(forwarded_text), "source": "owner"}
+        try:
+            codex_bridge.send(SessionRef.parse(session).native_id, [item], (m.get("from") or {}).get("id"),
+                              _reply_chat(cfg, m), m)
+        except (OSError, ProtocolError):
+            _terminal_say(bot, cfg, m, t("toast_not_available", lang=cfg.ui_language))
+            return "codex-unavailable"
+        react(bot, _reply_chat(cfg, m), m, "\U0001F440")
+        return "queued"
     _queue_owner(cfg, bot, inbox, m, session, text, user_text, context_prefix, forwarded_text=forwarded_text,
                  typed=typed)
     return "queued"
@@ -3704,7 +3878,7 @@ def _queue_team(m, cfg, bot, inbox, session, text, source, uid, name) -> str:
     inbox.put(session, {"text": text, "at": m.get("date"), "id": m.get("message_id"),
                         "source": source, "from": uid, "name": name, "chat": chat_id,
                         "user_text": text.strip(), "context_prefix": ""})
-    if source != "owner" or not limit_notice(bot, chat_id, m, session):
+    if source != "owner" or not limit_notice(bot, chat_id, m, session, cfg):
         react(bot, chat_id, m, "\U0001F440")
     return "queued"
 
@@ -3781,11 +3955,11 @@ _DIALOG_HINT = re.compile(r"(?m)\d:\s+\S.*\s{2,}\d:\s")
 _DIALOG_QUESTION = re.compile(r"(?mi)^\s*│\s*(?:do you want|would you like)")  # bordered only: replies ask questions too
 
 
-# Claude Code's tip notice ("✦ Heads up · ..." and its "1: Learn more   2: Knew this already   0: Dismiss" row) sits
+# Claude Code's tip notice ("✦ Heads up · ..." and the feedback row "✦ Dismissed. 1: That was helpful ...", and its "1: Learn more   2: Knew this already   0: Dismiss" row) sits
 # above the idle input box. It is a notice, not a question: its option row looked like a menu, so commands and
 # auto-compaction were refused for a question that never got a card. Claude
 # Code 2.1.3xx may draw it on ONE row, may fold its text to "↓ 2 more", and may put text after "0: Dismiss".
-_TIP_MARK = re.compile(r"^\s*✦\s+Heads up\b")
+_TIP_MARK = re.compile(r"^\s*✦\s+\S")  # "✦ Heads up · ..." and its feedback row "✦ Dismissed. ..."
 _TIP_DISMISS = re.compile(r"(?:^|\s)0:\s*Dismiss\b")
 _TIP_MORE = re.compile(r"^\s*↓\s*\d+\s+more\b")
 TIP_ROWS = 10  # rows from the notice's ✦ to its option row, at most
@@ -3817,6 +3991,38 @@ def strip_tip(body: str) -> str:
     return "\n".join(rows[:first] + rows[last + 1:])
 
 
+def relay_screen_text(body: str) -> str:
+    """Terminal text made safe and readable for a plain Telegram surface.
+
+    Claude's tip is terminal chrome, not conversation content.  Tmux also
+    preserves the CLI's column padding, which looks like widely spaced prose
+    on a phone.  Code fences, indented code, and pipe tables retain their
+    whitespace because it is meaningful there.
+    """
+    rows = strip_tip(body).splitlines()
+    out, fenced = [], False
+    for row in rows:
+        if row.lstrip().startswith("```"):
+            fenced = not fenced
+            out.append(row)
+            continue
+        table = row.count("|") >= 2 or row.count("│") >= 3 or row.count("┃") >= 3
+        # pane_text already drops the CLI's two-column margin, so code indented by four arrives with two
+        preformatted = fenced or row.startswith(("  ", "\t")) or table
+        if preformatted:
+            out.append(row)
+            continue
+        # A box drawn around prose is CLI decoration: drop its corner rows and the two edges of a row that
+        # has both. A plain rule ("━━━") or a single "│" inside text is content and stays.
+        if re.fullmatch(r"\s*[╭┌└╰][─━═]*[╮┐┘╯]\s*", row):
+            continue
+        boxed = re.fullmatch(r"\s*[│┃]\s?(.*?)\s?[│┃]\s*", row)
+        if boxed:
+            row = boxed.group(1)
+        out.append(re.sub(r" {2,}", " ", row).rstrip())
+    return "\n".join(out).strip()
+
+
 def tip_on_screen(body: str) -> bool:
     return tip_span((body or "").replace("\u200f", "").splitlines()) is not None
 
@@ -3845,14 +4051,26 @@ def take_back(pane: str, text: str) -> bool:
 
 
 def submitted(pane: str, text: str, before: Optional[str], wait: float = 2.0) -> bool:
-    """After Enter: the input box no longer ends with `text` (the line was sent), or no box can be read."""
+    """After Enter, confirm from a readable input box that ``text`` is gone.
+
+    A temporarily unreadable box is not proof of submission: keep polling so a
+    line which Enter did not accept can be detected and removed by the caller.
+    """
     clean = " ".join(text.split())
     deadline = time.monotonic() + wait
     while True:
         box, _ = input_box(pane)
-        if box is None or not box.endswith(clean):  # still there, also when it was there before: not sent
+        if box is not None and not box.endswith(clean):
             return True
         if time.monotonic() >= deadline:
+            # Once a submitted line opens a permission/question dialog the input
+            # box is intentionally unreadable, but the dialog itself proves Enter
+            # was accepted.  Mere transient unreadability remains unconfirmed.
+            if box is None:
+                try:
+                    return _dialog_open(pane_raw(pane))
+                except (OSError, ValueError):
+                    pass
             return False
         time.sleep(0.1)
 
@@ -3943,7 +4161,7 @@ def terminal_card(session: str):
         body = pane_text(pane)
     except (OSError, subprocess.SubprocessError):
         return None
-    return body, menu_buttons(body)
+    return relay_screen_text(body), menu_buttons(body)
 
 
 def screen_html(title: str, body: str) -> str:
@@ -3951,7 +4169,7 @@ def screen_html(title: str, body: str) -> str:
     empty = t("screen_empty")
     footer = t("screen_card_footer")
     return dialogs.fit(f"🖥️ <b>{html.escape(title)}</b> · {time.strftime('%H:%M:%S')}\n{footer}\n",
-                       dialogs.clean(body) or empty)
+                       dialogs.clean(relay_screen_text(body)) or empty)
 
 
 def _answer_button(bot, q: dict, text: str) -> None:
@@ -4152,7 +4370,7 @@ def _move_to_tmux(say, session: str) -> None:
     try:
         opened = _tmux("new-session", "-d", "-s", "tg-" + session[:8], "-c", folder,
                        *shell_argv(f"{accounts.shell_command(session)} --remote-control --resume {session}")).returncode == 0
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, accounts.CreditActivationUnavailable):
         opened = False
     if not opened:
         say(t("tmux_open_failed"))
@@ -4380,7 +4598,7 @@ def resume_session(session: str, first_prompt: Optional[str] = None) -> bool:
                 break
             time.sleep(0.5)
         return True
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, accounts.CreditActivationUnavailable):
         return False
 
 
@@ -4461,9 +4679,12 @@ def _watch_buttons(api: Callable, owner=None, home: Optional[int] = None):
     def wrapped(method, params=None, *args, **kw):
         out = api(method, params, *args, **kw)
         p = params or {}
+        rows = (p.get("reply_markup") or {}).get("inline_keyboard")
         if (method == "sendMessage" and isinstance(p.get("message_thread_id"), int)
                 and (chats is None or p.get("chat_id") in chats)
-                and "inline_keyboard" in (p.get("reply_markup") or {})):
+                and rows is not None and not any(
+                    isinstance(button, dict) and str(button.get("callback_data") or "").startswith("cx:")
+                    for row in rows if isinstance(row, list) for button in row)):
             away = p["chat_id"] if home is not None and p["chat_id"] != home else None
             keyboard_back(p["message_thread_id"], chat=away)
         return out
@@ -4588,22 +4809,27 @@ def cli_command(cfg: Config, bot, m: dict, session: str, text: str, menu: bool =
             if cmd == "/compact":
                 from .idle_lines import _foreground_claude
                 typed = type_command(session, pane, line, verify_session=True,
-                                     still_ok=lambda: _foreground_claude(pane, session))
+                                     still_ok=lambda: _foreground_claude(pane, session), keep_stuck=True)
             else:
-                typed = (type_command(session, pane, line, verify_session=True) if synchronous
-                         else type_command(session, pane, line))
+                typed = (type_command(session, pane, line, verify_session=True, keep_stuck=True) if synchronous
+                         else type_command(session, pane, line, keep_stuck=True))
             if typed == "stale":
                 outcome[0] = "stale"
                 return
             if typed == "draft":  # the owner's own unsent text is in the box: never typed after it
                 if not synchronous:
-                    _terminal_say(bot, cfg, m, t("cli_draft_in_box"))
+                    draft_notice(bot, cfg, m, session, pane)
                 outcome[0] = "retry"  # nothing was typed: safe to try again
                 return
             if typed == "busy":  # the box cannot be read or is not ready: nothing typed, try again
                 if not synchronous:
                     _terminal_say(bot, cfg, m, t("cli_busy_retry"))
                 outcome[0] = "retry"  # nothing was typed: safe to try again
+                return
+            if typed == "stuck":
+                if not synchronous:
+                    draft_notice(bot, cfg, m, session, pane)
+                outcome[0] = "uncertain"
                 return
             ok = typed == "sent"
             if not ok:  # "failed": part of the line, or its Enter, may have reached the session
@@ -4975,11 +5201,13 @@ def keypad_press(q: dict, cfg: Config, bot, m: dict, session: str) -> None:
         if key == "/compact":
             from .idle_lines import _foreground_claude
             typed = type_command(session, pane, key, verify_session=True,
-                                 still_ok=lambda: _foreground_claude(pane, session))
+                                 still_ok=lambda: _foreground_claude(pane, session), keep_stuck=True)
         else:
-            typed = type_command(session, pane, key)
-        if typed in ("draft", "busy"):
-            _answer_button(bot, q, t("cli_draft_in_box" if typed == "draft" else "toast_session_busy_retry", lang=ui_lang))
+            typed = type_command(session, pane, key, keep_stuck=True)
+        if typed in ("draft", "busy", "stuck"):
+            if typed in ("draft", "stuck"):
+                draft_notice(bot, cfg, m, session, pane)
+            _answer_button(bot, q, t("cli_draft_in_box" if typed in ("draft", "stuck") else "toast_session_busy_retry", lang=ui_lang))
             return
         ok = typed == "sent"
         if ok and key == "/compact":
@@ -5151,8 +5379,9 @@ def _queue_owner(cfg: Config, bot, inbox: Inbox, m: dict, session: str, text: st
     if codex:
         react(bot, _reply_chat(cfg, m), m, "\U0001F440")
         return
-    if not limit_notice(bot, _reply_chat(cfg, m), m, session):
-        react(bot, _reply_chat(cfg, m), m, "\U0001F440")
+    if limit_notice(bot, _reply_chat(cfg, m), m, session, cfg):
+        return  # the move owns resuming/delivering; an ordinary nudge would race it
+    react(bot, _reply_chat(cfg, m), m, "\U0001F440")
     try:  # a message behind an open dialog says so (not "between steps") and shows the dialog again
         held_by_dialog = dialogs.held_notice(cfg, bot, m, session)
     except Exception:
@@ -5234,6 +5463,13 @@ def _closed(session: str) -> bool:
     from .wake import limit_active
     cur = accounts.account_for(session)
     return not (limit_active(session) and accounts.roomier_account(cur) in (None, cur))
+
+
+def _can_reopen_for_move(session: str) -> bool:
+    """With no terminal pane, only a saved conversation and no running process can be reopened."""
+    return (session_pid(session) is None and not recently_moving(session)
+            and not any(r.get("sessionId") == session for r in accounts.live_session_records())
+            and bool(status.transcript_of(session)))
 
 
 def _waiter_alive(session: str) -> bool:
@@ -5349,6 +5585,55 @@ def input_box(pane: str) -> Tuple[Optional[str], bool]:
     return text, ready
 
 
+def _draft_digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def draft_notice(bot, cfg: Config, m: dict, session: str, pane: Optional[str] = None) -> bool:
+    """Show the exact safe draft and actions bound to that exact text."""
+    pane = pane or pane_for_session(session)
+    box, _ = input_box(pane) if pane else (None, False)
+    if box is None:
+        return False
+    safe = dialogs.clean(box).strip()[:500] or "∅"
+    lang = getattr(cfg, "ui_language", None) or get_lang()
+    token = _draft_digest(box)
+    _terminal_say(bot, cfg, m, t("cli_draft_with_text", lang=lang, text=safe), reply_markup={"inline_keyboard": [[
+        {"text": t("cli_draft_send", lang=lang), "callback_data": f"ib:s:{token}"},
+        {"text": t("cli_draft_clear", lang=lang), "callback_data": f"ib:c:{token}"},
+    ], [dismiss_button(lang)]]})
+    return True
+
+
+def draft_button(q: dict, cfg: Config, bot, session: str) -> str:
+    """Send or erase only the unchanged text named by the refusal card."""
+    lang = getattr(cfg, "ui_language", None) or get_lang()
+    match = re.fullmatch(r"ib:([sc]):([0-9a-f]{16})", q.get("data") or "")
+    pane = pane_for_session(session)
+    box, ready = input_box(pane) if pane else (None, False)
+    if not match or box is None or _draft_digest(box) != match[2]:
+        _answer_button(bot, q, t("cli_draft_changed", lang=lang))
+        return "changed"
+    if _dialog_open(pane_raw(pane), session):  # Enter or backspaces must never reach a dialog
+        _answer_button(bot, q, t("cli_draft_changed", lang=lang))
+        return "changed"
+    if match[1] == "s" and ready:
+        # A last read right before Enter: the exact text, a ready box and no dialog, or nothing is pressed.
+        again, ready_again = input_box(pane)
+        if again != box or not ready_again or _dialog_open(pane_raw(pane), session):
+            _answer_button(bot, q, t("cli_draft_changed", lang=lang))
+            return "changed"
+        ok = _tmux("send-keys", "-t", pane, "Enter").returncode == 0 and submitted(pane, box, box)
+        key = "cli_draft_sent" if ok else "cli_draft_changed"
+    elif match[1] == "c":
+        ok = _erase_tail(pane, box, len(box), True)
+        key = "cli_draft_cleared" if ok else "cli_draft_changed"
+    else:
+        ok, key = False, "cli_draft_changed"
+    _answer_button(bot, q, t(key, lang=lang))
+    return "sent" if ok and match[1] == "s" else "cleared" if ok else "changed"
+
+
 def _claim_terminal(session: str) -> bool:
     """One terminal action per session in this process: never beside a move, restart, close or reopen."""
     with _terminal_lock:
@@ -5409,6 +5694,26 @@ def typed_nudge(session: str, pane: str, text: str = NUDGE_TEXT, settle: float =
             box, _ = input_box(pane)
             if box == clean and _tmux("send-keys", "-t", pane, *(["BSpace"] * len(clean))).returncode == 0:
                 clear_nudge_typed(session)
+
+
+def send_idle_text(session: str, text: str) -> bool:
+    """Submit one bridge-owned line only at this session's idle, empty prompt.
+
+    Commands which may safely wait share the per-session nudge lock and terminal claim.
+    The slash-command gate handles visual line wrapping and takes back a failed command.
+    """
+    pane = pane_for_session(session)
+    if not pane or not _claim_terminal(session):
+        return False
+    try:
+        with _nudge_guard(session, wait=0):
+            if _dialog_open(pane_raw(pane), session):
+                return False
+            return _type_command(session, pane, text, verify_session=True, guard_held=True) == "sent"
+    except (BlockingIOError, OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        _release_terminal(session)
 
 
 NUDGE_PAUSE = 600
@@ -5526,7 +5831,40 @@ def _line_gone(pane: str, want: str, wait: float = 2.0) -> bool:
 
 
 def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, verify_session: bool = False,
-                 still_ok: Optional[Callable[[], bool]] = None, before_enter: Optional[Callable[[], None]] = None) -> str:
+                 still_ok: Optional[Callable[[], bool]] = None, before_enter: Optional[Callable[[], None]] = None,
+                 automatic_compact: bool = False, guard_held: bool = False, keep_stuck: bool = False) -> str:
+    """keep_stuck: an owner's line whose Enter was swallowed stays in the box ("stuck") for the Send/Clear card;
+    a line the bridge typed by itself is erased instead ("failed"), so it never blocks the owner's next message."""
+    if not re.match(r"^/compact(?:\s|$)", line):
+        return _type_command(session, pane, line, settle, verify_session=verify_session,
+                             still_ok=still_ok, before_enter=before_enter, guard_held=guard_held,
+                             keep_stuck=keep_stuck)
+    # Shared by the owner buttons, owner command and detached automatic workers.
+    # Keep the lock through Enter so an ending hook cannot clear a reservation mid-send.
+    try:
+        with _nudge_guard(session), compact.submission_lock(session):
+            if not compact.reserve_submission(session, owner=not automatic_compact):
+                return "busy"
+            submit_attempted = False
+
+            def note_submit_attempt() -> None:
+                nonlocal submit_attempted
+                submit_attempted = True
+
+            result = _type_command(session, pane, line, settle, verify_session=verify_session,
+                                   still_ok=still_ok, before_enter=before_enter, guard_held=True,
+                                   on_submit_attempt=note_submit_attempt, keep_stuck=keep_stuck)
+            if not submit_attempted and result != "sent":
+                compact.inflight_marker(session).unlink(missing_ok=True)  # definitely not submitted
+            return result
+    except BlockingIOError:
+        return "busy"
+
+
+def _type_command(session: str, pane: str, line: str, settle: float = 1.0, *, verify_session: bool = False,
+                  still_ok: Optional[Callable[[], bool]] = None, before_enter: Optional[Callable[[], None]] = None,
+                  guard_held: bool = False, on_submit_attempt: Optional[Callable[[], None]] = None,
+                  keep_stuck: bool = False) -> str:
     """The one place a slash line is typed into a session's input box (live bug: the nudge
     "📩 Telegram" and `/compact` joined into the plain prompt "📩 Telegram/compact"). One strict rule, under
     the session's nudge lock (the listener, the sweeper and `ctb auto-compact` are different processes: only
@@ -5542,7 +5880,7 @@ def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, ver
     records what is about to be sent); if it fails, our line is taken back and nothing is sent. Returns "sent", "draft", "busy", "failed" or "stale"."""
     want = _canon(line)
     try:
-        guard = _nudge_guard(session)
+        guard = contextlib.nullcontext() if guard_held else _nudge_guard(session)
         guard.__enter__()
     except BlockingIOError:
         return "busy"  # a nudge kept the box the whole wait: nothing typed, try again
@@ -5580,6 +5918,8 @@ def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, ver
                 break
             time.sleep(0.05)
         if verify_session and _pane_from_process(session) != pane or still_ok is not None and not still_ok():
+            if box is not None and _canon(box) == want:
+                _erase_tail(pane, line, len(line), False)
             return "stale"
         if box is None or _canon(box) != want or not ready:
             # Not exactly our line (owner text came in, or nothing readable): no Enter. Only our own tail goes.
@@ -5594,11 +5934,18 @@ def type_command(session: str, pane: str, line: str, settle: float = 1.0, *, ver
                 return "failed"
         if (verify_session and _pane_from_process(session) != pane
                 or still_ok is not None and not still_ok()):
+            _erase_tail(pane, line, len(line), False)
             return "stale"
+        if on_submit_attempt is not None:
+            on_submit_attempt()
         if _tmux("send-keys", "-t", pane, "Enter").returncode:
             _erase_tail(pane, line, len(line), False)
             return "failed"
         if not _line_gone(pane, want):
+            if keep_stuck:
+                # The owner's line stays visible: the caller reports it once with exact-match Send/Clear
+                # buttons; pressing more keys blindly could submit an edit the owner made meanwhile.
+                return "stuck"
             _erase_tail(pane, line, len(line), False)  # Enter did not send it: not left for the next line to join
             return "failed"
     return "sent"
@@ -5987,7 +6334,8 @@ def dismiss_button(lang: Optional[str] = None) -> dict:
     return menus.close_button(lang)
 
 
-def more_markup(lang: Optional[str] = None, move: bool = False, session: Optional[str] = None) -> dict:
+def more_markup(lang: Optional[str] = None, move: bool = False, session: Optional[str] = None,
+                cfg: Optional[Config] = None) -> dict:
     """`move`: a project group is configured, so the menu offers to move the session there. `session`: in a
     scheduled task's topic the menu offers to mute (or unmute) that task."""
     return {"inline_keyboard": [
@@ -5998,6 +6346,8 @@ def more_markup(lang: Optional[str] = None, move: bool = False, session: Optiona
          {"text": t("more_btn_history", lang=lang), "callback_data": "more:history"}],
         [{"text": t("more_btn_account", lang=lang), "callback_data": "more:/account"},
          {"text": t("more_btn_plugins", lang=lang), "callback_data": "more:plugins"}],
+        *([[{"text": t("compact_actions_on" if progress.compact_actions_on(cfg, session) else "compact_actions_off", lang=lang),
+              "callback_data": "more:compactactions"}]] if session else []),
         [{"text": t("more_btn_global", lang=lang), "callback_data": "more:global"},
          sessions_menu.manage_button(lang)],
         *([[{"text": t("more_btn_move", lang=lang), "callback_data": "more:move"}]] if move else []),
@@ -6008,7 +6358,7 @@ def more_markup(lang: Optional[str] = None, move: bool = False, session: Optiona
         [dismiss_button(lang)]]}
 
 
-def global_markup(lang: Optional[str] = None) -> dict:
+def global_markup(lang: Optional[str] = None, cfg: Optional[Config] = None) -> dict:
     """Settings shared by every session, on their own page (one menu mixing both
     was unclear, and marking each button was too busy)."""
     limit = auto_compact_limit()
@@ -6034,6 +6384,8 @@ def global_markup(lang: Optional[str] = None) -> dict:
           "callback_data": "more:away"}],
         [{"text": t("global_btn_activity", lang=lang, state=t("activity_" + activity_level(), lang=lang)),
           "callback_data": "more:activity"}],
+        [{"text": t("compact_actions_on" if getattr(cfg, "compact_actions", False) else "compact_actions_off", lang=lang),
+          "callback_data": "more:compactactionsglobal"}],
         [{"text": t("global_btn_status_repost", lang=lang, state=repost_str),
           "callback_data": "more:statusrepost"}],
         [{"text": t("global_btn_agent_notices", lang=lang, state=notices_str),
@@ -6059,7 +6411,7 @@ def more_menu(bot, cfg: Config, m: dict, session: Optional[str] = None) -> None:
     """"⚙️ עוד" on the fixed keyboard: the less frequent actions."""
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     _terminal_say(bot, cfg, m, t("more_text", lang=ui_lang),
-                  reply_markup=more_markup(lang=ui_lang, move=bool(cfg.projects), session=session))
+                  reply_markup=more_markup(lang=ui_lang, move=bool(cfg.projects), session=session, cfg=cfg))
 
 
 MORE_COMMANDS = {"/model", "/effort", "/context", "/usage", "/account", "/status", "/screen"}
@@ -6120,7 +6472,7 @@ def _task_mute(bot, cfg: Config, q: dict, m: dict, edit: dict, topics: TopicMap,
     note = t("task_muted_note" if op == "tmute" else "task_unmuted_note", lang=ui_lang, name=task)
     try:
         bot.call("editMessageText", dict(edit, text=note + "\n\n" + t("more_text", lang=ui_lang),
-                                         reply_markup=more_markup(lang=ui_lang, move=bool(cfg.projects), session=sid)))
+                                         reply_markup=more_markup(lang=ui_lang, move=bool(cfg.projects), session=sid, cfg=cfg)))
     except TelegramError:
         pass
     return "menu"
@@ -6140,6 +6492,24 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
         return "ignored"
 
     edit = {"chat_id": _reply_chat(cfg, m), "message_id": m.get("message_id")}  # the group, not the owner's DM
+
+    if data in ("more:actionexpand", "more:actioncollapse"):
+        ok = bool(session and progress.toggle_card_details(cfg, bot, session, m.get("message_id"),
+                                                           data.endswith("expand")))
+        _answer_button(bot, q, "" if ok else t("toast_button_outdated", lang=ui_lang))
+        return "action-details" if ok else "ignored"
+
+    if data == "more:compactactions" and session:
+        on = not progress.compact_actions_on(cfg, session)
+        progress.set_compact_actions(cfg, session, on)
+        _answer_button(bot, q, t("compact_actions_on" if on else "compact_actions_off", lang=ui_lang))
+        try:
+            bot.call("editMessageText", dict(edit, text=t("more_text", lang=ui_lang),
+                                             reply_markup=more_markup(lang=ui_lang, move=bool(cfg.projects),
+                                                                      session=session, cfg=cfg)))
+        except TelegramError:
+            pass
+        return "settings"
 
     if data.startswith("close:"):
         action = data[6:]
@@ -6256,10 +6626,16 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
     if data.startswith(("more:tmute:", "more:tunmute:")):
         return _task_mute(bot, cfg, q, m, edit, topics, ui_lang)
 
-    if data in ("more:voiceconfirm", "more:delivery", "more:autocompact", "more:away",
+    if data in ("more:voiceconfirm", "more:delivery", "more:autocompact", "more:away", "more:compactactionsglobal",
                 "more:statusrepost", "more:agentnotices", "more:agentstopic", "more:generaloffer", "more:activity"):
         _answer_button(bot, q, "")
-        if data == "more:activity":
+        if data == "more:compactactionsglobal":
+            from .config import save_changes
+            new_value = not getattr(cfg, "compact_actions", False)
+            save_changes({}, {"compact_actions": new_value})
+            cfg.compact_actions = new_value
+            progress.clear_compact_actions_overrides()
+        elif data == "more:activity":
             set_activity_level(ACTIVITY_LEVELS[(ACTIVITY_LEVELS.index(activity_level()) + 1) % len(ACTIVITY_LEVELS)])
         elif data == "more:generaloffer":
             set_setting(GENERAL_OFFER_OFF, not setting_on(GENERAL_OFFER_OFF))
@@ -6278,7 +6654,7 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
             nxt = next_auto_compact_limit()
             set_auto_compact_limit(nxt)
         try:
-            bot.call("editMessageText", dict(edit, text=t("global_text", lang=ui_lang), reply_markup=global_markup(lang=ui_lang)))
+            bot.call("editMessageText", dict(edit, text=t("global_text", lang=ui_lang), reply_markup=global_markup(lang=ui_lang, cfg=cfg)))
         except TelegramError:
             pass
         return "settings"
@@ -6324,7 +6700,7 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
 
     if data in ("more:global", "more:back"):
         _answer_button(bot, q, "")
-        text, markup = (t("global_text", lang=ui_lang), global_markup(lang=ui_lang)) if data == "more:global" else (t("more_text", lang=ui_lang), more_markup(lang=ui_lang, move=bool(cfg.projects), session=session))
+        text, markup = (t("global_text", lang=ui_lang), global_markup(lang=ui_lang, cfg=cfg)) if data == "more:global" else (t("more_text", lang=ui_lang), more_markup(lang=ui_lang, move=bool(cfg.projects), session=session, cfg=cfg))
         try:
             bot.call("editMessageText", dict(edit, text=text, reply_markup=markup))
         except TelegramError:
@@ -6366,7 +6742,8 @@ BG_WAIT_MAX = 600.0  # a limit move waits this long for background work, counted
 
 
 def account_move(cfg: Config, bot, session: str, target: str, say, idle_only: bool = False,
-                 defer: bool = False, limit: Optional[dict] = None) -> bool:
+                 defer: bool = False, limit: Optional[dict] = None,
+                 expected_origin: Optional[str] = None, remember_origin: bool = True) -> Optional[bool]:
     """One move per session at a time, across processes: the limit notice and the freed-quota check
     both start moves, and two at once typed over each other until every attempt failed."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", session or ""):
@@ -6380,11 +6757,25 @@ def account_move(cfg: Config, bot, session: str, target: str, say, idle_only: bo
             return False
         try:
             with accounts.ops_lock():  # shared: a removal waits for moves, and never starts under one
-                if accounts.config_dir(target) is None:  # removed while this move was being planned
-                    poll_log(f"move of {session[:8]} skipped: target account no longer exists")
+                waiting = accounts.deferred_move(session) if defer else None
+                if waiting and waiting.get("manual"):
+                    if target == accounts.CREDIT and waiting["target"] != accounts.CREDIT:
+                        return False  # credit consent cannot authorize a different account
+                    target = waiting["target"]
+                from . import credit_mode
+                if target == accounts.CREDIT:
+                    if not credit_mode.active(session) or credit_mode.blocked(session):
+                        return False
+                    accounts.check_credit_settings(session)  # refuse before stopping the subscription process
+                elif not accounts.eligible_target(target):  # removed or signed out while this was planned
+                    poll_log(f"move of {session[:8]} skipped: target account is unavailable")
+                    ui_lang = getattr(cfg, "ui_language", None) or get_lang()
+                    say(t("account_move_target_logged_out", lang=ui_lang,
+                          target=identity.isolate(target, ui_lang)))
                     return False
-                return _account_move(cfg, bot, session, target, say, idle_only, defer, limit)
-        except OSError:
+                return _account_move(cfg, bot, session, target, say, idle_only, defer, limit, expected_origin,
+                                     remember_origin)
+        except (OSError, accounts.CreditActivationUnavailable):
             return False
 
 
@@ -6453,7 +6844,7 @@ def _answer_exit_dialog(pane: str, session: str) -> Optional[list]:
     path = usage.transcript_of(session)
     full = usage.background_commands(str(path)) if path else []
     out = []
-    for row in rows or ["background work"]:
+    for row in rows:
         head = row.rstrip("…. ").strip()
         out.append(next((c for c in full if head and " ".join(c.split()).startswith(" ".join(head.split()))), row))
     return out
@@ -6562,7 +6953,8 @@ def resume_button_press(q: dict, cfg: Config, bot, m: dict, session: str) -> str
 
 
 def _account_move(cfg: Config, bot, session: str, target: str, say, idle_only: bool = False,
-                  defer: bool = False, limit: Optional[dict] = None) -> bool:
+                  defer: bool = False, limit: Optional[dict] = None,
+                  expected_origin: Optional[str] = None, remember_origin: bool = True) -> Optional[bool]:
     """Move a running session to another account: it is closed (the conversation is kept in its
     transcript) and resumed on the other account in the same terminal window, or in a new one.
     `idle_only`: an unprompted move (rebalance). Just before the keys are typed it checks again that
@@ -6574,141 +6966,224 @@ def _account_move(cfg: Config, bot, session: str, target: str, say, idle_only: b
     A waiting limit move gives up after BG_WAIT_MAX and, like a manual move (the owner tapped a target), answers
     Claude's "Background work is running" dialog with "Exit and stop tasks": a session at its limit cannot work
     anyway. The stopped commands are remembered and named in the continue nudge after the resume.
-    Returns True only when the session really restarted on the target."""
+    An owner-requested move that cannot exit is saved for retry even with automatic switching disabled.
+    Returns True only when the session really restarted on the target, None when refused credit
+    resumed on the previous account, and False when the restart did not complete."""
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", session or ""):
         return False
-    try:  # who each profile is signed in as may have changed since the menu was drawn
-        identity.check(cfg, bot, force=True, timeout=accounts.IDENTITY_QUICK_TIMEOUT)
-    except Exception:
-        pass
+    waiting = accounts.deferred_move(session) if defer else None
+    if waiting and waiting.get("manual"):
+        if target == accounts.CREDIT and waiting["target"] != accounts.CREDIT:
+            return False  # retain the manual request without misreporting credit activation
+        target = waiting["target"]
     origin = accounts.origin_account(session)
-    if accounts.same_login(origin, target) and target not in accounts.better_twins(origin):
+    credit_move = accounts.CREDIT in (origin, target)
+    if not credit_move:
+        try:  # credit is not a login/profile and must never enter identity checks
+            identity.check(cfg, bot, force=True, timeout=accounts.IDENTITY_QUICK_TIMEOUT)
+        except Exception:
+            pass
+    if expected_origin is not None:
+        request = _current_move_request(session, target, idle_only, expected_origin)
+        if request is None:
+            return False
+        target, limit = request
+        credit_move = accounts.CREDIT in (origin, target)  # the live plan may name another target
+    if not credit_move and accounts.same_login(origin, target) and target not in accounts.better_twins(origin):
         poll_log(f"move of {session[:8]} to {target} refused: {origin} and {target} are the same login")
         say(t("account_move_same_login", lang=ui_lang, here=identity.isolate(origin, ui_lang),
               target=identity.isolate(target, ui_lang)))
         return False
-    if accounts.logged_out(target):
+    if target != accounts.CREDIT and not accounts.eligible_target(target):
         poll_log(f"move of {session[:8]} to {target} refused: {target} is signed out")
         say(t("account_move_target_logged_out", lang=ui_lang, target=identity.isolate(target, ui_lang)))
         return False
-    mail = accounts.email(target)
+    mail = "" if target == accounts.CREDIT else accounts.email(target)
     pane = pane_for_session(session)
-    if not pane:
+    if not pane and not (defer and _can_reopen_for_move(session)):
         # Nothing was restarted: recording the target and returning True made auto_move write the
         # limit-cleared marker while the process stayed on the spent account.
         poll_log(f"move of {session[:8]} to {target}: no terminal window to restart")
         say(t("account_move_no_window", lang=ui_lang))
         return False
-    if idle_only and not accounts.restart_is_safe(session, min_idle=IDLE_MOVE_MIN):
+    if idle_only and not accounts.restart_is_safe(session, min_idle=0 if credit_move else IDLE_MOVE_MIN):
         poll_log(f"idle move of {session[:8]} cancelled: the session is busy again")
         return False
+    from . import credit_mode
+    flags = credit_mode.resume_flags(session) if credit_move else ""
+    if origin == accounts.CREDIT:
+        # Keep changes the owner made while on credit, including a stricter mode.
+        options = credit_mode._options(session)
+        if not options:
+            say("המעבר למנוי ממתין לזיהוי המודל וההרשאות של השיחה.")
+            return False
+        flags = " --model " + shlex.quote(options[0]) + " --permission-mode " + shlex.quote(options[1])
     before = accounts.origin_account(session)  # the account that really runs it (and hit the limit)
-    pid_before = session_pid(session) if limit else None  # its record can vanish in the exit hooks
-    start_before = _proc_start(pid_before) if pid_before else None
-    waiting = accounts.deferred_move(session) if defer else None
-    if waiting and waiting.get("pid") and waiting.get("started") and not session_pid(session):
-        # A retry of a deferred move whose record is gone: the process saved at the deferral stands in
-        # for it, and no key is typed unless that same process is still what runs here. While a live
-        # record still names the session (a resume by hand, an rc wrapper), the ordinary checks apply.
-        saved = int(waiting["pid"])
-        records = _live_records_strict(saved)
-        if records is None:
-            poll_log(f"move of {session[:8]}: session records unreadable, not retrying now")
-            return False
-        other = any(int(r.get("pid") or 0) == saved and r.get("sessionId") != session for r in records)
-        if other or _pane_claude_targets(pane) != [(saved, waiting["started"])]:
-            poll_log(f"move of {session[:8]}: the window no longer runs the process that ignored /exit, dropped")
-            accounts.clear_deferred(session)
-            return False
-        pid_before = pid_before or int(waiting["pid"])
-        start_before = start_before or waiting["started"]
-    proc = (pid_before, start_before) if pid_before and start_before else None
-    overdue = bool(defer and waiting and time.time() - float(waiting.get("since") or 0) >= BG_WAIT_MAX)
-    force_bg = overdue or (not defer and not idle_only)  # never refuse for background work: stop it, then move
-    if defer and not overdue and background_work_visible(pane):
-        poll_log(f"move of {session[:8]}: background work is running, waiting")
-        if accounts.defer_move(session, target, origin=before, limit=limit, proc=proc):
-            say(t("account_move_waits", lang=ui_lang))
-        return False
-    accounts.record(session, target)
-    mark_planned_restart(session)
-    _tmux("send-keys", "-t", pane, "Escape")
-    time.sleep(0.5)
-    if type_command(session, pane, "/exit") != "sent":  # a draft, a busy or unreadable box: nothing was stopped
-        poll_log(f"move of {session[:8]}: /exit could not be typed (draft or unreadable input box), not moving now")
-        if before:
-            accounts.record(session, before)
-        clear_planned_restart(session)
-        return False
-    state = "claude"
-    bg_dialog, answered, stopped, answered_at, confirmed = False, False, [], 0, False
-    _bg_stopped_path(session).unlink(missing_ok=True)  # a list left by an earlier move must not reach this one
-    for second in range(1, 46):  # its exit hooks can take a while; ask again if it has not gone
-        time.sleep(1)
-        state = _pane_command(pane)
-        if state is None or state in SHELLS:  # claude has exited: the window is gone or back at its shell
-            break
-        if answered and second - answered_at < 5:
-            continue  # Claude is still stopping the tasks: the dialog may be drawn for a moment longer
-        if answered and second - answered_at == 5 and _exit_dialog_pending(pane) and not confirmed:
-            confirmed = True
-            _tmux("send-keys", "-t", pane, "Enter")  # the digit only moved the cursor to 1
-            answered_at = second
-            continue
-        if _exit_dialog_pending(pane):  # never type /exit into it, and never choose 2 (it kills the window's shell)
-            if force_bg and not answered:
-                answered, answered_at = True, second
-                stopped = _answer_exit_dialog(pane, session)
-                if stopped is not None:
-                    continue  # option 1 was chosen: look again for the exit
-                stopped = []
-            bg_dialog = True
-            break
-        if second in (15, 30) and _pane_command(pane) not in (None, *SHELLS):  # never type into the shell
-            _tmux("send-keys", "-t", pane, "Escape")
-            time.sleep(0.5)
-            type_command(session, pane, "/exit")  # the same gate; a refusal just waits for the next look
-    if bg_dialog:
-        now = _pane_command(pane)
-        if now is None or now in SHELLS:  # it finished exiting while we looked: carry on as for any exit
-            bg_dialog, state = False, now
-        else:
-            _tmux("send-keys", "-t", pane, "Escape")  # "Stay": the one key that changes nothing
-            time.sleep(0.5)
+    state, stopped = None, []
+    manual = (not defer and not idle_only) or bool((waiting or {}).get("manual"))
+    if pane:
+        pid_before = session_pid(session)  # manual exits also lose their session record before the process dies
+        start_before = _proc_start(pid_before) if pid_before else None
+        if waiting and waiting.get("pid") and waiting.get("started") and not session_pid(session):
+            # A retry of a deferred move whose record is gone: the process saved at the deferral stands in
+            # for it, and no key is typed unless that same process is still what runs here. While a live
+            # record still names the session (a resume by hand, an rc wrapper), the ordinary checks apply.
+            saved = int(waiting["pid"])
+            records = _live_records_strict(saved)
+            if records is None:
+                poll_log(f"move of {session[:8]}: session records unreadable, not retrying now")
+                return False
+            other = any(int(r.get("pid") or 0) == saved and r.get("sessionId") != session for r in records)
+            if other or _pane_claude_targets(pane) != [(saved, waiting["started"])]:
+                poll_log(f"move of {session[:8]}: the window no longer runs the process that ignored /exit, dropped")
+                accounts.clear_deferred(session)
+                return False
+            pid_before = pid_before or int(waiting["pid"])
+            start_before = start_before or waiting["started"]
+        proc = (pid_before, start_before) if pid_before and start_before else None
+        overdue = bool(defer and waiting and time.time() - float(waiting.get("since") or 0) >= BG_WAIT_MAX)
+        force_bg = overdue or (not defer and not idle_only)  # never refuse for background work: stop it, then move
+        if defer and not overdue and background_work_visible(pane):
             poll_log(f"move of {session[:8]}: background work is running, waiting")
-            if _exit_dialog_pending(pane):
-                poll_log(f"move of {session[:8]}: the background-work dialog is still shown after Escape")
-    if limit and not bg_dialog and _hung_at_limit(pane, session, state, pid=pid_before):
-        poll_log(f"move of {session[:8]}: claude ignored /exit at its limit, ending the process")
-        now_pid = session_pid(session)
-        state = _stop_hung_claude(pane, pid=now_pid or pid_before, session=session,
-                                  started=None if now_pid and now_pid != pid_before else start_before)
-    if bg_dialog or (state is not None and state not in SHELLS):
-        # It still runs on the old account: keep the record true, or a later retry treats the target
-        # as the account that ran out and may move the session back to the spent one (review, PR #24).
-        if not bg_dialog:
-            poll_log(f"move of {session[:8]}: claude did not exit (pane runs {state})")
-        if before:
-            accounts.record(session, before)
-        clear_planned_restart(session)  # nothing stopped: a later real end must not look planned
-        if not bg_dialog:  # (the dialog was already answered with its one Escape)
-            try:
-                _tmux("send-keys", "-t", pane, "Escape")  # leave it at its prompt, usable
-            except (OSError, subprocess.SubprocessError):
-                pass
-        if defer:
-            if accounts.defer_move(session, target, origin=before, limit=limit, proc=proc):
+            if accounts.defer_move(session, target, origin=before, limit=limit, proc=proc, manual=manual):
                 say(t("account_move_waits", lang=ui_lang))
-        else:
-            say(t("account_move_busy_bg", lang=ui_lang))
-        return False
-    accounts.clear_deferred(session)  # the old process is gone and the resume is typed next: nothing waits any more
-    say(t("account_moving", lang=ui_lang, target=target))  # said once it really stopped, so a refusal posts one message
+            return False
+        mark_planned_restart(session)
+        _tmux("send-keys", "-t", pane, "Escape")
+        time.sleep(0.5)
+        if expected_origin is not None:
+            request = _current_move_request(session, target, idle_only, expected_origin)
+            if request is None:
+                clear_planned_restart(session)
+                return False
+            target, limit = request
+        if target == accounts.CREDIT:
+            if not credit_mode.active(session) or credit_mode.blocked(session):
+                clear_planned_restart(session)
+                return False
+            try:
+                accounts.check_credit_settings(session)
+            except accounts.CreditActivationUnavailable:
+                clear_planned_restart(session)
+                return False
+        credit_gate = None
+        if target == accounts.CREDIT:
+            def credit_gate():  # right before Enter: anything that changed during the wait stops the /exit
+                accounts.check_credit_settings(session)  # first: the slow part, so the clock checks come after it
+                if not credit_mode.active(session) or credit_mode.blocked(session):
+                    raise accounts.CreditActivationUnavailable("credit approval no longer active")
+                from .usage import limit_of
+                if not limit_of(session) or accounts.fallback_plan(session).get("fresh"):
+                    raise accounts.CreditActivationUnavailable("the limit cleared or a subscription has room")
+        exit_kw = {"before_enter": credit_gate} if credit_gate else {}
+        if type_command(session, pane, "/exit", **exit_kw) != "sent":  # nothing was stopped
+            poll_log(f"move of {session[:8]}: /exit could not be typed (draft or unreadable input box), not moving now")
+            if before:
+                accounts.record(session, before)
+            clear_planned_restart(session)
+            if manual:
+                if accounts.defer_move(session, target, origin=before, limit=limit, proc=proc, manual=True):
+                    say(t("account_move_waits", lang=ui_lang))
+            return False
+        state = "claude"
+        # /exit commits us to bringing this session back on the chosen account. A later toggle,
+        # quota reset or account report can cancel a plan before /exit, but cannot revoke this restart.
+        bg_dialog, answered, stopped, answered_at, confirmed = False, False, [], 0, False
+        _bg_stopped_path(session).unlink(missing_ok=True)  # a list left by an earlier move must not reach this one
+        for second in range(1, 46):  # its exit hooks can take a while; ask again if it has not gone
+            time.sleep(1)
+            state = _pane_command(pane)
+            if state is None or state in SHELLS:  # claude has exited: the window is gone or back at its shell
+                break
+            if answered and second - answered_at < 5:
+                continue  # Claude is still stopping the tasks: the dialog may be drawn for a moment longer
+            if answered and second - answered_at == 5 and _exit_dialog_pending(pane) and not confirmed:
+                confirmed = True
+                _tmux("send-keys", "-t", pane, "Enter")  # the digit only moved the cursor to 1
+                answered_at = second
+                continue
+            if _exit_dialog_pending(pane):  # never type /exit into it, and never choose 2 (it kills the window's shell)
+                if force_bg and not answered:
+                    answered, answered_at = True, second
+                    stopped = _answer_exit_dialog(pane, session)
+                    if stopped is not None:
+                        continue  # option 1 was chosen: look again for the exit
+                    stopped = []
+                bg_dialog = True
+                break
+            if second in (15, 30) and _pane_command(pane) not in (None, *SHELLS):  # never type into the shell
+                _tmux("send-keys", "-t", pane, "Escape")
+                time.sleep(0.5)
+                type_command(session, pane, "/exit")  # the same gate; a refusal just waits for the next look
+        if bg_dialog:
+            now = _pane_command(pane)
+            if now is None or now in SHELLS:  # it finished exiting while we looked: carry on as for any exit
+                bg_dialog, state = False, now
+            else:
+                _tmux("send-keys", "-t", pane, "Escape")  # "Stay": the one key that changes nothing
+                time.sleep(0.5)
+                poll_log(f"move of {session[:8]}: background work is running, waiting")
+                if _exit_dialog_pending(pane):
+                    poll_log(f"move of {session[:8]}: the background-work dialog is still shown after Escape")
+        if limit and not bg_dialog and _hung_at_limit(pane, session, state, pid=pid_before):
+            poll_log(f"move of {session[:8]}: claude ignored /exit at its limit, ending the process")
+            now_pid = session_pid(session)
+            state = _stop_hung_claude(pane, pid=now_pid or pid_before, session=session,
+                                      started=None if now_pid and now_pid != pid_before else start_before)
+        if bg_dialog or (state is not None and state not in SHELLS):
+            # It still runs on the old account: keep the record true, or a later retry treats the target
+            # as the account that ran out and may move the session back to the spent one (review, PR #24).
+            if not bg_dialog:
+                poll_log(f"move of {session[:8]}: claude did not exit (pane runs {state})")
+            if before:
+                accounts.record(session, before)
+            clear_planned_restart(session)  # nothing stopped: a later real end must not look planned
+            if not bg_dialog:  # (the dialog was already answered with its one Escape)
+                try:
+                    _tmux("send-keys", "-t", pane, "Escape")  # leave it at its prompt, usable
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            if defer or manual:
+                if accounts.defer_move(session, target, origin=before, limit=limit, proc=proc, manual=manual):
+                    say(t("account_move_waits", lang=ui_lang))
+            else:
+                say(t("account_move_busy_bg", lang=ui_lang))
+            return False
+    if expected_origin is not None and not pane:  # no /exit was sent: a closed-session plan is still cancellable
+        request = _current_move_request(session, target, idle_only, expected_origin)
+        if request is None:
+            clear_planned_restart(session)
+            return False
+        target, limit = request
+    accounts.record(session, target)  # only now has the old account's reporting process exited
+    accounts.clear_deferred(session)  # a failed new-window launch below saves a fresh retry
+    if not credit_move:
+        say(t("account_moving", lang=ui_lang, target=target))
     if stopped:
         _save_bg_stopped(session, stopped, bool(limit))
         say(t("account_move_bg_stopped", lang=ui_lang))
-    resume = f"{accounts.shell_command(session, replace=False)} --remote-control --resume {session}"
+    resumed_previous = False
+    try:
+        shell, shell_exec = accounts.shell_command(session, replace=False), accounts.shell_command(session)
+    except accounts.CreditActivationUnavailable:
+        if target != accounts.CREDIT or not before or before == accounts.CREDIT:
+            raise
+        # /exit already went out and credit was refused at launch (approval lapsed in the last instant):
+        # never leave the session stopped; bring it back on the account it ran on, with no billing.
+        poll_log(f"move of {session[:8]}: credit refused after /exit, resuming on {before}")
+        accounts.record(session, before)
+        credit_mode.leaving(session)
+        resumed_previous = True
+        target, flags = before, ""
+        shell, shell_exec = accounts.shell_command(session, replace=False), accounts.shell_command(session)
+        say("המעבר לקרדיט בוטל ברגע האחרון; השיחה חוזרת לחשבון הקודם.")
+    else:
+        if origin == accounts.CREDIT and target != accounts.CREDIT:
+            credit_mode.leaving(session)
+        elif target == accounts.CREDIT:
+            credit_mode.starting(session)
+    resume = f"{shell} --remote-control --resume {session}{flags}"
     if state in SHELLS:
         _tmux("send-keys", "-t", pane, "-l", resume)
         _tmux("send-keys", "-t", pane, "Enter")
@@ -6729,10 +7204,13 @@ def _account_move(cfg: Config, bot, session: str, target: str, say, idle_only: b
         try:
             started = bool(state is None and folder and _tmux(
                 "new-session", "-d", "-s", "tg-" + session[:8], "-c", folder,
-                *shell_argv(accounts.shell_command(session) + f" --remote-control --resume {session}")).returncode == 0)
+                *shell_argv(shell_exec + f" --remote-control --resume {session}{flags}")).returncode == 0)
         except (OSError, subprocess.SubprocessError):  # no tmux, or no claude: nothing was opened
             started = False
         if not started:
+            accounts.record(session, before)
+            accounts.defer_move(session, target, origin=before, limit=limit, manual=manual)
+            clear_planned_restart(session)
             poll_log(f"move of {session[:8]}: could not open a new window (folder known: {bool(folder)})")
             say(t("account_move_failed", lang=ui_lang))
             return False
@@ -6749,9 +7227,11 @@ def _account_move(cfg: Config, bot, session: str, target: str, say, idle_only: b
     accounts.clear_deferred(session)
     _idle_after_move(cfg, bot, session)
     extra = f" ({mail})." if mail else "."
-    say(t("account_move_success", lang=ui_lang, target=target, extra=extra))
+    if not credit_move:
+        say(t("account_move_success", lang=ui_lang, target=target, extra=extra))
     try:  # the fixed keyboard still showed the old account and its quota until the next tap
-        accounts.ensure_usage(max_age=float("inf"), timeout=3.0)  # a target with no reading yet gets one now
+        if target != accounts.CREDIT:
+            accounts.ensure_usage(max_age=float("inf"), timeout=3.0)  # subscription readings only
     except Exception:
         pass
     try:
@@ -6760,7 +7240,34 @@ def _account_move(cfg: Config, bot, session: str, target: str, say, idle_only: b
             keyboard_back(found.thread, delay=2.0, cfg=cfg, bot=bot, chat=found.away)
     except Exception:
         pass
-    return True
+    if remember_origin and not resumed_previous:
+        _remember_move_origin(session, before, target)
+    return None if resumed_previous else True
+
+
+def _remember_move_origin(session: str, previous: str, target: str) -> None:
+    if previous and previous != target and previous != accounts.CREDIT:
+        write_private(private_dir(state_dir() / "move-origins") / safe_name(session),
+                      json.dumps({"previous": previous, "target": target}))
+
+
+def recover_logged_out_move(cfg: Config, bot, session: str, say) -> bool:
+    """Undo the latest move once when its new process reports that it is signed out."""
+    path = private_dir(state_dir() / "move-origins") / safe_name(session)
+    try:
+        info = json.loads(path.read_text(encoding="utf-8"))
+        path.unlink(missing_ok=True)  # one recovery attempt, even if the terminal has since disappeared
+    except (OSError, ValueError, TypeError):
+        return False
+    previous = str(info.get("previous") or "") if isinstance(info, dict) else ""
+    failed = str(info.get("target") or "") if isinstance(info, dict) else ""
+    current = accounts.origin_account(session)
+    if not previous or not failed or failed != current or previous == current or not accounts.eligible_target(previous):
+        return False
+    accounts.mark_logged_out(failed)
+    moved = bool(account_move(cfg, bot, session, previous, say, remember_origin=False))
+    poll_log(f"signed-out recovery of {session[:8]} to {previous}: {'done' if moved else 'not done'}")
+    return moved
 
 
 def _limit_cleared_by_move(session: str, err: Optional[dict]) -> None:
@@ -6956,16 +7463,29 @@ def _send_resume(session: str, pane: str, info: dict) -> str:
         if not box.pending(session):
             poll_log(f"resume {session[:8]}: replayed message(s) already taken")
             return "taken"
-    from .autopilot import type_into
+    from .autopilot import NotTyped, type_into
     from . import usage
     typed_at = time.time()
     with _nudge_guard(session):
         if compact.command_pending(session) or _prompt_state(pane) != "ready":  # a /compact, a draft, a menu or the resume question
             return "notready"
-        info["tries"], info["state"] = int(info.get("tries") or 0) + 1, "typed"
-        _write_pending(session, info)  # counted before typing: a crash or a later call cannot type it again
         text = resume_text(session)
-        type_into(pane, text)
+        old_tries, old_state = info.get("tries"), info.get("state")
+        info["tries"], info["state"] = int(old_tries or 0) + 1, "typed"
+        _write_pending(session, info)  # crash-safe reservation; a preflight refusal below rolls it back
+        try:
+            type_into(pane, text, session)
+        except NotTyped:
+            if old_tries is None:
+                info.pop("tries", None)
+            else:
+                info["tries"] = old_tries
+            if old_state is None:
+                info.pop("state", None)
+            else:
+                info["state"] = old_state
+            _write_pending(session, info)
+            return "notready"
         write_private(_nudge_path(session), repr(time.time()))
     poll_log(f"resume {session[:8]}: typed the continue nudge (try {info['tries']})")
     for i in range(8):
@@ -6974,10 +7494,6 @@ def _send_resume(session: str, pane: str, info: dict) -> str:
         if got is None or got:
             _bg_stopped_path(session).unlink(missing_ok=True)  # the session knows now
             return "taken"
-        if i == 3:
-            from .autopilot import at_prompt
-            if at_prompt(pane) and _box_holds(pane, text):  # typed but not sent
-                _tmux("send-keys", "-t", pane, "Enter")
     return "failed"
 
 
@@ -7045,25 +7561,66 @@ def _resume_in_background(session: str) -> None:
         poll_log(f"resume {session[:8]}: {type(exc).__name__}: {str(exc)[:120]}")
 
 
+def _current_move_request(session: str, target: str, idle: bool,
+                          expected_origin: str) -> Optional[Tuple[str, Optional[dict]]]:
+    """A worker's plan is only a hint: live authority and session state decide under the move lock."""
+    from .usage import limit_of
+    if accounts.origin_account(session) != expected_origin:
+        return None
+    waiting = accounts.deferred_move(session)
+    manual = bool(waiting and waiting.get("manual"))
+    error = limit_of(session)
+    if manual:
+        if waiting.get("origin") and waiting["origin"] != expected_origin:
+            return None
+        target = waiting["target"]
+    elif not accounts.auto_enabled() or (not idle and not error):
+        return None
+    plan = accounts.fallback_plan(session)
+    if plan["here"] != expected_origin or (not manual and not plan["auto"]):
+        return None
+    fresh = plan["fresh"]
+    if target not in fresh:
+        if manual or idle or not fresh:
+            return None
+        target = fresh[0]
+    return target, error
+
+
 def auto_move(cfg: Config, bot, session: str, thread: int, target: str, idle: bool = False, now: bool = True) -> bool:
     """Automatic fallback: the reply mirror saw this session hit its limit and picked an account with
     room; move the session there and let it carry on.
     Uses 'now' so a limit turn that still looks busy moves immediately.
     Sets limit-cleared marker so the old limit error no longer holds messages or re-triggers.
     A rebalance (`idle`) resumes the session only when a usage limit had stopped its work."""
+    origin = accounts.origin_account(session)
     time.sleep(6)  # let the turn that hit the limit finish
+    request = _current_move_request(session, target, idle, origin)
+    if request is None:
+        plan = accounts.fallback_plan(session)
+        if plan.get("here") == origin and not plan.get("fresh"):
+            notice = private_dir(state_dir() / "move-notices") / safe_name(session)
+            if not notice.exists():
+                write_private(notice, "no eligible target")
+                found = place(cfg, session)
+                lang = getattr(cfg, "ui_language", None) or get_lang()
+                _terminal_say(bot, cfg, {"message_thread_id": found.thread if found else thread},
+                              t("account_auto_move_no_target", lang=lang),
+                              chat=found.chat if found else None)
+        return False
+    target, err = request
     found = place(cfg, session)  # the argument is the thread the caller saw; the session may live in a project group
     chat = found.chat if found else None
     m = {"message_thread_id": found.thread if found else thread}
-    from .usage import limit_of
-    err = limit_of(session)  # read before the move: the move changes what the transcript shows
     resume = (not idle) or _limit_stopped_work(session, err)
     moved = account_move(cfg, bot, session, target, lambda text, **extra: _terminal_say(bot, cfg, m, text, chat=chat, **extra),
-                         idle_only=idle, defer=not idle, limit=err)
+                         idle_only=idle, defer=not idle, limit=err, expected_origin=origin)
     poll_log(f"{'limit' if resume else 'idle'} move of {session[:8]} to {target}: "
              f"{'done' if moved else 'not done'}")
     if not moved:
         return False
+    (private_dir(state_dir() / "move-notices") / safe_name(session)).unlink(missing_ok=True)
+    target = accounts.origin_account(session)
     _limit_cleared_by_move(session, err)  # only a completed move clears the old limit error
     if not resume:  # a rebalance of a session that was really idle: nothing was stopped, nothing is replayed
         return True
@@ -7293,7 +7850,7 @@ def account_command(cfg: Config, bot, m: dict, session: Optional[str], rest: str
         from .usage import limit_of
         err = limit_of(session)  # before the move: a session that hit a limit stops being held once it moved
         resume = _limit_stopped_work(session, err)
-        moved = account_move(cfg, bot, session, target, say)
+        moved = account_move(cfg, bot, session, target, say, limit=err)
         poll_log(f"manual move of {session[:8]} to {target}: {'done' if moved else 'not done'}"
                  f"{' (a limit had stopped it)' if resume else ''}")
         if moved:
@@ -7451,7 +8008,8 @@ def auto_compact(session: str, ctx: int | float, cold: bool = False,
             from .idle_lines import _foreground_claude
             typed = type_command(session, pane, line, verify_session=True,
                                  still_ok=lambda: _foreground_claude(pane, session),
-                                 before_enter=submission["before_enter"] if submission else None)
+                                 before_enter=submission["before_enter"] if submission else None,
+                                 automatic_compact=True)
             if submission:
                 submission["sent"] = typed == "sent"
     finally:
@@ -7704,13 +8262,18 @@ def load_boundary(base: Path) -> float:
     return float(value) if ok else 0.0
 
 
+def _config_mtime() -> float:
+    """The settings file's modification time, kept as a seam for the listener's deterministic tests."""
+    from .config import config_path
+    return os.stat(config_path()).st_mtime
+
+
 def switched_on_at(last_seen_off: float, now: float) -> float:
     """When mirroring was turned on again: the config file's mtime (the edit that turned it on). The listener's
     last look while it was still off when the file cannot be read, or its mtime is in the future or older than
     that look (an editor that keeps the old time)."""
-    from .config import config_path
     try:
-        mtime = os.stat(config_path()).st_mtime
+        mtime = _config_mtime()
     except OSError:
         return last_seen_off
     return mtime if last_seen_off <= mtime <= now else last_seen_off
@@ -7763,6 +8326,13 @@ def serve(cfg: Config) -> int:
         lock.close()
         raise
     relay_stop = threading.Event()
+    codex_bridge = codex_thread = None
+    if cfg.codex_harness_enabled is True:
+        from .codex_bridge import CodexBridge
+        codex_bridge = CodexBridge(cfg, bot, topics)
+        codex_thread = threading.Thread(target=codex_bridge.run, args=(relay_stop,), daemon=True,
+                                        name="codex-bridge")
+        codex_thread.start()
     relay_thread = threading.Thread(target=relay_serve, args=(cfg,),
                                     kwargs={"bot": bot, "stop_event": relay_stop}, daemon=True)
     relay_thread.start()
@@ -7816,7 +8386,7 @@ def serve(cfg: Config) -> int:
                     _terminal_background("__dashboard__", _refresh_dashboard_live)
                     next_dashboard = time.monotonic() + 120
                 if time.monotonic() >= next_dialogs:  # an open dialog stays visible until it is answered
-                    _terminal_background("__dialogs__", lambda: dialogs.remind(cfg, bot, topics))
+                    _terminal_background("__dialogs__", lambda: (notices.scan(cfg, bot, topics), dialogs.remind(cfg, bot, topics)))
                     from . import permission_request  # a request answered at the computer or cancelled: its card closes
                     _terminal_background("__permission__", lambda: permission_request.sweep(cfg, bot))
                     next_dialogs = time.monotonic() + 15
@@ -7836,8 +8406,9 @@ def serve(cfg: Config) -> int:
                     params["offset"] = cursor["next_offset"]
                 for update in bot.call("getUpdates", params, timeout=35):
                     before = time.monotonic()
+                    routing = {"codex_bridge": codex_bridge} if codex_bridge is not None else {}
                     handle(update, cfg, bot, topics, inbox, media, effective_start(started, boundary), team_topics,
-                           off_until=math.floor(boundary))
+                           off_until=math.floor(boundary), **routing)
                     write_private(cursor_path, json.dumps({"next_offset": update["update_id"] + 1}))
                     if time.monotonic() - before > 5:
                         poll_log(f"slow handle {time.monotonic() - before:.0f}s")
@@ -7855,4 +8426,6 @@ def serve(cfg: Config) -> int:
         buildstamp.clear_running("listener")
         relay_stop.set()
         relay_thread.join(timeout=2)
+        if codex_thread is not None:
+            codex_thread.join(timeout=5)
         lock.close()

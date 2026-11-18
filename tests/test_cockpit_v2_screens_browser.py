@@ -4,6 +4,7 @@ import pytest
 pytest.importorskip("playwright")
 
 import panel_browser
+from ctb import panel_page
 from cockpit_v2_browser import assert_screen_contract, open_v2, rich_state
 from cockpit_v2_screenshots import go_project, go_projects, go_radio, go_settings, go_studio
 
@@ -137,7 +138,9 @@ def test_radio_tool_moves_the_one_player_and_keeps_classic_actions(opened):
     page.wait_for_timeout(100)
     assert ("/api/setting", {"name": "voice_digest", "value": "off"}) in calls
     # The station's start/stop is the classic call.
-    page.locator('[data-v2-section="station"] .btns .btn').click()
+    page.locator('[data-v2-section="station"]').get_by_role(
+        "button", name=panel_page.STRINGS["he"]["radioStop"], exact=True
+    ).click()
     page.wait_for_timeout(100)
     assert ("/api/radio", {"on": False}) in calls
     # Leaving the tool returns the same player to its classic place on Now.

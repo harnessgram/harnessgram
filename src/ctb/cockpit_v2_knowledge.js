@@ -23,7 +23,7 @@ function vkAdvice(a){var c=el("span","vk-advice vk-advice-"+a,vkT("advice_"+a));
 // A heading's note title, or the heading as it is (raw) when there is none.
 function vkGroupLabel(g){var n=((vkData||{}).sections||{})[g],t=n&&n["title_"+vkL()];
  if(typeof t==="string"&&t)return {text:t,raw:false};return {text:g,raw:g!==vkT("general")&&g!==vkT("privateFolder")};}
-function vkImage(name,cls){var img=el("img",cls);img.src=V2_ASSET+name+".webp";img.alt="";img.decoding="async";return img;}
+function vkImage(name,cls){var img=el("img",cls);img.width=160;img.height=100;img.src=V2_ASSET+name+".webp";img.alt="";img.decoding="async";return img;}
 function vkRerender(){if(last&&view==="settings")render(last,true);}
 // One navigation step: Settings -> home -> (a list, the vault or history) -> one item's sheet.
 function vkGo(patch){Object.keys(patch).forEach(function(k){vkNav[k]=patch[k];});vkNav.open=true;haptic("sel");

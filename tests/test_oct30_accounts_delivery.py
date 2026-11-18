@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot, BoxedTmux
+from conftest import GOOD_TOKEN, FakeBot, BoxedTmux, signed_in
 from ctb import accounts, cli, compact, dashboard, delivery, fmt, hooks, inbox as I, mirror, statusline
 from ctb import topic_icons, usage, voice, wake
 from ctb.config import Config, state_dir, write_private
@@ -19,6 +19,11 @@ from ctb.topics import TopicMap, session_state, set_state
 
 SID = "11111111-2222-3333-4444-555555555555"
 OWNER = 7
+
+
+@pytest.fixture(autouse=True)
+def finished_logins(isolated):
+    signed_in("main", "work", "spare")
 
 
 def cfg(**kw):
@@ -32,6 +37,8 @@ def rig(bot, session=SID):
 
 
 def write(name, data):
+    if name.startswith("claude-usage-"):
+        data = dict(data, at=data.get("at") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     write_private(state_dir() / name, json.dumps(data))
 
 
@@ -123,6 +130,7 @@ def test_quota_hit_pattern_never_shadows_the_chunk_limit():
 
 def limit_setup(bot, home, auto=True):
     make_profile("work")
+    write("claude-usage-work.json", {"five_hour": 0, "weekly": 0})
     topics, _, thread = rig(bot)
     if not auto:
         accounts.toggle_auto()
@@ -132,7 +140,7 @@ def limit_setup(bot, home, auto=True):
 def test_quota_hit_moves_the_session_automatically_and_remembers_the_spent_account(home, bot):
     thread = limit_setup(bot, home)
     spawned = []
-    assert mirror.limit_offer(cfg(), bot, SID, "You've hit your usage limit", spawn_fn=spawned.append)
+    assert mirror.limit_offer(cfg(), bot, SID, "You've hit your usage limit", spawn_fn=spawned.append, api_error=True)
     assert spawned == [["account", "auto-move", f"--session={SID}", f"--thread={thread}", "--target=work"]]
     sent = bot.methods("sendMessage")[-1]
     assert sent["message_thread_id"] == thread and "work" in sent["text"] and "reply_markup" not in sent
@@ -144,7 +152,7 @@ def test_quota_hit_moves_the_session_automatically_and_remembers_the_spent_accou
 def test_quota_hit_offers_buttons_when_automatic_fallback_is_off(home, bot):
     limit_setup(bot, home, auto=False)
     assert not accounts.auto_enabled()
-    assert mirror.limit_offer(cfg(), bot, SID, "Claude usage limit reached", spawn_fn=lambda a: pytest.fail("no auto move"))
+    assert mirror.limit_offer(cfg(), bot, SID, "Claude usage limit reached", spawn_fn=lambda a: pytest.fail("no auto move"), api_error=True)
     rows = bot.methods("sendMessage")[-1]["reply_markup"]["inline_keyboard"]
     assert rows[0][0]["callback_data"] == "more:/account move work" and rows[-2][0]["callback_data"] == "more:/account add"
     assert rows[-1][0]["callback_data"] == "more:dismiss"  # "not now": the offer can be closed
@@ -172,6 +180,7 @@ def test_quota_hit_matches_claude_limit_lines_and_ignores_ordinary_assistant_rat
 def test_fallback_skips_accounts_that_are_spent_or_just_ran_out(home, bot):
     make_profile("work")
     make_profile("spare")
+    write("claude-usage-spare.json", {"five_hour": 0, "weekly": 0})
     now = time.time()
     write("claude-usage-work.json", {"five_hour": 40, "weekly": 100, "weekly_resets": now + 3600})
     plan = accounts.fallback_plan(SID, now)
@@ -190,6 +199,8 @@ def test_fallback_skips_accounts_that_are_spent_or_just_ran_out(home, bot):
 def test_fallback_plan_and_limit_offer_derive_account_from_env(home, bot, monkeypatch):
     make_profile("work")
     make_profile("spare")
+    write("claude-usage-main.json", {"five_hour": 0, "weekly": 0})
+    write("claude-usage-spare.json", {"five_hour": 0, "weekly": 0})
     accounts.use("main")
     assert accounts.current() == "main"
     acct3_dir = accounts.profiles_dir() / "work"
@@ -207,7 +218,7 @@ def test_fallback_plan_and_limit_offer_derive_account_from_env(home, bot, monkey
     topics, _, thread = rig(bot, session=unrecorded)
     spawned = []
     limit_text = "You've hit your 5-hour limit · resets 12:50pm (Asia/Jerusalem)"
-    assert mirror.limit_offer(cfg(), bot, unrecorded, limit_text, spawn_fn=spawned.append)
+    assert mirror.limit_offer(cfg(), bot, unrecorded, limit_text, spawn_fn=spawned.append, api_error=True)
     recorded_limits = json.loads((state_dir() / "account-limits.json").read_text())
     assert "work" in recorded_limits
     assert "main" not in recorded_limits
@@ -234,16 +245,15 @@ def test_dashboard_has_a_quota_line_per_account_only_with_several(home, bot):
                                      "five_hour_resets": time.time() + 3600})
     text = dashboard.text(c, {})
     assert "👤 חשבונות קלוד" in text
-    # Weekly only (2026-11-10): a 5-hour reading is never shown, and the dot follows the weekly number
-    assert "🟢 me: שבוע 20%" in text and "95%" not in text and "⚪ w: אין נתונים עדיין" in text
-    write("claude-usage-work.json", {"at": stamp, "five_hour": 0, "weekly": 40})
+    assert "🔴 me: 5ש 95% · שבוע 20%" in text and "⚪ w: אין נתונים עדיין" in text
+    write("claude-usage-work.json", {"at": stamp, "five_hour": 0, "five_hour_resets": 0, "weekly": 40})
     lines = accounts.usage_lines()
-    assert any("w: שבוע 40%" in l and "5 שע׳" not in l for l in lines)
+    assert any("w: שבוע 40%" in l and "5ש" not in l for l in lines)
 
 
 def test_account_menu_use_move_auto_add_and_login_code(home, bot, monkeypatch):
     make_profile("work")
-    write("account-emails.json", {"main": "me@example.com"})
+    write("account-emails.json", {"main": "me@example.com", "work": "work@example.test"})
     topics, box, thread = rig(bot)
     say = Msgs()
     m = {"chat": {"id": OWNER}, "message_thread_id": thread, "message_id": 9}

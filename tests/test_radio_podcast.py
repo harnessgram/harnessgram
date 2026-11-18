@@ -773,7 +773,8 @@ def run_command(c, arg, fetcher=None):
     return out[0]
 
 
-def test_the_command_queues_the_latest_episode_of_a_named_feed():
+def test_the_command_queues_the_latest_episode_of_a_named_feed(monkeypatch):
+    monkeypatch.setattr(radio, "job_pid", lambda: None)
     c = cfg()
     text = run_command(c, "science hour")
     assert "Latest ep" in text  # no dates in that feed: the first item is the latest
@@ -785,7 +786,8 @@ def test_the_command_queues_the_latest_episode_of_a_named_feed():
     assert "Two" in run_command(c, "Science Hour", feed_fetcher(data))
 
 
-def test_the_command_takes_a_link_and_says_why_it_refuses(tmp_path):
+def test_the_command_takes_a_link_and_says_why_it_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(radio, "job_pid", lambda: None)
     c = cfg(radio={"room_suitability_file": rules_file(tmp_path)})
     assert "Fresh" in run_command(c, "https://other.example.org/feed", feed_fetcher(rss([("Fresh", "ok")])))
     assert "suitability" in run_command(c, "https://other.example.org/feed2", feed_fetcher(rss([("badword", "ok")])))

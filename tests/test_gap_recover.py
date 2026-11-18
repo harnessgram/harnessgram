@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from conftest import GOOD_TOKEN
+from conftest import GOOD_TOKEN, signed_in
 from ctb import alerts, inbox as I, recover, usage, wake
 from ctb.config import Config, state_dir, write_private
 from ctb.topics import TopicMap
@@ -185,7 +185,7 @@ def _pane(monkeypatch, waiter=False, busy=False, prompt=True, empty=True):
     monkeypatch.setattr(I, "main_working", lambda s: busy)
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: prompt)
     monkeypatch.setattr(I, "_empty_prompt", lambda p: empty)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, text: typed.append(text))
+    monkeypatch.setattr(I, "type_command", lambda session, pane, line, **kw: typed.append(line) or "sent")
     return typed
 
 
@@ -225,6 +225,7 @@ def test_a_second_move_of_the_same_session_is_skipped(monkeypatch):
     import fcntl
     from ctb import accounts
     accounts.add("spare")
+    signed_in("spare")
     from ctb.config import private_dir
     lock = private_dir(state_dir() / "moving") / (I.safe_name("abc") + ".lock")
     monkeypatch.setattr(I, "_account_move", lambda *a, **k: pytest.fail("a move is already running"))
@@ -293,6 +294,7 @@ def test_reset_early_needs_a_reading_taken_after_the_limit_that_shows_room(monke
     monkeypatch.setattr(accounts, "_read", lambda path, default=None: reading)
     monkeypatch.setattr(accounts, "spent", lambda name, now=None: False)
     hit = accounts.iso_epoch("2026-10-29T10:00:00Z")
+    monkeypatch.setattr(usage.time, "time", lambda: hit + 600)
     assert usage.reset_early("s", hit)
     assert not usage.reset_early("s", hit + 600)     # the reading is older than the limit: it proves nothing
     monkeypatch.setattr(accounts, "spent", lambda name, now=None: True)
@@ -340,7 +342,7 @@ def test_the_line_that_resumes_a_session_is_not_held_by_its_idle_waiter(monkeypa
     monkeypatch.setattr(I, "main_working", lambda s: False)
     monkeypatch.setattr(I, "_empty_prompt", lambda pane: True)
     monkeypatch.setattr(autopilot, "at_prompt", lambda pane: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda pane, line: typed.append(line))
+    monkeypatch.setattr(I, "type_command", lambda session, pane, line, **kw: typed.append(line) or "sent")
     assert recover._deliver(SID, True) == "later" and typed == []   # queued: the waiter delivers by itself
     assert recover._deliver(SID, False, recover.RESUME_TEXT) == "nudged" and typed == [recover.RESUME_TEXT]
 

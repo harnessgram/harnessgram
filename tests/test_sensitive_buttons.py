@@ -1,4 +1,4 @@
-"""Sensitive-button markers for the Harnessgram app (sensitive_buttons.py): what is marked, what never is, the
+"""Sensitive-button markers for the HarnessGram app (sensitive_buttons.py): what is marked, what never is, the
 64-byte limit, the strip before any handler, and the "sensitive" flag of a decision."""
 import json
 

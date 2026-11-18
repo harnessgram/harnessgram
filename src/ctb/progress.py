@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import html
 import json
 import os
@@ -11,10 +12,11 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import flood
+from . import flood, menus
 from .lazy import lazy_module
 from . import lang as L
-from .config import AGENT_NOTICES, Config, activity_level, home_chat, private_dir, setting_on, state_dir, write_private
+from .config import (AGENT_NOTICES, Config, activity_level, home_chat, live_activity_in_cockpit,
+                     private_dir, setting_on, state_dir, write_private)
 from .i18n import get_lang, t
 from .telegram import Bot, TelegramError
 from .topics import chat_of, place
@@ -509,15 +511,46 @@ def heading_he(words: str, cfg: Config) -> str:
         return words
 
     cache_path = state_dir() / HEADINGS_CACHE_FILE
+    known = _heading_read(cache_path).get(words)
+    if known:
+        return known
+    # Every session's background job may ask for the same title at once: one asks, the others read its answer.
+    with translate.in_flight(hashlib.sha256(("heading\0" + words).encode("utf-8")).hexdigest()):
+        known = _heading_read(cache_path).get(words)
+        if known:
+            return known
+        return _heading_translate(words, cfg, cache_path)
+
+
+HEADINGS_KEEP = 2000  # titles kept in the heading cache, newest last
+
+
+def _heading_read(cache_path: Path) -> dict:
     try:
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        if not isinstance(cache, dict):
-            cache = {}
     except (OSError, ValueError):
-        cache = {}
-    if words in cache:
-        return cache[words]
+        return {}
+    return cache if isinstance(cache, dict) else {}
 
+
+def _heading_store(cache_path: Path, words: str, he: str) -> None:
+    """Add one title under a lock, merged into the cache as it is NOW on disk: a copy read before a slow Gemini
+    call, written back whole, dropped every title other processes had added meanwhile, and each dropped title was
+    asked again on the next card edit."""
+    try:
+        private_dir(cache_path.parent)
+        with open(str(cache_path) + ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cache = _heading_read(cache_path)
+            cache.pop(words, None)
+            cache[words] = he
+            write_private(cache_path, json.dumps(dict(list(cache.items())[-HEADINGS_KEEP:]), ensure_ascii=False))
+    except OSError:
+        pass
+
+
+def _heading_translate(words: str, cfg: Config, cache_path: Path) -> str:
+    from . import translate
     he = ""
     engines = getattr(cfg, "engines", [])
     if engines and engines[0] == "gemini" and translate.external_allowed(cfg):
@@ -545,11 +578,7 @@ def heading_he(words: str, cfg: Config) -> str:
             he = ""
 
     if he and "\n" not in he:
-        cache[words] = he
-        try:
-            write_private(cache_path, json.dumps(dict(list(cache.items())[-2000:]), ensure_ascii=False))
-        except OSError:
-            pass
+        _heading_store(cache_path, words, he)
         return he
     return words
 
@@ -669,6 +698,11 @@ def append_progress(session: str, data: dict, cfg: Config, root: Optional[Path] 
     from .creds import redact_detail
     value = data.get("tool_response")
     if value is not None and cfg.progress_details:
+        if isinstance(value, dict):
+            reason = value.get("stderr") or value.get("error")
+            if reason:
+                safe_reason = redact_detail(hide_signin(str(reason), links))
+                row["error"] = " ".join(safe_reason.strip().splitlines())[:180]
         # The links go before the JSON: its escapes ("\\n") would sit against a link and hide its start.
         value = _hide_in(value, links)
         value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
@@ -856,7 +890,7 @@ def compact_card(item: str) -> str:
     return re.sub(r"</?b>", "", head).strip()
 
 
-def card_text(entry, cfg: Config, pending: Optional[list] = None) -> str:
+def card_text(entry, cfg: Config, pending: Optional[list] = None, compact: bool = False) -> str:
     """One card entry as shown: a step saved as {"row": ...} is rendered now, with its heading in Hebrew when
     the translation is already known (cache only, never an engine); an older entry is already a string."""
     if isinstance(entry, str):
@@ -864,14 +898,120 @@ def card_text(entry, cfg: Config, pending: Optional[list] = None) -> str:
     row = entry.get("row") if isinstance(entry, dict) else None
     if not isinstance(row, dict):
         return ""
-    item = card(translated_heading(row, cfg, cached_only=True, pending=pending), False)
-    if row.get("output"):
+    rendered = translated_heading(row, cfg, cached_only=True, pending=pending)
+    if compact:
+        rendered = {k: v for k, v in rendered.items() if k not in ("d", "output")}
+        rendered["tool"] = ""
+    item = card(rendered, False)
+    if compact and row.get("error"):
+        item += "\n⚠️ " + html.escape(str(row["error"]), quote=False)
+    elif row.get("output"):
         item += "\n<blockquote expandable>" + html.escape(str(row["output"]), quote=False) + "</blockquote>"
     return item
 
 
-def card_texts(cards, cfg: Config, pending: Optional[list] = None) -> list:
-    return [card_text(c, cfg, pending) for c in cards or []]
+def card_texts(cards, cfg: Config, pending: Optional[list] = None, compact: bool = False) -> list:
+    return [card_text(c, cfg, pending, compact) for c in cards or []]
+
+
+def compact_actions_on(cfg: Optional[Config], session: str) -> bool:
+    """The per-topic choice, falling back to the global Cockpit setting."""
+    path = state_dir() / "compact-actions" / safe_name(session)
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return bool(getattr(cfg, "compact_actions", False))
+    return value == "on"
+
+
+def set_compact_actions(cfg: Config, session: str, on: bool) -> None:
+    if not session or not isinstance(on, bool):
+        raise ValueError("invalid compact actions setting")
+    path = private_dir(state_dir() / "compact-actions") / safe_name(session)
+    if on == bool(getattr(cfg, "compact_actions", False)):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    else:
+        write_private(path, "on" if on else "off")
+
+
+def clear_compact_actions_overrides() -> None:
+    """Make a changed global choice authoritative for every topic."""
+    root = state_dir() / "compact-actions"
+    try:
+        paths = list(root.iterdir())
+    except OSError:
+        return
+    for path in paths:
+        if path.is_file() or path.is_symlink():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+CARD_ARCHIVE_KEEP = 20
+
+
+def _archive_card(state: dict, directory: Path, session: str, compact: bool) -> None:
+    """Retain a compact card for its Expand button, with a bounded per-session history."""
+    if not compact or not state.get("id") or not state.get("cards"):
+        return
+    prefix = f"{safe_name(session)}.card-"
+    write_private(directory / f"{prefix}{state['id']}", json.dumps(state, ensure_ascii=False))
+    try:
+        archives = sorted(directory.glob(f"{prefix}*"), key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for path in archives[CARD_ARCHIVE_KEEP:]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def action_markup(ui_lang: str, expanded: bool) -> dict:
+    return {"inline_keyboard": [
+        [{"text": t("progress_collapse" if expanded else "progress_expand", lang=ui_lang),
+          "callback_data": "more:actioncollapse" if expanded else "more:actionexpand"}],
+        menus.unbuttons_row(ui_lang),
+    ]}
+
+
+def toggle_card_details(cfg: Config, bot, session: str, message_id: int, expanded: bool) -> bool:
+    """Expand a retained action card; buttons for unknown messages do nothing."""
+    pdir = private_dir(state_dir() / "progress")
+    state_path = pdir / f"{safe_name(session)}.msg"
+    lock_path = pdir / f"{safe_name(session)}.lock"
+    with open(lock_path, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = None
+        if not state or state.get("id") != message_id or not state.get("cards"):
+            archive = pdir / f"{safe_name(session)}.card-{message_id}"
+            state_path = archive
+            try:
+                state = json.loads(archive.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+        if state.get("id") != message_id or not state.get("cards"):
+            return False
+        state["expanded"] = bool(expanded)
+        ui_lang = getattr(cfg, "ui_language", "en")
+        text = render_cards(ui_lang, card_texts(state["cards"], cfg, compact=not expanded), time.time())
+        try:
+            bot.call("editMessageText", {"chat_id": chat_of(cfg, session), "message_id": message_id,
+                                          "text": text, "parse_mode": "HTML",
+                                          "reply_markup": action_markup(ui_lang, expanded)})
+        except TelegramError as exc:
+            if "not modified" not in str(exc).lower():
+                return False
+        write_private(state_path, json.dumps(state, ensure_ascii=False))
+    return True
 
 
 def render_cards(ui_lang: str, cards, now: float) -> str:
@@ -917,6 +1057,10 @@ def _send_ordered(cfg, session, rows, state, state_path, thread, bot, now_fn, fa
     from .hooks import _seen, _mark
     from .topics import set_state
     set_state(cfg, session, "busy", bot=bot, optional=True)
+    # The Cockpit keeps the completed turn briefly so it can render its final activity.  It is a snapshot,
+    # not the cursor for the next turn: a new jsonl starts at row zero and must not inherit cards or "ended".
+    if state.get("ended"):
+        state = {}
     if "cursor" not in state:
         state = {"cursor": sum(1 for row in rows if row.get("t", 0) and row["t"] <= state.get("shown", 0)), "cards": []}
     changed = False
@@ -926,18 +1070,32 @@ def _send_ordered(cfg, session, rows, state, state_path, thread, bot, now_fn, fa
     heads: list = []  # step headings not translated yet: the background job translates them (run_jobs)
     texts: list = []  # interim texts shown in English: the background job edits them to their translation
 
+    compact = compact_actions_on(cfg, session)
+
+    def archive_card():
+        _archive_card(state, state_path.parent, session, compact)
+
     def render(cards):
-        return render_cards(ui_lang, card_texts(cards, cfg, heads), now_fn())
+        expanded = bool(state.get("expanded"))
+        return render_cards(ui_lang, card_texts(cards, cfg, heads, compact=compact and not expanded), now_fn())
 
     def flush(force: bool) -> bool:
         """Push the card in `state` to Telegram. True when nothing is left unshown."""
         nonlocal changed
         if not state.get("dirty"):
             return True
+        if live_activity_in_cockpit():
+            state["activity"] = card_texts(state.get("cards", []), cfg, heads)[-20:]
+            state["activity_at"] = now_fn()
+            state["dirty"] = False
+            persist()
+            return True
         has_id = bool(state.get("id"))
         if has_id and not force and now_fn() - state.get("flushed", 0.0) < MIN_EDIT:
             return False
         params = {"chat_id": chat, "text": render(state.get("cards", [])), "parse_mode": "HTML"}
+        if compact:
+            params["reply_markup"] = action_markup(ui_lang, bool(state.get("expanded")))
         # A forced flush (before text, at Stop) keeps the order but still obeys the closed gate.
         try:
             if has_id:
@@ -981,16 +1139,22 @@ def _send_ordered(cfg, session, rows, state, state_path, thread, bot, now_fn, fa
                 _send_link(cfg, bot, thread, row["url"], ui_lang, chat)
                 changed = True
                 if carded:  # the card is out, so the next tools start a new one below the link
+                    archive_card()
                     state.pop("id", None)
+                    state.pop("expanded", None)
                     state["cards"] = []
                     state.pop("dirty", None)
             elif row.get("kind") == "boundary":
+                archive_card()
                 state.pop("id", None)
+                state.pop("expanded", None)
                 state["cards"] = []
                 state.pop("dirty", None)
             elif row.get("kind") == "text":
                 if row["uuid"] not in _seen(session):
+                    archive_card()
                     state.pop("id", None)
+                    state.pop("expanded", None)
                     state["cards"] = []
                     state.pop("dirty", None)
                     # Instant: the text goes out as Claude wrote it (redacted), and is then edited in place
@@ -1027,12 +1191,14 @@ def _send_ordered(cfg, session, rows, state, state_path, thread, bot, now_fn, fa
                 state.pop("text_ids", None)
                 state.pop("tr", None)
             else:
-                item = {"row": {k: row[k] for k in ("l", "d", "tool", "output") if k in row}}
+                item = {"row": {k: row[k] for k in ("l", "d", "tool", "output", "error") if k in row}}
                 cards = state.get("cards", []) + [item]
                 if len(render(cards)) > 3500 and state.get("cards"):
                     if not flush(force=True):
                         break  # the full card goes out before a new one starts
+                    archive_card()
                     state.pop("id", None)
+                    state.pop("expanded", None)
                     cards = [item]
                 state["cards"] = cards
                 state["dirty"] = True
@@ -1060,9 +1226,13 @@ def _final_flush(cfg: Config, session: str, state: dict, bot=None) -> None:
     """One last try to show the card still pending when the step ends: gate check only, no budget."""
     try:
         bot = bot or Bot.from_config(cfg)
+        compact = compact_actions_on(cfg, session)
+        expanded = bool(state.get("expanded"))
         params = {"chat_id": chat_of(cfg, session), "text": render_cards(getattr(cfg, "ui_language", "en"),
-                                                                          card_texts(state["cards"], cfg), time.time()),
+                                                                          card_texts(state["cards"], cfg, compact=compact and not expanded), time.time()),
                   "parse_mode": "HTML"}
+        if compact:
+            params["reply_markup"] = action_markup(getattr(cfg, "ui_language", "en"), expanded)
         if state.get("id"):
             params["message_id"] = state["id"]
             flood.optional_call(bot, "editMessageText", params, budget=False)
@@ -1071,7 +1241,9 @@ def _final_flush(cfg: Config, session: str, state: dict, bot=None) -> None:
             if found is None:
                 return
             params.update(message_thread_id=found.thread, disable_notification=True)
-            flood.optional_call(bot, "sendMessage", params, budget=False)
+            sent = flood.optional_call(bot, "sendMessage", params, budget=False)
+            if isinstance(sent, dict) and sent.get("message_id"):
+                state["id"] = sent["message_id"]
     except Exception:
         pass  # a card that cannot be shown now is dropped with the step
 
@@ -1121,10 +1293,16 @@ def run_end_progress(cfg: Config, session: str, root: Optional[Path] = None, bot
             return 0
         if "cursor" in state and state.get("dirty") and state.get("cards") and cfg.ready:
             _final_flush(cfg, session, state, bot)  # the last tool lines must not be lost to a closed gate
-        try:
-            state_path.unlink()
-        except OSError:
-            pass
+        _archive_card(state, pdir, session, compact_actions_on(cfg, session))
+        if live_activity_in_cockpit() and "cursor" in state:
+            state.update(activity=card_texts(state.get("cards", []), cfg)[-20:], activity_at=time.time(), ended=True)
+            state.pop("id", None)
+            write_private(state_path, json.dumps(state, ensure_ascii=False))
+        else:
+            try:
+                state_path.unlink()
+            except OSError:
+                pass
     msg_id = state.get("id") if "cursor" not in state else None
     if msg_id and cfg.ready:
         bot = bot or Bot.from_config(cfg)

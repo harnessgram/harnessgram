@@ -41,7 +41,6 @@ SEEN_GRACE = 20.0        # a dialog must be open this long before the watcher sh
 TYPED_TTL = 1800.0       # a typed-answer window closes by itself after 30 minutes
 CARD_LIMIT = 3900        # Telegram refuses a message over 4096 characters, counted after HTML escaping
 MAX_ANSWER = 2000
-BACKGROUND_GRACE = 20.0
 
 _OPT = re.compile(r"^\s*(?P<cur>[❯›])?\s*(?P<num>\d{1,2})[.)]\s+(?P<rest>\S.*)$")
 _SEP = re.compile(r"^[\s─━═_\-╌┄]+$")
@@ -121,6 +120,15 @@ _BACKGROUND_SPINNER = re.compile(
 )
 _BACKGROUND_RULE = re.compile(r"^[─━═_-]{8,}(?:\s+.+?\s+[─━═_-]+)?$")
 _BACKGROUND_TOOL = re.compile(r"^(?:[⏺●]\s*[A-Za-z][\w:.-]*|Bash)\(.*")
+_TIP_NOTICE = re.compile(r"(?ms)^\s*✦\s+Heads up\b.*?0:\s*Dismiss\b")
+
+
+def non_dialog_overlay(body: str) -> Optional[str]:
+    """Name a Claude Code tip notice: terminal chrome, never a dialog. The background-agents list under the
+    status line is ordinary chrome too: it shows in every session with agents and does not take the keyboard."""
+    if _TIP_NOTICE.search(body or ""):
+        return "tip"
+    return None
 
 
 @dataclass
@@ -176,6 +184,28 @@ def _norm_row(row: str) -> str:
     return re.sub(r"^[│┃]\s?|\s?[│┃]$", "", row).rstrip()
 
 
+# Claude Code draws the session's title inside the screen's bottom rule ("──── project: task ─"). Kept as text, it
+# made every dialog of a titled session look like a reply (live: a /compact and an approval question were both
+# missed while the session waited on "Do you want to proceed?"). Only the screen's last row, right under a key-hint
+# or prompt row, is read as that rule: the same text anywhere else (a reply, a quoted dialog) stays text.
+_TITLED_RULE = re.compile(r"^\s*[─━═]{8,}\s+\S.*?\s+[─━═]+\s*$")
+
+
+def _screen_rows(body: str) -> List[str]:
+    rows = [_norm_row(r) for r in (body or "").splitlines()]
+    last = len(rows) - 1
+    while last >= 0 and not rows[last].strip():
+        last -= 1
+    above = last - 1
+    while above >= 0 and not rows[above].strip():
+        above -= 1
+    # Proof that it is the CLI's own rule: right under a dialog's key-hint row or the input box's prompt row.
+    if (last >= 1 and above >= 0 and _TITLED_RULE.fullmatch(rows[last])
+            and (_REAL_HINT.fullmatch(rows[above].strip()) or rows[above].lstrip().startswith("❯"))):
+        rows[last] = _RULE
+    return rows
+
+
 def hint_row_index(rows: List[str], pattern=_REAL_HINT) -> Optional[int]:
     """Index of the dialog's key-hint row when it is the bottom of the screen: at most three status rows
     (never an input box, a prompt or other text) may follow it."""
@@ -201,7 +231,7 @@ def hint_row_index(rows: List[str], pattern=_REAL_HINT) -> Optional[int]:
 def bottom_hint(body: str) -> bool:
     if background_screen(body):
         return False  # a running command is not a typed-answer dialog
-    return hint_row_index([_norm_row(r) for r in (body or "").splitlines()]) is not None
+    return hint_row_index(_screen_rows(body)) is not None
 
 
 _UNDER_SPINNER = re.compile(r"^(?:⎿|[☐☒◻◼✔✓□■]|…\s*\+\d+|Tip:)")
@@ -253,13 +283,13 @@ def _background_hint_index(rows: List[str]) -> Optional[int]:
 def background_screen(body: str) -> bool:
     """A live running-command shortcut, with parsed dialogs taking priority."""
     body = _ANSI.sub("", body or "")
-    rows = [_norm_row(r) for r in body.splitlines()]
+    rows = _screen_rows(body)
     return _background_hint_index(rows) is not None and parse(body) is None
 
 
 def _background_fingerprint(body: str) -> str:
     """Bind the shortcut to the nearest tool call, ignoring styling and spinner ticks."""
-    rows = [_norm_row(r) for r in _ANSI.sub("", body or "").splitlines()]
+    rows = _screen_rows(_ANSI.sub("", body or ""))
     hint = _background_hint_index(rows)
     if hint is not None:
         for row in reversed(rows[:hint]):
@@ -272,7 +302,7 @@ def _background_fingerprint(body: str) -> str:
 
 def _unparsed_rows(body: str) -> List[str]:
     """The last twelve text rows up to and including the hint row (a status line below it ticks)."""
-    rows = [_norm_row(r) for r in (body or "").splitlines()]
+    rows = _screen_rows(body)
     end = hint_row_index(rows)
     rows = rows[:end + 1] if end is not None else rows
     return [r.strip() for r in rows if r.strip()][-12:]
@@ -319,7 +349,7 @@ def parse(body: str) -> Optional[Dialog]:
     dialog's own key-hint row at the bottom of the screen, or a selector mark on an option with nothing
     under the options but descriptions and a status line (no input box, no text): an ordinary reply, a
     quoted dialog and the owner's own prompt are not dialogs."""
-    rows = [_norm_row(r) for r in (body or "").splitlines()]
+    rows = _screen_rows(body)
     cands = []
     for i, row in enumerate(rows):
         m = _OPT.match(row)
@@ -480,17 +510,17 @@ def compacting_screen(body: str) -> bool:
 _EXIT_BG_TITLE = re.compile(r"(?i)^background work is running$")
 _EXIT_BG_OPTIONS = ("exit and stop tasks", "move to background and exit", "stay")
 _NUMBERED_ROW = re.compile(r"^\s*(?:[❯›]\s*)?(\d{1,2})[.)]\s+(\S.*)$")
-_TASK_ROW = re.compile(r"^(?:shell|agent|monitor|task|workflow|local agent|remote agent|scheduled(?: task)?)s?\s+·\s+\S", re.I)
+_TASK_ROW = re.compile(r"^(?:shell|agent|monitor|task|workflow|local agent|remote agent|scheduled(?:\s+task)?)s?\s+·\s+\S", re.I)
 FOOTER_MARK = re.compile(r"⏵⏵|⏸|\? for shortcuts|\bmode on\b")
 
 
 def exit_background_screen(body: str) -> bool:
-    """Claude's answer to /exit while shells or agents still run: "Background work is running ... 1. Exit and
-    stop tasks  2. Move to background and exit  3. Stay". Options 1 and 2 lose or detach the owner's work,
-    so only Escape is ever sent to it. A live dialog is the bottom of the screen: nothing under its title
+    """Claude's answer to /exit while shells, agents or scheduled tasks remain: "Background work is running ...
+    1. Exit and stop tasks  2. Move to background and exit  3. Stay". A mover may choose option 1;
+    scheduled tasks survive that choice and resume. A live dialog is the bottom of the screen: nothing under its title
     may be a prompt box or the footer, and the last numbered row on the screen is one of its three options,
     alone on its row. A reply that merely quotes the dialog fails at least one of these."""
-    rows = [_norm_row(r) for r in (body or "").splitlines()]
+    rows = _screen_rows(body)
     rows = [r for r in rows if r.strip()]
     title = next((i for i in range(len(rows) - 1, -1, -1) if _EXIT_BG_TITLE.match(rows[i].strip())), None)
     if title is None:
@@ -520,17 +550,16 @@ def exit_background_screen(body: str) -> bool:
             if re.search(r"\s{2,}\d{1,2}[.)]\s", m.group(2)):
                 return False  # several options on one row is a quotation
             last_numbered = k
-            numbered.append(re.split(r"\s{2,}", m.group(2).strip())[0].strip().lower())
+            numbered.append((int(m.group(1)), re.split(r"\s{2,}", m.group(2).strip())[0].strip().lower()))
     if len(below) - 1 - last_numbered > 3:
         return False  # text under the options: only the hint row (and a status row) may follow
-    return bool(numbered) and numbered[-1] in _EXIT_BG_OPTIONS and any(
-        n in _EXIT_BG_OPTIONS[:2] for n in numbered)
+    return numbered == list(enumerate(_EXIT_BG_OPTIONS, 1))
 
 
 def exit_background_tasks(body: str) -> list:
     """The rows the live exit dialog lists under "The following will stop when you exit:" ("shell · sleep 600"),
     without the kind and the "·". Claude may cut a long command with "…". Empty when the screen is not
-    that dialog or lists nothing."""
+    that dialog or lists nothing. Scheduled tasks survive option 1 and must not be reported as stopped."""
     if not exit_background_screen(body):
         return []
     rows = [_norm_row(r).strip() for r in (body or "").splitlines()]
@@ -540,7 +569,7 @@ def exit_background_tasks(body: str) -> list:
     for r in rows[title + 1:]:
         if _NUMBERED_ROW.match(r) or r.startswith("❯"):
             break
-        if "·" in r and not r.lower().startswith("enter to"):
+        if _TASK_ROW.match(r) and not r.lower().startswith("scheduled"):
             out.append(r.split("·", 1)[1].strip())
     return [o for o in out if o]
 
@@ -715,7 +744,7 @@ _OPTION_ROW = re.compile(r"(?i)^\s*[❯›]?\s*(?:\d{1,2}[.)]\s+\S|(?:yes|no)\b)
 
 def has_option_rows(body: str) -> bool:
     """Any numbered row, any Yes/No row, or any selector row that is not the idle input box."""
-    rows = [_norm_row(r) for r in (body or "").splitlines()][-30:]
+    rows = _screen_rows(body)[-30:]
     for i, row in enumerate(rows):
         if _OPTION_ROW.match(row):
             return True
@@ -729,7 +758,7 @@ def has_option_rows(body: str) -> bool:
 def selector_row(body: str) -> bool:
     """A "❯ 1. text" row in the last 25 rows that is not the idle input box (the owner's own prompt
     "1. please fix" sits between two solid rules)."""
-    rows = [_norm_row(r) for r in (body or "").splitlines()][-25:]
+    rows = _screen_rows(body)[-25:]
     for i, row in enumerate(rows):
         if re.match(r"^\s*❯\s*\d+[.)]\s", row):
             boxed = i > 0 and rows[i - 1].strip() == _RULE and i + 1 < len(rows) and rows[i + 1].strip() == _RULE
@@ -848,7 +877,7 @@ def type_line(d: Dialog, lang: str, proof: Optional[dict] = None) -> str:
 
 
 def card_text(d: Optional[Dialog], body: str, lang: str, title_key: str = "dlg_title",
-              proof: Optional[dict] = None) -> str:
+              proof: Optional[dict] = None, *, relay: bool = True) -> str:
     kind = kind_of(d, proof, keys=d is None and keys_ok(body))
     title = t(_TITLE.get(kind) or "dlg_t_" + kind, lang=lang)
     if title_key == "dlg_title_again":
@@ -856,6 +885,11 @@ def card_text(d: Optional[Dialog], body: str, lang: str, title_key: str = "dlg_t
     head = f"{_ICON[kind]} <b>{html.escape(title)}</b>\n{time.strftime('%H:%M:%S')}\n"
     head += html.escape(t("dlg_grade_" + _GRADE[kind], lang=lang)) + "\n"
     head += f"<i>{html.escape(t('dlg_note_' + kind, lang=lang))}</i>\n"
+    # This is a terminal mirror too.  Keep the original columns above while
+    # classifying an unparsed dialog, then clean only the text that is relayed.
+    if relay:
+        from . import inbox as I
+        body = I.relay_screen_text(body)
     if d is None:
         if kind != "keys":  # with the arrow buttons under the card the key words are only noise
             head += html.escape(t("dlg_keys_line", lang=lang)) + "\n"
@@ -1162,10 +1196,10 @@ def _card_live(session, pane, body, d, is_open, rec, stamp) -> bool:
                 and (rec.get("unparsed") or d is not None) and (is_open or rec.get("loose")))
 
 
-def _refresh_card(cfg, bot, session, mid, lang, chat: Optional[int] = None) -> None:
+def _refresh_card(cfg, bot, session, mid, lang, chat: Optional[int] = None, screen=None) -> None:
     """After a key that left the dialog open: show the new screen in the same card and move the record."""
     from . import inbox as I
-    _pane, body, d, is_open = open_screen(session)
+    _pane, body, d, is_open = screen or open_screen(session)
     if not (d or is_open or I._dialog_open(body, session)) or mid is None:
         return
     pr = proof_for(session, d)
@@ -1175,6 +1209,34 @@ def _refresh_card(cfg, bot, session, mid, lang, chat: Optional[int] = None) -> N
     if rec:
         rec_set(session, dict(rec, identity=_identity_of(d, body), stamp=d.stamp if d else stamp_of(body),
                               proof=pr.get("_record") if pr else None))
+
+
+def _dialog_options(d: Dialog) -> tuple:
+    return tuple((o.num, o.label) for o in d.options)
+
+
+def _expand_cut_dialog(session: str, pane: str, before: Dialog):
+    """Enlarge the pane's exact window once and return a complete redraw with the same options."""
+    from . import inbox as I
+    try:
+        found = I._tmux("display-message", "-p", "-t", pane,
+                        "#{window_id} #{window_width} #{window_height}")
+        fields = found.stdout.split() if found.returncode == 0 else []
+        if (len(fields) != 3 or not re.fullmatch(r"@[0-9]+", fields[0])
+                or not fields[1].isdigit() or not fields[2].isdigit()):
+            return None
+        resized = I._tmux("resize-window", "-t", fields[0], "-x", "200", "-y", "120")
+        if resized.returncode:
+            return None
+        time.sleep(0.25)
+        screen = open_screen(session)
+    except Exception:
+        return None
+    screen_pane, _body, after, is_open = screen
+    if (screen_pane == pane and is_open and after and not after.cut
+            and _dialog_options(before) == _dialog_options(after)):
+        return screen
+    return None
 
 
 def button(q: dict, cfg: Config, bot, m: dict, session: str) -> str:
@@ -1200,7 +1262,7 @@ def button(q: dict, cfg: Config, bot, m: dict, session: str) -> str:
         toast("toast_not_available")
         return "ignored"
 
-    if action == "b":
+    if action in ("b", "z"):
         return _background_button(q, cfg, bot, m, session)
 
     if action == "s":  # the last resort: the raw screen with the keypad
@@ -1339,6 +1401,11 @@ def _resolve(text: str, rec: dict) -> List[int]:
         nums = [int(x) for x in re.findall(r"\d+", raw)]
         return nums if nums and all(n in valid for n in nums) else []
     folded = _fold(raw)
+    # Keep these aliases narrow: they only name a complete Yes or No label.
+    hebrew = {"כן": "yes", "לא": "no"}.get(folded)
+    if hebrew:
+        matches = [o["num"] for o in options if _fold(o["label"]) == hebrew]
+        return matches if len(matches) == 1 else []
     if len(folded) < 2:
         return []
     exact = [o["num"] for o in options if _fold(o["label"]) == folded]
@@ -1436,7 +1503,12 @@ def typed_answer(cfg: Config, bot, m: dict, session: str) -> Optional[str]:
         _kept_hint(session, rec)
         return None  # the message is not an answer: it goes to Claude, after the question
     if d.cut and d.perm:
-        _say(bot, cfg, thread, t("dlg_cut", lang=lang), chat=chat)
+        screen = _expand_cut_dialog(session, pane, d)
+        if screen is None:
+            _say(bot, cfg, thread, t("dlg_cut", lang=lang), chat=chat)
+            return "dialog-cut"
+        _refresh_card(cfg, bot, session, mid, lang, chat=chat, screen=screen)
+        _say(bot, cfg, thread, t("dlg_cut_reread", lang=lang), chat=chat)
         return "dialog-cut"
     if d.multi:
         picked = [next((o for o in d.options if o.num == n), None) for n in nums]
@@ -1511,11 +1583,13 @@ def _background_card(cfg, bot, session: str, thread, pane: str, fingerprint: str
         rec_set(session, rec)
     if (rec.get("sending") or rec.get("consumed")
             or (rec.get("message_id") is not None and not rec.get("retry"))
-            or now - rec["first_seen"] < BACKGROUND_GRACE):
+            or now - rec["first_seen"] < cfg.stuck_command_minutes * 60):
         return False
     lang = _lang(cfg)
-    kb = {"inline_keyboard": [[{"text": t("bg_btn", lang=lang), "callback_data": f"dg:b:{rec['stamp']}"}]]}
-    mid = _send(bot, cfg, thread, t("bg_card", lang=lang), kb, silent=True, chat=chat)
+    elapsed = max(1, int((now - rec["first_seen"]) // 60))
+    kb = {"inline_keyboard": [[{"text": t("bg_btn", lang=lang), "callback_data": f"dg:b:{rec['stamp']}"},
+                               {"text": t("bg_stop_btn", lang=lang), "callback_data": f"dg:z:{rec['stamp']}"}]]}
+    mid = _send(bot, cfg, thread, t("bg_card", lang=lang, minutes=elapsed), kb, silent=True, chat=chat)
     if mid is None:
         return False
     rec_set(session, dict(rec, message_id=mid, retry=False))
@@ -1523,7 +1597,7 @@ def _background_card(cfg, bot, session: str, thread, pane: str, fingerprint: str
 
 
 def _background_button(q, cfg, bot, m: dict, session: str) -> str:
-    """Claim the card, recheck its command, and consume it only after sending C-b."""
+    """Claim the card, recheck its command, and consume it after the requested rescue key."""
     from . import inbox as I
 
     def toast(key):
@@ -1536,6 +1610,7 @@ def _background_button(q, cfg, bot, m: dict, session: str) -> str:
         toast("bg_toast_stale")
         return "stale"
 
+    stop = (q.get("data") or "").split(":")[1:2] == ["z"]
     sent = False
     claim_token = f"{threading.get_ident()}:{time.time_ns()}"
 
@@ -1585,7 +1660,7 @@ def _background_button(q, cfg, bot, m: dict, session: str) -> str:
             or _background_fingerprint(body) != rec["fingerprint"]):
         return finish("bg_toast_stale", "stale")
     try:
-        sent = _keys(pane, "C-b")
+        sent = _keys(pane, "Escape" if stop else "C-b")
     except (OSError, subprocess.SubprocessError):
         sent = False
     if not sent:
@@ -1605,7 +1680,7 @@ def _background_button(q, cfg, bot, m: dict, session: str) -> str:
         if live_pane != pane or not body:
             break  # losing the pane is not proof that the command moved
         if not background_screen(body) or _background_fingerprint(body) != rec["fingerprint"]:
-            return finish("bg_toast_done", "background")
+            return finish("bg_stop_done" if stop else "bg_toast_done", "stopped" if stop else "background")
     return finish("bg_toast_failed", "background-failed")
 
 

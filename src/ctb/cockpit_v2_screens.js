@@ -2,10 +2,10 @@
 // Every control here is an existing classic control, moved and restyled, or it calls the same
 // authenticated API with the same payload. Nothing below decides status: the bridge does.
 var v2ProjectKey="",v2ProjectLast="",v2ProjectClose=null,v2ListY=0,v2Seg=null,V2_PLAYER=document.getElementById("radio-player");
-var V2_SEG_ICONS={studio:"layers",radio:"v2radio",more:"v2grid"},V2_SEG_KEY="ctb-v2-seg";
-var V2_GROUPS=[["notify","bell",["activity","voice_digest","progress","progress_details","voice_confirm","delivery_end","status_repost","agent_notices"]],
- ["auto","gears",["cold_compact","auto_account_switch","quota_auto_continue","session_auto_revive","away","auto_topic_names","agents_topic","general_offer","brief_home"]],
- ["models","server",["auto_compact"]],["radio","mic",["radio_every_reply","radio_board","radio_room"]],["connect","laptop",[]]];
+var V2_SEG_ICONS={studio:"layers",radio:"v2radio",more:"v2grid",tower:"mic"},V2_SEG_KEY="ctb-v2-seg";
+var V2_GROUPS=[["notify","bell",["activity","live_activity_cockpit","voice_digest","progress","progress_details","compact_actions","voice_confirm","delivery_end","status_repost","agent_notices"]],
+ ["auto","gears",["auto_cards","cold_compact","auto_account_switch","quota_auto_continue","emergency_credit","session_auto_revive","away","auto_topic_names","state_emoji","agents_topic","general_offer","day_briefing","day_nudges","day_auto_plan","brief_home"]],
+ ["models","server",["auto_compact"]],["radio","mic",["voice_copilot","radio_every_reply","radio_board","radio_music","radio_room"]],["connect","laptop",[]]];
 // --- shared parts ------------------------------------------------------------------------------------------------
 function v2Card(section,title,ic){var c=el("section","v2-card");c.setAttribute("data-v2-section",section);c.appendChild(v2Heading(title,ic));return c;}
 // Classic builders that append to #app are moved, unchanged, into a v2 container.
@@ -25,14 +25,14 @@ function v2SectionBlock(key,section,title,hint,ic,body,force){
  lead.appendChild(icon(ic));toggle.insertBefore(lead,toggle.firstChild);block.setAttribute("data-v2-section",section);return block;}
 // --- Projects ----------------------------------------------------------------------------------------------------
 function v2OpenProject(key){v2ListY=view==="agents"?window.scrollY:0;v2ProjectKey=v2ProjectLast=key;haptic("sel");
- if(view!=="agents")switchTo("agents");else render(last,true);window.scrollTo(0,0);}
+ if(view!=="agents")switchTo("agents");else{renderNewContent=true;render(last,true);}window.scrollTo(0,0);}
 function v2TabTap(d,tab){
  // Tapping Projects on a project page returns to the list through the same back step.
  if(tab==="agents"&&view==="agents"&&v2ProjectKey&&v2ProjectClose){v2ProjectClose();return;}
  switchTo(tab==="tools"?v2ToolView(d):tab);}
 function v2ProjectCard(p){
  var b=el("button","v2-pcard");b.type="button";b.setAttribute("data-status",p.status);b.setAttribute("data-project",p.key);
- var pic=el("span","v2-pcard-pic");pic.appendChild(v2Image(p.asset));pic.appendChild(v2Badge(p));b.appendChild(pic);
+ var pic=el("span","v2-pcard-pic");pic.appendChild(v2Image(p.asset,null,p.art));pic.appendChild(v2Badge(p));b.appendChild(pic);
  var body=el("span","v2-pcard-body");var nm=el("bdi","v2-pcard-name",v2Name(p));nm.title=shown(p,"name");body.appendChild(nm);
  var text=shown(p,"summary")||(p.stale&&p.status==="on_track"?V2.now.staleUpdate:V2.now[p.status]),sum=el("span","v2-pcard-sum",text);sum.dir="auto";body.appendChild(sum);
  var meta=el("span","v2-pcard-meta");meta.appendChild(v2Updated(p.age));if(p.waiting)meta.appendChild(v2WaitChip(p.waiting));body.appendChild(meta);b.appendChild(body);
@@ -85,11 +85,12 @@ function v2ProjectPage(d,p){
   if(on){if(!v2ProjectKey&&v2ProjectLast){v2ProjectKey=v2ProjectLast;if(last)render(last,true);}return;}
   v2ProjectKey="";v2ProjectClose=null;if(last&&view==="agents")render(last,true);var y=v2ListY;requestAnimationFrame(function(){window.scrollTo(0,y);});});
  v2ProjectClose=function(){setOpen(false);};
- var head=el("header","v2-phead");head.setAttribute("data-status",p.status);head.appendChild(v2Image(p.asset,"v2-phead-bg"));
+ var head=el("header","v2-phead");head.setAttribute("data-status",p.status);head.appendChild(v2Image(p.asset,"v2-phead-bg",p.art));
  var back=el("button","v2-back");back.type="button";back.setAttribute("aria-label",V2.projects.back);back.setAttribute("data-v2-back","");back.appendChild(icon("chev"));
- back.addEventListener("click",function(){haptic("sel");setOpen(false);});head.appendChild(back);
+ back.addEventListener("click",function(){haptic("sel");setOpen(false);});head.appendChild(back);if(typeof v2ArtButton==="function")head.appendChild(v2ArtButton(p));
  var tx=el("div","v2-phead-text"),h=el("h2");h.appendChild(el("bdi",null,v2Name(p)));tx.appendChild(h);
  if(shown(p,"summary")){var sm=el("p",null,shown(p,"summary"));sm.dir="auto";tx.appendChild(sm);}tx.appendChild(v2Updated(p.age));head.appendChild(tx);
+ source("v2-project:"+p.key,[[p.name,he(p,"name")],[p.summary,he(p,"summary")]],tx);
  var st=el("div","v2-phead-ring");st.appendChild(v2Ring(p));if(p.waiting)st.appendChild(v2WaitChip(p.waiting));else st.appendChild(v2StatusChip(p));head.appendChild(st);page.appendChild(head);
  // 1. Every open decision of this project, with its full detail before yes and no.
  var needs=v2Card("project-needs",V2.projects.needs,"v2target");
@@ -118,7 +119,7 @@ function v2ProjectPage(d,p){
  // 4. Deliverables: the agents' own https links, opened through the existing safe opener.
  var links=(d.cards||[]).filter(function(c){return c.project_key===p.key&&c.kind==="link"&&!c.ended&&typeof c.url==="string"&&/^https:\/\//i.test(c.url);});
  if(links.length){var dl=v2Card("project-deliverables",V2.projects.deliverables,"film"),grid=el("div","v2-deliverables");
-  links.slice(0,6).forEach(function(c){var b=el("button","v2-deliverable");b.type="button";b.appendChild(v2Image(p.asset));var cap=el("span","v2-deliverable-cap");cap.appendChild(icon("link"));
+  links.slice(0,6).forEach(function(c){var b=el("button","v2-deliverable");b.type="button";b.appendChild(v2Image(p.asset,null,p.art));var cap=el("span","v2-deliverable-cap");cap.appendChild(icon("link"));
    var t=el("span",null,shown(c,"label")||unprefixed(shown(c,"title"),c)||hostOf(c.url));t.dir="auto";cap.appendChild(t);b.appendChild(cap);
    b.addEventListener("click",function(){haptic("tap");openSafe(c.url);});grid.appendChild(b);});dl.appendChild(grid);page.appendChild(dl);}
  // 5. Reminders of this project, with the same clear and restore actions.
@@ -128,7 +129,7 @@ function v2ProjectPage(d,p){
  var ids={};(p.sessions||[]).forEach(function(id){ids[id]=1;});var ss=(d.sessions||[]).filter(function(s){return ids[s.id]&&s.state!=="ended";});
  var sc=v2Card("project-sessions",V2.projects.activeSessions,"chat");
  ss.forEach(function(s){var r=el("div","v2-session");r.appendChild(robot(s.id,s.state,false));var b=el("div","v2-session-body"),n=el("b",null,shown(s,"name"));n.dir="auto";b.appendChild(n);
-  var line=shown(s,"now")||shown(s,"summary");if(line){var l=el("span",null,line);l.dir="auto";b.appendChild(l);}r.appendChild(b);
+  var line=shown(s,"now")||shown(s,"summary");if(line){var l=el("span",null,line);l.dir="auto";b.appendChild(l);}source("v2-session:"+s.id,s,b);r.appendChild(b);
   if(typeof s.url==="string"&&/^https:\/\/t\.me\//i.test(s.url))r.appendChild(tgBtn(s.url));sc.appendChild(r);});
  if(!ss.length)sc.appendChild(el("div","v2-empty",V2.projects.noSessions));page.appendChild(sc);
  // 7. Finished topics stay reachable, folded.
@@ -144,6 +145,7 @@ function v2Ideas(p){var list=p.ideas||[];if(!list.length)return null;
   var meta=el("span","v2-idea-meta");meta.appendChild(el("span","chip"+(r.wait==="owner"?" hot":""),r.wait==="owner"?V2.projects.ideaYou:V2.projects.ideaTeam));
   meta.appendChild(el("span","v2-idea-age",ago(r.age)));head.appendChild(meta);head.appendChild(v2Chev());li.appendChild(head);
   var full=el("p","v2-idea-text",shown(r,"title"));full.dir="auto";body.appendChild(full);
+  source("v2-idea:"+p.key+":"+r.id,r,li);
   if(p.lead){var ask=el("button","btn v2-idea-ask");ask.type="button";ask.setAttribute("data-v2-idea-ask",p.lead);ask.appendChild(icon("chat"));ask.appendChild(el("span",null,V2.projects.ideaAsk));
    ask.addEventListener("click",function(){if(ask.disabled)return;ask.disabled=true;haptic("tap");
     var text=V2.projects.ideaQuestion.replace("{ref}",r.project+" #"+r.id).replace("{title}",String(r.title||"").slice(0,300));
@@ -158,7 +160,7 @@ function v2Ideas(p){var list=p.ideas||[];if(!list.length)return null;
  if(p.ideas_more)card.appendChild(el("div","v2-block-hint",V2.projects.ideasMore.replace("{n}",nf.format(p.ideas_more))));
  return card;}
 // --- Tools -------------------------------------------------------------------------------------------------------
-function v2Segs(d){var s=[];if(appNamed(d,"studio"))s.push("studio");if(d&&d.radio)s.push("radio");s.push("more");return s;}
+function v2Segs(d){var s=[];if(appNamed(d,"studio"))s.push("studio");if(d&&d.radio)s.push("radio");if(d&&(d.settings||{}).voice_copilot)s.push("tower");s.push("more");return s;}
 function v2SavedSeg(d){var seg=v2Seg,segs=v2Segs(d);if(seg==null){try{seg=sessionStorage.getItem(V2_SEG_KEY);}catch(e){}}
  return segs.indexOf(seg)>=0?seg:segs.indexOf("radio")>=0?"radio":segs[0];}
 // The last tool is kept; Studio is the existing app frame, so it has its own view.
@@ -168,6 +170,7 @@ function v2ToolSeg(d){var name=appOf(view);if(name)return name==="studio"?"studi
 function v2RadioHere(d){return v2Enabled(d)&&view==="tools"&&v2ToolSeg(d)==="radio";}
 function v2Tools(d){
  var seg=v2ToolSeg(d),bar=el("div","v2-seg");v2PageHead(V2.shell.tools,"v2briefcase",V2.tools.subtitle);
+ if((d.settings||{}).voice_copilot)bar.setAttribute("data-vcp-choice","");
  bar.setAttribute("role","group");bar.setAttribute("aria-label",V2.shell.tools);bar.setAttribute("data-v2-section","tool-choice");
  v2Segs(d).forEach(function(s){var b=el("button","v2-seg-btn"+(s===seg?" on":""));b.type="button";b.setAttribute("aria-pressed",String(s===seg));b.setAttribute("data-v2-tool",s);
   b.appendChild(icon(V2_SEG_ICONS[s]));b.appendChild(el("span",null,V2.tools[s]));
@@ -175,7 +178,7 @@ function v2Tools(d){
    var to=s==="studio"?"app:studio":"tools";if(view===to)render(last,true);else switchTo(to,false);});bar.appendChild(b);});
  app.appendChild(bar);
  if(appOf(view))return;  // the app's own sandboxed frame follows in #apps
- if(seg==="radio")v2Radio(d);else v2More(d);}
+ if(seg==="tower")vcpPage(d);else if(seg==="radio")v2Radio(d);else v2More(d);}
 function v2Radio(d){
  // The same persistent player (one audio element) is moved here; tabs and polls never interrupt it.
  var hero=el("section","v2-radio-hero");hero.setAttribute("data-v2-section","radio");hero.appendChild(V2_PLAYER);
@@ -212,9 +215,13 @@ function v2SettingRows(d){var out={},box=settingsBox(d),names={};
 function v2Settings(d){
  // "What the system knows" is the first group; its own pages replace Settings while open (cockpit_v2_knowledge.js).
  if(vkNav.open){vkPage(d);return;}
- // "What Harnessgram adds to your agents" is the second; its page replaces Settings while open (cockpit_v2_addons.js).
+ // "What HarnessGram adds to your agents" is the second; its page replaces Settings while open (cockpit_v2_addons.js).
  if(vaOpen){vaPage(d);return;}
- v2PageHead(V2.shell.settings,"v2settings",V2.settings.subtitle);app.appendChild(vkEntry());app.appendChild(vaEntry());var rows=v2SettingRows(d),placed={},st=d.settings||{};
+ // Curated owner-local packs sit beside knowledge and add-ons.
+ if(typeof vpOpen!=="undefined"&&vpOpen){vpPage(d);return;}
+ v2PageHead(V2.shell.settings,"v2settings",V2.settings.subtitle);app.appendChild(vkEntry());app.appendChild(vaEntry());if(typeof vpEntry==="function")app.appendChild(vpEntry());var rows=v2SettingRows(d),placed={},st=d.settings||{};
+ var appBody=el("div","v2-group-body");APP_SWITCHES.forEach(function(spec){var key=spec[0],copy=spec[2];placed[key]=1;if(key in st){var row=switchRow(key,d),nm=row.querySelector(".nm"),hint=row.querySelector(".mt");nm.textContent=V2.settings[copy];hint.textContent=V2.settings[copy+"Hint"];row.querySelector(".sw").setAttribute("aria-label",V2.settings[copy]);row.setAttribute("data-app-switch",spec[1]);appBody.appendChild(row);}});
+ if(appBody.children.length){var appGroup=el("section","v2-card v2-app-appearance");appGroup.setAttribute("data-v2-section","settings-app-appearance");appGroup.appendChild(el("h2",null,V2.settings.appAppearance));appGroup.appendChild(el("div","v2-block-hint",V2.settings.appAppearanceHint));appGroup.appendChild(appBody);app.appendChild(appGroup);}
  V2_GROUPS.forEach(function(g){g[2].forEach(function(k){placed[k]=1;});});
  V2_GROUPS.forEach(function(g){var body=el("div","v2-group-body"),name=g[0];
   if(name==="models"&&d.default_model)body.appendChild(modelCard(d.default_model));

@@ -9,11 +9,11 @@ from test_cockpit_overflow_browser import browser
 
 
 @pytest.mark.parametrize('lang', ['he','en'])
-def test_owner_controls_and_old_requests_fit_phone(browser, lang):
+def test_owner_controls_and_long_waiting_requests_fit_phone(browser, lang):
     now=time.time()
     def row(n, older=False):
         return dict(project='Example', id=n, title='בקשה לבדיקה / A request to review', status='open',
-                    wait='owner', age=900000 if older else 100, updated=now-100, older=older, note='', steps=[])
+                    wait='owner', age=900000 if older else 100, updated=now-100, idle=900000 if older else 100, long=older, older=older)
     data={'now':now,'sessions':[], 'cards':[], 'decisions':[], 'requests':[row(1),row(2,True)],
           'settings':{'auto_compact':400,'cold_compact':'on'}}
     requests=[]
@@ -25,6 +25,8 @@ def test_owner_controls_and_old_requests_fit_phone(browser, lang):
             r.fulfill(content_type='application/javascript',body=panel_browser.STUB % json.dumps('test'))
         elif url.endswith('/api/state'):
             r.fulfill(content_type='application/json',body=json.dumps(data))
+        elif url.endswith('/api/request-detail'):
+            r.fulfill(content_type='application/json',body=json.dumps({'ok':True,'title':'בקשה לבדיקה / A request to review','note':'','steps':[]}))
         elif url.endswith('/api/request'):
             body=r.request.post_data_json
             requests.append(body)
@@ -38,22 +40,27 @@ def test_owner_controls_and_old_requests_fit_phone(browser, lang):
         page.wait_for_selector('.requests')
         assert page.locator('html').get_attribute('dir') == ('rtl' if lang=='he' else 'ltr')
         s=panel_page.STRINGS[lang]
-        old=page.locator('[data-block="requests-older"]')
+        old=page.locator('[data-block="requests-long"]')
+        mine='[data-block^="requests-group:owner:"]'
         assert old.locator(':scope > button').get_attribute('aria-expanded')=='false'
-        assert page.locator('.requests-needs .request-row').count()==1
+        assert page.locator(mine+' .request-row').count()==1
         assert page.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth')
-        page.get_by_role('button',name=s['requestsReviewOld'],exact=True).click()
+        old.locator(':scope > button').click()
+        page.wait_for_timeout(700)
         assert old.locator(':scope > button').get_attribute('aria-expanded')=='true'
-        old.locator('.request-actions button').first.wait_for(state='visible')  # the panel opens with a short reveal
-        assert old.locator('.request-actions button:visible').count()==3
+        old.locator('.request-toggle').first.click()
+        old.locator('.request-actions button').first.wait_for(state='visible')
+        # An item untouched for a week offers keep-open and drop, not done and push.
+        assert [b.inner_text() for b in old.locator('.request-actions button:visible').all()]==[s['requestTouch'],s['requestDrop']]
         assert page.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth')
-        action=page.locator('.requests-needs .request-actions').get_by_role('button',name=s['requestDone'],exact=True)
+        page.locator(mine+' .request-toggle').first.click()
+        action=page.locator(mine+' .request-actions').get_by_role('button',name=s['requestDone'],exact=True)
         action.click()
-        confirm=page.locator('.requests-needs .request-actions').get_by_role('button',name=s['requestConfirm'],exact=True)
+        confirm=page.locator(mine+' .request-actions').get_by_role('button',name=s['requestConfirm'],exact=True)
         assert confirm.is_visible() and requests == []
         assert page.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth')
         confirm.click()
-        page.wait_for_function('document.querySelector(".requests-needs .request-actions") === null')
+        page.wait_for_function('document.querySelector(\'[data-block^="requests-group:owner:"] .request-actions\') === null')
         assert [r['action'] for r in requests]==['done']
         assert requests[0] == {'project':'Example', 'id':1, 'action':'done'}
         page.locator('.tabs .tab',has_text=s['settings']).first.click()

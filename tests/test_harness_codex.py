@@ -11,6 +11,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
+from conftest import signed_in
 from ctb import harness as H
 from ctb.config import Config, ConfigError, from_dict
 from ctb.harness_codex import (CodexHarness, QueueSendError, MAX_META_BYTES,
@@ -414,6 +415,7 @@ def test_initial_cursor_survives_restart_and_replay_is_explicit(rollout):
 
 
 def test_five_thousand_events_have_bounded_cursor_and_linear_cost(rollout):
+    signed_in("main")
     adapter, path, _ = rollout
     rows = []
     for n in range(1000):

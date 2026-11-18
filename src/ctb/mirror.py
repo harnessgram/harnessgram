@@ -46,11 +46,37 @@ from .i18n import t
 from .telegram import CLOUD_UPLOAD_LIMIT, LOCAL_LIMIT, Bot, TelegramError, read_regular_file
 from .projects import thread_key
 from .topics import TopicMap, place
-from .translate import TranslateError, external_allowed, needs_translation, speak, translate_reply, translate_text
+from .translate import (TranslateError, external_allowed, needs_translation, owner_facing, speak, translate_reply,
+                        translate_text)
 
 PHOTO_LIMIT = 10 * 1024 * 1024
 DOCUMENT_LIMIT = CLOUD_UPLOAD_LIMIT  # largest file sent as multipart bytes (read into memory)
 UPLOAD_LIMIT = 45 * 1024 * 1024  # above this a file is never uploaded (see send_file)
+KEYBOARD_LABEL_MAX = 10  # visible grapheme clusters, including icon and space
+
+
+def _pictographic(text: str) -> bool:
+    """Emoji-like code points (the only ones a zero-width joiner glues together)."""
+    return any(ord(c) >= 0x2600 and unicodedata.category(c) == "So" for c in text)
+
+
+def graphemes(text: str) -> list:
+    """Group combining marks, emoji modifiers, joined emoji and flag pairs with their base."""
+    out = []
+    regional = 0
+    for char in text:
+        cp = ord(char)
+        is_regional = 0x1f1e6 <= cp <= 0x1f1ff
+        extend = (unicodedata.category(char) in ("Mn", "Mc", "Me") or 0x1f3fb <= cp <= 0x1f3ff
+                  or char == "\u200d"
+                  or (out and out[-1].endswith("\u200d") and _pictographic(out[-1]) and _pictographic(char))
+                  or (is_regional and regional % 2 == 1))
+        if extend and out:
+            out[-1] += char
+        else:
+            out.append(char)
+        regional = regional + 1 if is_regional else 0
+    return out
 
 
 def _media_info(ext: str, stream) -> tuple[str, str, Optional[int]]:
@@ -151,6 +177,35 @@ def _media_info(ext: str, stream) -> tuple[str, str, Optional[int]]:
     return ("sendAudio", "audio", duration) if ext == ".m4a" else ("sendVideo", "video", duration)
 
 
+def video_size(path) -> Optional[tuple[int, int]]:
+    """Display width and height of a video's first stream (rotation and sample aspect applied), or None."""
+    probe = shutil.which("ffprobe") or next((p for p in ("/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe")
+                                             if os.path.exists(p)), None)
+    if not probe or not path:
+        return None
+    try:
+        out = subprocess.run([probe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=width,height,sample_aspect_ratio:stream_side_data=rotation",
+                              "-of", "json", str(path)], capture_output=True, text=True, timeout=15).stdout
+        info = json.loads(out or "{}").get("streams") or []
+        if not info:
+            return None
+        st = info[0]
+        w, h = int(st.get("width") or 0), int(st.get("height") or 0)
+        if w <= 0 or h <= 0:
+            return None
+        sar = str(st.get("sample_aspect_ratio") or "1:1")
+        m = re.fullmatch(r"(\d+):(\d+)", sar)
+        if m and int(m.group(1)) > 0 and int(m.group(2)) > 0 and m.group(1) != m.group(2):
+            w = round(w * int(m.group(1)) / int(m.group(2)))
+        rot = next((d.get("rotation") for d in st.get("side_data_list") or [] if "rotation" in d), 0)
+        if abs(int(float(rot or 0))) % 180 == 90:
+            w, h = h, w
+        return w, h
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 def upload_limit(cfg: Config) -> int:
     """Largest file sent to Telegram: 45 MB on the cloud server (below its 50 MB), 2000 MB on a local one."""
     return LOCAL_LIMIT if cfg.api_local else UPLOAD_LIMIT
@@ -209,7 +264,8 @@ def fixed_keyboard(lang: str) -> dict:
     value once known (model, thinking level, permission mode); the bottom row, closest to the thumb, holds
     the actions with the shortest labels (stop, compact, the More menu, the Cockpit)."""
     def b(key: str) -> dict:
-        return {"text": t(key, lang=lang)}
+        short = {"fixed_btn_thinking": "🎚️ Think", "fixed_btn_permissions": "🔐 Access"} if lang == "en" else {}
+        return {"text": short.get(key, t(key, lang=lang))}
     return {
         "keyboard": [
             [b("fixed_btn_model"), b("fixed_btn_thinking"), b("fixed_btn_permissions")],
@@ -361,18 +417,20 @@ def context_numbers(session: Optional[str], footer: str = "") -> tuple:
 
 
 def context_label(tokens: int, window: int, lang: str) -> str:
-    """"📏 182k · 18%" ("📏 182 אלף · 18%"): the size, and how full the window is when its size is known."""
+    """"📏 182k" ("📏 182 אלף"): the conversation's size only. No percent of the window (the owner found
+    percentages add nothing, and a low percent beside "consider compacting" only confused)."""
     k = f"{round(tokens / 1000):,}"
-    size = t("context_size", lang=lang, k=k)
-    pct = f" · {min(100, round(tokens * 100 / window))}%" if window else ""
-    return f"📏 {size}{pct}"
+    label = f"📏 {t('context_size', lang=lang, k=k)}"
+    return label if len(graphemes(label)) <= KEYBOARD_LABEL_MAX else f"📏 {round(tokens / 1000)}k"
 
 
 def _short_model(model: str) -> str:
     """"Claude Opus 5.5 (1M context)" -> "Opus 5.5 1M": short enough for a third of a phone's width."""
     name = re.sub(r"^Claude\s+", "", (model or "").strip())
     name = re.sub(r"\s*\((\d+[KkMm])(?:\s+context)?\)", lambda m: " " + m.group(1).upper(), name)
-    return name[:20].strip()
+    if len(graphemes(name)) > KEYBOARD_LABEL_MAX - 2:
+        name = name.split()[0] if name else ""
+    return "".join(graphemes(name)[:KEYBOARD_LABEL_MAX - 2])
 
 
 def state_labels(session: Optional[str], lang: str) -> dict:
@@ -389,7 +447,8 @@ def state_labels(session: Optional[str], lang: str) -> dict:
     if model and _short_model(model):
         out["model"] = "🧠 " + _short_model(model)
     if level in ("low", "medium", "high", "xhigh", "max"):
-        out["effort"] = "🎚️ " + t("effort_" + level, lang=lang)
+        short = {("en", "xhigh"): "v.high", ("he", "xhigh"): "גבוהה+"}
+        out["effort"] = "🎚️ " + short.get((lang, level), t("effort_" + level, lang=lang))
     current = ""
     try:  # the permission mode as the terminal's status line shows it
         from .inbox import pane_for_session, pane_mode
@@ -404,7 +463,8 @@ def state_labels(session: Optional[str], lang: str) -> dict:
         except Exception:
             current = ""
     if current and t("mode_short_" + current, lang="en") != "mode_short_" + current:
-        out["mode"] = "🔐 " + t("mode_short_" + current, lang=lang)
+        short = {("he", "bypassPermissions"): "חופשי", ("en", "dontAsk"): "No ask"}
+        out["mode"] = "🔐 " + short.get((lang, current), t("mode_short_" + current, lang=lang))
     return out
 
 
@@ -426,8 +486,11 @@ def state_button(text: str) -> str:
 
 
 def account_cell(label: str) -> str:
-    """The info row's account cell for an account label (its e-mail's local part, else its name)."""
-    return "👤 " + (label[:9] + "…" if len(label) > 10 else label)
+    """A short account nickname, never an email address."""
+    word = (label or "").split()[0] if (label or "").split() else "Account"
+    if "@" in word:
+        word = "Account"
+    return "👤 " + "".join(graphemes(word)[:7])
 
 
 def _model_labels(name: str) -> set:
@@ -436,7 +499,8 @@ def _model_labels(name: str) -> set:
     if not name:
         return set()
     plain = name.replace("Claude ", "").strip()
-    return {"🧠 " + _short_model(name), "🧠 " + plain[:40]}
+    legacy = re.sub(r"\s*\((\d+[KkMm])(?:\s+context)?\)", lambda m: " " + m.group(1).upper(), plain)[:20].strip()
+    return {"🧠 " + _short_model(name), "🧠 " + legacy, "🧠 " + plain[:40]}
 
 
 SENT_LABELS_FILE = "keyboard-labels.json"  # {session: {bare label: kind}}: the live labels its keyboards showed
@@ -476,6 +540,9 @@ def sent_labels(session: Optional[str] = None) -> dict:
     def add(label: str, kind: str) -> None:
         out[bare_label(label)] = kind
     for lang in ("he", "en"):
+        for text, kind in (("🎚️ Think", "effort"), ("🔐 Access", "mode"), ("🎚️ v.high", "effort"),
+                           ("🎚️ גבוהה+", "effort"), ("🔐 חופשי", "mode"), ("🔐 No ask", "mode")):
+            add(text, kind)
         for key, kind in (("fixed_btn_model", "model"), ("btn_model", "model"), ("fixed_btn_thinking", "effort"),
                           ("fixed_btn_permissions", "mode"), ("btn_permissions", "mode")):
             add(t(key, lang=lang), kind)
@@ -498,6 +565,7 @@ def sent_labels(session: Optional[str] = None) -> dict:
             for label in {accounts.label(name), name}:
                 if label:
                     add(account_cell(label), "account")
+                    add("👤 " + (label[:9] + "…" if len(label) > 10 else label), "account")
     except Exception:
         pass
     mine = read_map(state_dir() / SENT_LABELS_FILE).get(session) if session else None
@@ -506,11 +574,69 @@ def sent_labels(session: Optional[str] = None) -> dict:
     return out
 
 
+WEEK_FIRST_AT = 90  # from here the weekly window is what stops work, so the keyboard shows it
+
+
+def _shown_window(windows):
+    """The keyboard shows the 5-hour window when the account has one (the owner wants the number that moves
+    during the day), unless the weekly window is nearly used up. `windows`: (pct, icon, ...) tuples."""
+    week = next((w for w in windows if w[1] == "📅"), None)
+    five = next((w for w in windows if w[1] == "⏱️"), None)
+    if five is not None and not (week is not None and week[0] >= WEEK_FIRST_AT):
+        return five[0], five[1]
+    pick = week or five
+    return pick[0], pick[1]
+
+
+def _quota_cell(plain: str = "", session: Optional[str] = None, lang: str = "he") -> str:
+    """One quota label for both the keyboard and its refresh key."""
+    if not re.search(r"(?:Claude(?: [A-Za-z0-9_-]+)?|⏱️|weekly|שבועית|5\s*(?:h|hours|שעות))\s+\u2066?\d+%", plain):
+        # A footer without quota numbers (the status card's terminal line) still gets the quota
+        # cell, from the saved usage of this topic's own account, so every keyboard looks the same.
+        try:
+            from .usage import quota_line
+            plain += quota_line(lang or "en", session=session) if session else quota_line(lang or "en")
+        except Exception:
+            pass
+    # regex accepts "Claude <account> NN%"
+    claude = re.findall(r"Claude(?: [A-Za-z0-9_-]+)?\s+\u2066?(\d+)%", plain)
+    short = re.search(r"⏱️ \u2066?(\d+)%", plain) if not claude else None
+    if session:
+        try:
+            from .usage import _parse_time, has_five_hour
+            acct = accounts.account_for(session) or "main"
+            u = accounts._read(accounts.usage_path(acct), {})
+            at = _parse_time(u.get("at"))
+            if at is not None and 0 <= time.time() - at <= 12 * 3600:
+                windows = []
+                if isinstance(u.get("weekly"), (int, float)):
+                    windows.append((float(u["weekly"]), "📅", u.get("weekly_resets")))
+                if has_five_hour(u):
+                    windows.append((float(u["five_hour"]), "⏱️", u.get("five_hour_resets")))
+                if windows:
+                    return "{1} {0:.0f}%".format(*_shown_window(windows))
+        except (TypeError, ValueError, OSError):
+            pass
+    if len(claude) > 1:
+        return "{1} {0:.0f}%".format(*_shown_window([(float(claude[1]), "📅"), (float(claude[0]), "⏱️")]))
+    elif claude:
+        is_weekly = bool(re.search(r"(?:weekly|שבועית|week)", plain, re.I))
+        icon = "📅" if is_weekly else "⏱️"
+        return f"{icon} {claude[0]}%"
+    elif short:
+        return f"⏱️ {short.group(1)}%"
+    else:
+        wk = re.search(r"(?:weekly|שבועית)\s+(\d+)%", plain)
+        if wk:  # weekly only: an old footer's 5-hour number is never shown
+            return "📅 " + wk.group(1) + "%"
+    return ""
+
+
 def live_keyboard(footer: str, lang: str = "he", thread: Optional[int] = None, fresh: bool = False,
-                  session: Optional[str] = None, chat: Optional[int] = None) -> dict:
+                  session: Optional[str] = None, chat: Optional[int] = None, cfg=None) -> dict:
     """The only constructor of a reply keyboard that is sent: the layout of current_keyboard(lang), the one
     source of the layout (a caller cannot hand it another), with a live info row on top ("context and quota always in view"): the context size
-    (and how full the window is), Claude's weekly use and, when there is more than one account, the account
+    (and how full the window is), Claude's use (the 5-hour window when the account has one, the weekly one near its end) and, when there is more than one account, the account
     of this topic. The settings buttons show their current values (state_labels).
     `fresh`: the footer is an OLD saved text (a card re-posted later, a restored keyboard): its quota numbers
     are ignored and read again from the saved usage of the topic's account.
@@ -528,45 +654,23 @@ def live_keyboard(footer: str, lang: str = "he", thread: Optional[int] = None, f
         plain = strip_quota(plain)
         if session:  # tables of an old text may also hold quota numbers: only today's saved usage counts
             plain = ""
-    if not re.search(r"(?:Claude(?: [A-Za-z0-9_-]+)?|⏱️|weekly|שבועית|5\s*(?:h|hours|שעות))\s+\u2066?\d+%", plain):
-        # A footer without quota numbers (the status card's terminal line) still gets the quota
-        # cell, from the saved usage of this topic's own account, so every keyboard looks the same.
-        try:
-            from .usage import quota_line
-            plain += quota_line(lang or "en", session=session) if session else quota_line(lang or "en")
-        except Exception:
-            pass
     info = []
     tokens, window = context_numbers(session, ctx_text)
     if tokens:
         info.append({"text": context_label(tokens, window, lang)})
-    # regex accepts "Claude <account> NN%"
-    claude = re.findall(r"Claude(?: [A-Za-z0-9_-]+)?\s+\u2066?(\d+)%", plain)
-    short = re.search(r"⏱️ \u2066?(\d+)%", plain) if not claude else None
-    reset_re = r"↻\s*\u2066?(?:(\d{1,2}\.\d{1,2}) [\d:]+|([\d:]+))"
-
-    def reset_of(match) -> str:  # a later day by its date only, today's reset by its time: short enough
-        return f" · ↻ {match.group(1) or match.group(2)}" if match else ""
-    if len(claude) > 1:
-        info.append({"text": "⏱️ " + claude[0] + "%" + f" · 📅 {claude[1]}%"})
-    elif claude:
-        is_weekly = bool(re.search(r"(?:weekly|שבועית|week)", plain, re.I))
-        icon = "📅" if is_weekly else "⏱️"
-        reset = re.search(r"Claude(?: [A-Za-z0-9_-]+)?\s+\d+%\s*" + reset_re, plain) or re.search(reset_re, plain)
-        info.append({"text": f"{icon} {claude[0]}%" + (reset_of(reset) if is_weekly else "")})
-    elif short:
-        info.append({"text": f"⏱️ {short.group(1)}%"})
-    else:
-        wk = re.search(r"(?:weekly|שבועית)\s+(\d+)%", plain)
-        if wk:  # weekly only: an old footer's 5-hour number is never shown
-            info.append({"text": "📅 " + wk.group(1) + "%" + reset_of(re.search(reset_re, plain))})
+    quota = _quota_cell(plain, session, lang)
+    if quota:
+        info.append({"text": quota})
 
     if session:
+        from . import credit_mode
+        credit_line = credit_mode.status_line(session)
+        if credit_line:
+            info.append({"text": credit_line})
         try:  # which account answers matters only when there is more than one (the account menu is also under More)
             acct = accounts.account_for(session) if accounts.multiple() else ""
-            if acct:
-                mail = accounts.email(acct)
-                info.append({"text": account_cell(mail.split("@")[0] if mail else acct)})
+            if acct and acct != accounts.CREDIT:
+                info.append({"text": account_cell(acct)})
         except Exception:
             pass
 
@@ -577,6 +681,14 @@ def live_keyboard(footer: str, lang: str = "he", thread: Optional[int] = None, f
         rows = [[dict(b, text=live[state_button(b.get("text", ""))]) if state_button(b.get("text", "")) in live else b
                  for b in r] for r in rows]
 
+    if cfg is not None:
+        try:
+            from . import waiting
+            count = waiting.waiting_count(cfg)
+            if count:
+                rows[-1][-1] = {"text": "🎛 " + (str(count) if count < 1000 else "999+")}
+        except Exception:
+            pass
     kb = dict(base, keyboard=([info] if info else []) + rows)
     shown = {bare_label(text): kind for kind, text in live.items()}
     shown.update({bare_label(b["text"]): "account" for b in info if b["text"].startswith("👤 ")})
@@ -712,7 +824,7 @@ def status_message(cfg: Config, thread: int, footer: str, keyboard: Optional[dic
             params["message_thread_id"] = thread
         if keyboard is not None:
             params["reply_markup"] = live_keyboard(footer, lang=ui_lang, thread=thread, fresh=True,
-                                                  session=session, chat=chat)
+                                                  session=session, chat=chat, cfg=cfg)
         sig = layout_id() + ":" + keyboard_signature(params.get("reply_markup"))
         bot = bot or Bot.from_config(cfg)
 
@@ -795,7 +907,7 @@ CARD_DATA_FILE = "status-data.json"
 
 def card_data_key(session: str) -> str:
     """What the status card's info buttons show for a session, as a short string: which account answers
-    and its saved quota in the keyboard's 10-point steps. When it differs from the last one the card was
+    and the selected quota window in the keyboard's 10-point steps. When it differs from the last one the card was
     drawn for, the card is stale."""
     acct = ""
     try:
@@ -807,15 +919,8 @@ def card_data_key(session: str) -> str:
         label = accounts.label(acct) if acct else ""
     except Exception:
         pass
-    quota = "-"
-    try:
-        path = usage.claude_usage_file(session=session)
-        u = json.loads(Path(path).read_text(encoding="utf-8"))
-        at = usage._parse_time(u.get("at"))
-        if at is not None and 0 <= time.time() - at <= 12 * 3600:
-            quota = f"{int(u.get('five_hour', 0)) // 10}:{int(u.get('weekly', 0)) // 10}"
-    except Exception:
-        pass
+    # which window is shown, in the keyboard's 10-point steps: a 1-point move does not redraw the card
+    quota = re.sub(r"(\d+)%", lambda m: f"{int(m.group(1)) // 10}0%", _quota_cell(session=session))
     live = ""
     try:  # model, thinking level, mode, agent, style: a change made in Claude redraws the card at the
         from . import direct  # context pace (CONTEXT_BACKOFF mid-turn, at once at the turn's end)
@@ -827,12 +932,26 @@ def card_data_key(session: str) -> str:
     except Exception:
         pass
     live += "~k" + layout_id()  # a card drawn under another layout is stale, even when nothing else moved
+    if acct == accounts.CREDIT:
+        from . import credit_mode
+        credit = credit_mode.status_line(session)
+        if credit:
+            quota += "~credit:" + credit
     return f"{acct}|{label}|{quota}|{session_context(session) // CONTEXT_STEP}{live}"
 
 
 def _only_context_moved(old: Optional[str], new: str) -> bool:
     """Two card data keys that differ only in their context part."""
     return bool(old) and old.rsplit("|", 1)[0] == new.rsplit("|", 1)[0] and old != new
+
+
+def card_refresh_key(cfg: Config, session: str, count: Optional[int] = None) -> str:
+    """Include the shared waiting count in the same key everywhere cards are checked (a caller looping over many
+    sessions passes the count it read once)."""
+    if count is None:
+        from . import waiting
+        count = waiting.waiting_count(cfg)
+    return str(count) + "|" + card_data_key(session)
 
 
 CARD_PACE_FILE = "status-card-pace.json"
@@ -898,7 +1017,7 @@ def refresh_card(cfg: Config, bot, session: str, topics: Optional[TopicMap] = No
         has_card = bool(_read_map(base / "status-footer.json").get(key))
         if not has_card and not create:
             return False
-        data_key = card_data_key(session)
+        data_key = card_refresh_key(cfg, session)
         stored = _read_map(base / CARD_DATA_FILE)
         if has_card and not force and stored.get(key) == data_key:
             return False
@@ -1081,6 +1200,10 @@ class Mirror:
         # Called once, when the first part of this reply was accepted by Telegram or durably queued: from
         # then on a retry of the whole reply could deliver it twice (the Stop worker's "send started" mark).
         self.on_accept: Optional[Callable[[], None]] = None
+        # Translates a reply's closing summary on its own, on the owner-facing model (translate.translate_reply);
+        # None: the summary goes with the rest of the reply.
+        self.summary_fn: Optional[Callable[[str], str]] = None
+        self._summary_last = False
 
     def _accepted(self) -> None:
         callback, self.on_accept = self.on_accept, None
@@ -1115,7 +1238,7 @@ class Mirror:
         found = self.topics.place_of(session) if session else None
         return live_keyboard(footer, lang=self.cfg.ui_language,
                              thread=found.thread if found else None, session=session or None,
-                             chat=found.chat if found and not found.home else None)
+                             chat=found.chat if found and not found.home else None, cfg=self.cfg)
 
     def _listen_late(self, where, thread, result, markup: dict) -> None:
         """The first reply of a topic carries the fixed keyboard, which cannot share a message with an inline
@@ -1488,9 +1611,11 @@ class Mirror:
 
     # -- replies -----------------------------------------------------------
 
-    def _index_reply(self, session: str, message_id: Optional[int], text: str, has_summary: bool) -> None:
+    def _index_reply(self, session: str, message_id: Optional[int], text: str, has_summary: bool,
+                     reply_id: Optional[str] = None) -> None:
         """Add the reply just delivered (its first message `message_id`) to the topic's pinned replies
         index. Runs last, after the voice summary: it never fails or delays the reply."""
+        reply_id = reply_id if reply_id is not None else getattr(self, "_reply_identity", "")
         token, self._listen_token = self._listen_token, None
         if token:
             try:
@@ -1506,17 +1631,25 @@ class Mirror:
         pins.update_index(self.cfg, self.bot, found.thread if found else None, message_id, line,
                           chat=found.away if found else None)
         full = alerts.allowed("full", self.cfg, self.bot)  # the owner's saved choice, on a trusted channel
+        owner_text = getattr(self, "_answer_text", "")
+        if owner_text and getattr(self, "_answer_source", "") == "owner":
+            thread = found.thread if found else None
+            url = pins.link(chat, thread, message_id) if thread and str(chat).startswith("-100") else ""
+            pair_reply = getattr(self, "_alert_pair_reply", text)
+            if alerts.send_reply_pair(self.cfg, owner_text, pair_reply, session, bot=self.bot, url=url,
+                                      reply_id=reply_id):
+                return
         if full or (has_summary and line.strip()):  # the alerts channel gets every reply, silently
             thread = found.thread if found else None
             url = pins.link(chat, thread, message_id) if thread and str(chat).startswith("-100") else ""
             if full:
                 # `text` is what the owner got with every owner-only link already hidden (see send_reply),
                 # never the expanded one; send_reply() redacts it again. Replaces the summary copy.
-                alerts.send_reply(self.cfg, text, session, bot=self.bot, url=url)
+                alerts.send_reply(self.cfg, text, session, bot=self.bot, url=url, reply_id=reply_id)
                 return
             # Plain text, and always redacted: the channel may have readers the session does not.
             plain = fmt.unmix(redact(pins.strip_markup(line).strip()))
-            alerts.alert(self.cfg, plain, session, bot=self.bot, silent=True, url=url, kind="summary")
+            alerts.alert(self.cfg, plain, session, bot=self.bot, silent=True, url=url, kind="summary", reply_id=reply_id)
 
     def send_reply(self, title: str, session: str, original: str,
                    translate_fn: Optional[Callable[[str], str]] = None, footer: str = "",
@@ -1525,6 +1658,8 @@ class Mirror:
         the original folded under it; otherwise the original goes out first and the translation follows (config
         `original`: "folded-after" default, "before", "off"). Returns the number of messages delivered to the owner."""
         original = original.strip()
+        from .radio_dedupe import reply_id
+        self._reply_identity = reply_id(original)
         if not original:
             return 0
         # Owner-only links (secure handoff, Claude sign-in) travel as placeholders until _emit: redaction
@@ -1536,17 +1671,21 @@ class Mirror:
         if self.cfg.redact_outgoing or self.cfg.team.shares(session):
             original = hide_owner_links(redact(original))  # a link held whole is a placeholder: untouched
         reply_params = None
+        self._answer_text = str((answer_to or {}).get("text") or "")
+        self._answer_source = str((answer_to or {}).get("source") or "")
         if (answer_to and answer_to.get("chat") == self._chat(session)
                 and type(answer_to.get("id")) is int and answer_to["id"] > 0):
             reply_params = {"message_id": answer_to["id"], "allow_sending_without_reply": True}
         summary = fmt.split_summary(original)[1]
+        self._alert_pair_reply = hide_links(original, held)
         prepared = fmt.join_summary(original)
         lang = self.cfg.target_language
         pin = summary is not None
+        self._summary_last = pin
         self.first_reply_id = None
         self._listen_token = None
         self._queued_first = None
-        self._pending_index = {"text": hide_links(prepared, held), "has_summary": pin}
+        self._pending_index = {"text": hide_links(prepared, held), "has_summary": pin, "reply_id": self._reply_identity}
         if not (translate_fn and needs_translation(prepared, lang)):
             sent = self._send_layout(session, title, prepared, pin, footer, reply_keyboard=True,
                                      reply_parameters=reply_params)
@@ -1711,7 +1850,7 @@ class Mirror:
                 # translated part, so its queued remainder is released as the original instead.
                 whole = self.queued - queued_before == len(slots)
                 replaced = self._settle_queued(session, tag, targets if whole else None,
-                                               {"text": hide_links(shown, held), "has_summary": pin}
+                                               {"text": hide_links(shown, held), "has_summary": pin, "reply_id": self._reply_identity}
                                                if targets and whole else None, expected=len(slots))
             log(f"reply shown in {shown_at:.1f}s; " + (f"translated in {took:.1f}s; queued parts translated"
                                                         if replaced else "queued parts keep the original"))
@@ -1876,7 +2015,8 @@ class Mirror:
         def work() -> None:
             try:
                 reset_engines()
-                box["shown"] = translate_reply(prepared, translate_fn, lang)
+                summary = {"summary_fn": self.summary_fn} if self.summary_fn and self._summary_last else {}
+                box["shown"] = translate_reply(prepared, translate_fn, lang, **summary)
                 box["engines"] = used_engines()
             except Exception as e:  # noqa: BLE001 - any engine failure means "original only"
                 box["error"] = e
@@ -1945,7 +2085,7 @@ class Mirror:
         self.first_reply_id = None
         dropped_before = self.dropped
         queued_before = self.queued
-        self._pending_index = {"text": hide_links(shown, held), "has_summary": pin}
+        self._pending_index = {"text": hide_links(shown, held), "has_summary": pin, "reply_id": self._reply_identity}
         sent_he = self._send_layout(session, title, shown, pin, footer, reply_keyboard=True,
                                     reply_parameters=reply_params)
         first = self.first_reply_id
@@ -1971,7 +2111,7 @@ class Mirror:
     # -- files (owner only: files may hold anything) -------------------------
 
     def send_file(self, title: str, session: str, path: str, caption: str = "",
-                  audio_title: Optional[str] = None, performer: Optional[str] = None) -> None:
+                  audio_title: Optional[str] = None, performer: Optional[str] = None, radio_text: str = "") -> None:
         # a file never renames its topic: `ctb mirror --file` carries the default title "Claude", and
         # ensure() would rename a named topic to it
         title = (self.topics.all_places().get(session) or {}).get("name") or title
@@ -2008,6 +2148,12 @@ class Mirror:
         if thread:
             fields["message_thread_id"] = thread
         self._media_fields(fields, method, duration, path, audio_title, performer)
+        if method in ("sendAudio", "sendVideo"):
+            from . import radio_agent
+            markup = radio_agent.media_button(self.cfg, session, path, audio_title or caption or "", radio_text,
+                                              getattr(self.cfg, "ui_language", None))
+            if markup:
+                fields["reply_markup"] = json.dumps(markup)
         filename = self._meta(os.path.basename(path))
         try:
             self.bot.upload(method, fields, field, filename, payload)
@@ -2029,6 +2175,11 @@ class Mirror:
                 fields["performer"] = self._safe_track_meta(self._meta(performer))
         elif method == "sendVideo":
             fields["supports_streaming"] = "true"
+            size = video_size(path)
+            if size:
+                # Without width and height Telegram's player guesses the frame and stretches a
+                # vertical video.
+                fields["width"], fields["height"] = str(size[0]), str(size[1])
         if method in ("sendAudio", "sendVideo") and duration is not None:
             fields["duration"] = duration
 
@@ -2046,7 +2197,7 @@ class Mirror:
     @staticmethod
     def _document_fields(fields):
         return {k: v for k, v in fields.items()
-                if k not in ("title", "performer", "duration", "supports_streaming")}
+                if k not in ("title", "performer", "duration", "supports_streaming", "width", "height")}
 
     def _meta(self, text: str) -> str:
         """A file's caption or name as it leaves: the file itself cannot be redacted, its description can."""
@@ -2063,7 +2214,7 @@ class Mirror:
             # The cheap checks first: a scan of the bytes costs time and is pointless when nothing is sent.
             if not alerts.allowed("files", self.cfg, self.bot) or looks_secret(payload):
                 return
-            media_fields = {k: fields[k] for k in ("title", "performer", "duration", "supports_streaming")
+            media_fields = {k: fields[k] for k in ("title", "performer", "duration", "supports_streaming", "width", "height")
                             if k in fields}
             if method == "sendAudio" and audio_title is None:
                 media_fields["title"] = self._safe_track_meta(re.sub(r"[._-]+", " ", alerts._clean(Path(path).stem)).strip() or "audio")
@@ -2600,12 +2751,19 @@ def run_reply(cfg: Config, title: str, session: str, text: str, translate: bool,
         return 0  # an ordinary reply of a muted scheduled task; a failure reply still goes (scheduled.py)
     keep = True  # handoff links stay whole in the owner's reply; _emit drops them from the team copy
     fn = (lambda t: translate_text(t, cfg, fast=False, keep_links=keep)) if translate else None
+    # The closing summary is what the owner reads first: it alone keeps the owner-facing model.
+    summary_fn = None
+    if translate:
+        def summary_fn(t: str) -> str:
+            with owner_facing():
+                return translate_text(t, cfg, fast=False, keep_links=keep)
     # A short reply would be outweighed by the full footer card: one line only.
     footer = (usage.compact_footer(cfg, transcript) if len(text.strip()) < SHORT_REPLY
               else usage.footer(cfg, transcript))
     try:
         m = build(cfg)
         m.on_accept = on_accept
+        m.summary_fn = summary_fn
         m.send_reply(title, session, text, fn, footer, answer_to=answer_to)
     except (TelegramError, TranslateError, OSError) as e:
         _last_failure = e
@@ -2627,11 +2785,17 @@ def run_reply(cfg: Config, title: str, session: str, text: str, translate: bool,
     return 1 if m.dropped else 0
 
 
-def limit_offer(cfg: Config, bot, session: str, text: str, spawn_fn: Optional[Callable] = None) -> bool:
+def limit_offer(cfg: Config, bot, session: str, text: str, spawn_fn: Optional[Callable] = None,
+                *, api_error: bool = False) -> bool:
     """When a session hits Claude's plan limit, offer to move it to another account, or (on by default)
     move it at once to one that still has room ("offer it automatically when the quota
     runs out"). Returns whether a notice was sent."""
     if len(text) > 600 or not accounts.QUOTA_HIT.search(text):
+        return False
+    if not api_error and not usage.limit_of(session):
+        return False  # prose, even a quoted limit notice, cannot mark an account exhausted
+    from . import credit_mode
+    if credit_mode.active(session) or accounts.account_for(session) == accounts.CREDIT:
         return False
     # Stop and StopFailure can both report the same limit: offer the move once (300 s dedupe)
     mark_dir = private_dir(state_dir() / "limit-offered")
@@ -2648,12 +2812,21 @@ def limit_offer(cfg: Config, bot, session: str, text: str, spawn_fn: Optional[Ca
     thread = found.thread
     # Note this limit first: the fallback skips an account that ran out for five hours, and groups accounts
     # whose limits were recorded together.
-    accounts.note_limit(accounts.limited_account(session))
+    accounts.note_limit(usage.claude_account(session, use_record=False))
     try:  # who each profile is signed in as may have changed since the last look; owner notices if so
         identity.check(cfg, bot, force=True, timeout=accounts.IDENTITY_QUICK_TIMEOUT)
     except Exception:
         pass
     plan = accounts.fallback_plan(session)
+    if not plan["fresh"]:
+        accounts.ensure_usage(max_age=accounts.MOVE_USAGE_MAX_AGE, timeout=3.0)
+        plan = accounts.fallback_plan(session)
+    if not plan["fresh"] and not re.search(r"Credit balance|extra usage", text, re.I):
+        if credit_mode.offer(cfg, bot, session, text, found):
+            # the credit question also waits for the owner's choice: ring the alerts channel as the account menu does
+            alerts.alert(cfg, t("alert_quota_out", lang=getattr(cfg, "ui_language", "en")), session,
+                         bot=bot, kind="system")
+            return True
     ui_lang = getattr(cfg, "ui_language", "en")
     mark_str = L.RLM if ui_lang == "he" else ""
     params = {}
@@ -2680,25 +2853,34 @@ FILE_FLOOD_WAIT = 30.0  # the longest flood pause `mirror --file` sits out befor
 
 
 def run_file(cfg: Config, title: str, session: str, path: str, caption: str,
-             audio_title: Optional[str] = None, performer: Optional[str] = None) -> int:
+             audio_title: Optional[str] = None, performer: Optional[str] = None,
+             radio_text_file: Optional[str] = None, radio_auto: bool = False) -> int:
     """Send one file to the session's topic. A short flood wait is sat out once; a failure says why on stderr
     (it used to return 1 in silence, so a lost file looked sent)."""
     from .scheduled import suppressed
     if suppressed(session, "reply"):
         return 0  # a file sent with an ordinary reply of a muted scheduled task
+    from . import radio_agent
+    try:
+        radio_text = radio_agent.read_text(radio_text_file)
+    except radio_agent.AgentMediaError:
+        radio_text = ""
     for attempt in (0, 1):
         try:
-            build(cfg).send_file(title, session, path, caption, audio_title, performer)
+            extra = {"radio_text": radio_text} if radio_text else {}
+            build(cfg).send_file(title, session, path, caption, audio_title, performer, **extra)
+            if radio_auto:
+                radio_agent.auto_queue(cfg, path, audio_title or caption or "", session, radio_text)
             return 0
         except TelegramError as e:
             wait = getattr(e, "retry_after", None)
             if attempt == 0 and e.code == 429 and wait and wait <= FILE_FLOOD_WAIT:
                 time.sleep(float(wait) + 0.5)
                 continue
-            print(f"Harnessgram: the file was not sent ({e.description})", file=sys.stderr)
+            print(f"HarnessGram: the file was not sent ({e.description})", file=sys.stderr)
             return 1
         except OSError as e:
-            print(f"Harnessgram: the file was not sent ({type(e).__name__})", file=sys.stderr)
+            print(f"HarnessGram: the file was not sent ({type(e).__name__})", file=sys.stderr)
             return 1
     return 1
 
@@ -2748,6 +2930,21 @@ def send_essential(cfg: Config, bot, session: str, fields: dict) -> Optional[dic
     return None
 
 
+def send_essential_media(cfg: Config, bot, session: str, fields: dict, path: Path) -> Optional[dict]:
+    """Send an owner decision card with its guarded media attached."""
+    found = _essential_place(cfg, bot, session)
+    if found is None:
+        return None
+    params = dict(fields, chat_id=found.chat, message_thread_id=found.thread)
+    if isinstance(params.get("reply_markup"), dict):
+        params["reply_markup"] = json.dumps(params["reply_markup"])
+    if getattr(bot, "local", False) and getattr(bot, "direct", False):
+        return bot.upload_path("sendDocument", params, "document", str(path))
+    opened: list = []
+    payload = read_regular_file(str(path), upload_limit(cfg), opened)
+    return bot.upload("sendDocument", params, "document", path.name, payload)
+
+
 def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = None, bot=None) -> bool:
     """Delivery notices share the durable outbox, including when the alert is flooded. True when the notice was
     sent or safely queued; False when it was neither (callers that retry use this)."""
@@ -2792,7 +2989,7 @@ def alert(cfg: Config, session: str, text: str, exc: Optional[BaseException] = N
 def voice_summary(cfg: Config, bot, session: str, he_body: str, topics: Optional[TopicMap] = None) -> None:
     """The reply's summary read aloud in Hebrew, as a Telegram voice note.
     Active ONLY in car mode, when voice is enabled and text contains Hebrew.
-    Gemini TTS (gemini-2.5-flash-tts, Kore, 24kHz s16le PCM) when gemini is first configured engine
+    The radio's configured, budgeted voice (or its free system fallback) when Gemini is first configured
     and external calls are allowed; otherwise macOS say -v Carmit when available.
     Converts with ffmpeg to OGG/Opus and sends via sendVoice after a notifying '🚗 ' text line.
     Skips silently if ffmpeg is missing or anything fails."""
@@ -2814,7 +3011,7 @@ def voice_summary(cfg: Config, bot, session: str, he_body: str, topics: Optional
         pcm = b""
         if cfg.engines and cfg.engines[0] == "gemini" and external_allowed(cfg):
             try:
-                pcm = speak(for_outside(he), cfg, voice="Kore")
+                pcm = speak(for_outside(he), cfg)
             except Exception:
                 pcm = b""
 
@@ -2825,7 +3022,8 @@ def voice_summary(cfg: Config, bot, session: str, he_body: str, topics: Optional
             src = []
             inp = None
             if pcm:
-                src = ["-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0"]
+                # translate.speak is the shared radio voice and returns its 48 kHz PCM.
+                src = ["-f", "s16le", "-ar", "48000", "-ac", "1", "-i", "pipe:0"]
                 inp = pcm
             else:
                 say = shutil.which("say") or ("/usr/bin/say" if os.path.exists("/usr/bin/say") else None)
@@ -3008,6 +3206,13 @@ def run_notify(cfg: Config, session: str, ntype: str, bot=None) -> int:
         if found is None:
             return 0
         thread = found.thread
+        if ntype != "idle_prompt":
+            from . import notices
+            time.sleep(1.0)  # The child is detached; allow the terminal screen to draw.
+            if notices.screen_only_notice(session):
+                time.sleep(1.5)  # the real dialog may not be drawn yet: it must still be only the notice
+                if notices.screen_only_notice(session) and notices.handle(cfg, bot, session, thread, found.away):
+                    return 0  # a Claude Code suggestion notice is not a question: no waiting state, no alert, no card
         from .topics import set_state
         try:
             set_state(cfg, session, "done" if ntype == "idle_prompt" else "waiting", bot=bot)
@@ -3019,7 +3224,6 @@ def run_notify(cfg: Config, session: str, ntype: str, bot=None) -> int:
                 return 0  # its own card is out (the PermissionRequest hook): no screen card, no second ring
         if ntype != "idle_prompt":
             from . import dialogs
-            time.sleep(1.0)  # The child is detached; allow the terminal dialog to draw.
             _notify_alert(cfg, session, bot)
             try:
                 if dialogs.send_card(cfg, bot, session, thread, translate=True, chat=found.away):
@@ -3030,6 +3234,15 @@ def run_notify(cfg: Config, session: str, ntype: str, bot=None) -> int:
         what = s.get("notify_" + ntype) or s["notify_default"]
         if ntype == "idle_prompt":
             err = screen_error(session)
+            if err.startswith("Not logged in"):
+                from .inbox import recover_logged_out_move
+                recovered = recover_logged_out_move(
+                    cfg, bot, session,
+                    lambda text, **extra: send_essential(cfg, bot, session, {"text": text, **extra}),
+                )
+                if recovered:
+                    err = ""
+                    what = s["notify_error"] + "\nSession returned to its previous signed-in account."
             if err:  # "finished and waiting" would hide that it never ran (Not logged in)
                 what = s["notify_error"] + "\n" + err
         send_essential(cfg, bot, session, {"text": (L.RLM if L.is_rtl(cfg.target_language) else "") + "\U0001F514 " + what})

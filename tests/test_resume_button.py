@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot
+from conftest import GOOD_TOKEN, FakeBot, signed_in
 from ctb import accounts, inbox as I, usage
 from ctb.config import Config
 from ctb.i18n import t
@@ -34,7 +34,7 @@ class Pane:
         self.calls.append(args)
         if args[0] == "display":
             fmt = args[-1]
-            return subprocess.CompletedProcess(args, 0, stdout=("123 " if "pane_pid" in fmt else "") + self.name + "\n")
+            return subprocess.CompletedProcess(args, 0, stdout=("123" if fmt == "#{pane_pid}" else self.name) + "\n")
         if self.clears and args[0] == "send-keys" and args[-1] == "Enter":
             self.screen = GONE
         out = self.screen if args[0] == "capture-pane" else ""
@@ -66,6 +66,7 @@ def toasts(bot):
 
 
 def test_the_stuck_message_carries_the_resume_button_and_no_terminal_words(monkeypatch):
+    signed_in("main", "small")
     accounts.add("small")
     accounts.record(SID, "main")
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
@@ -87,7 +88,9 @@ def test_the_limit_flow_message_carries_the_button_too(monkeypatch, bot):
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "account_move", lambda *a, **k: True)
     monkeypatch.setattr(I, "pane_for_session", lambda s: "%1")
-    monkeypatch.setattr(usage, "limit_of", lambda s: None)
+    monkeypatch.setattr(usage, "limit_of", lambda s: {"id": "limit-resume"})
+    monkeypatch.setattr(accounts, "fallback_plan", lambda s: {
+        "here": accounts.origin_account(s), "fresh": ["small"], "auto": True})
     monkeypatch.setattr(I, "_tmux", Pane(ON_SCREEN, clears=False))
     assert I.auto_move(cfg(), bot, SID, 5, "small") is False
     sent = bot.methods("sendMessage")[-1]
@@ -104,6 +107,8 @@ def test_hebrew_ui_gets_a_hebrew_label_and_no_terminal_words():
 def test_a_tap_with_the_question_on_screen_chooses_resume(tap, monkeypatch, bot):
     pane = Pane(ON_SCREEN)
     monkeypatch.setattr(I, "_tmux", pane)
+    monkeypatch.setattr(I, "session_pid", lambda session: 123)
+    monkeypatch.setattr(I, "_pane_claude_targets", lambda target: [(123, "start")])
     picked = []
     real = I.answer_resume_dialog
     monkeypatch.setattr(I, "answer_resume_dialog", lambda target: picked.append(target) or real(target))

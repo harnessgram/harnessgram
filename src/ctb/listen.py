@@ -7,8 +7,8 @@ id in <state>/listen.json; a tap looks the id up, so the callback data never car
 A tap (owner only):
  1. the text is cleaned for the ear (no code, links, paths or Summary label), cut to MAX_CHARS, and put
     through the radio's suitability rules (radio_room.clean); then one recording at a time, PER_HOUR an hour;
- 3. the free local voice speaks it (never a paid one: a paid request cannot be held to a hard cap here); ffmpeg turns
-    it into OGG/Opus and sendVoice replies to the reply.
+ 3. the configured local engine (`tts_command`) speaks it, or else the free system voice (never a paid one: a paid
+    request cannot be held to a hard cap here); the result is OGG/Opus and sendVoice replies to the reply.
 A recording already made is sent again by its Telegram file id, in a thread, after the same text checks; the id is
 dropped only when Telegram says the file is gone.
 """
@@ -126,18 +126,71 @@ def _ffmpeg() -> Optional[str]:
     return shutil.which("ffmpeg") or ("/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else None)
 
 
+ENGINE_TIMEOUT = 90
+
+
+def _engine(cfg) -> list:
+    command = list(getattr(cfg, "tts_command", None) or [])
+    return command if command and shutil.which(command[0]) else []
+
+
 def engine_ready(cfg) -> bool:
-    return bool(_ffmpeg() and shutil.which("say"))
+    return bool(_engine(cfg)) or bool(_ffmpeg() and shutil.which("say"))
+
+
+def run_engine(cfg, text: str) -> bytes:
+    """OGG/Opus from the configured local engine, or b"". Its output and errors are never logged or sent."""
+    import os
+    import signal
+    command = _engine(cfg)
+    if not command:
+        return b""
+    with tempfile.TemporaryDirectory(prefix="ctb-tts-") as d:
+        ogg = Path(d) / "v.ogg"
+        argv = command + ["-o", str(ogg)]
+        voice = getattr(cfg, "tts_voice", "")
+        if voice:
+            argv += ["-v", voice]
+        try:
+            # Its own process group, so a timeout also stops whatever the engine started.
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
+        except OSError:
+            return b""
+        with proc:
+            try:
+                proc.communicate(text.encode("utf-8"), timeout=ENGINE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                proc.wait()
+                return b""
+        if proc.returncode != 0 or not ogg.is_file():
+            return b""
+        try:
+            data = ogg.read_bytes()
+        except OSError:
+            return b""
+        return data if data[:4] == b"OggS" else b""
+
+
+# Kept for callers from older installations while the shared name is adopted.
+_run_engine = run_engine
 
 
 def synthesize(cfg, text: str) -> bytes:
     """OGG/Opus bytes of `text`, or b"" when no voice engine could speak it."""
     from . import radio_voice
     from .creds import for_outside
-    ffmpeg = _ffmpeg()
+    text = for_outside(text, getattr(cfg, "redact_outgoing", True))
+    voiced = run_engine(cfg, text)
+    if voiced:
+        return voiced
+    ffmpeg = _ffmpeg()  # the free system voice: the default, and the fallback when the configured engine fails
     if not ffmpeg:
         return b""
-    text = for_outside(text, getattr(cfg, "redact_outgoing", True))
     pcm = radio_voice.system_voice(text, FREE_VOICE)
     if not pcm:
         return b""

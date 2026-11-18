@@ -14,6 +14,27 @@ ctb radio say "text"       # speak one line now
 The same switch is in the control panel (the "Team radio" card) and in the home group as `/radio`,
 `/radio on`, `/radio off` (owner only).
 
+## Hourly channel-news edition
+
+The radio can read an hourly, child-suitable summary of Telegram channels selected by the owner. It is off by
+default. Set `news_edition_enabled` to `true` and put channel usernames in `news_edition_channels` in the
+main configuration. An empty list is equivalent to off and makes no account or model call.
+The list accepts at most 20 broadcast channels. `news_edition_daily_seconds` (default 300) is a news-only
+paid-speech sub-cap tracked separately inside the radio's shared cap; after it is spent, editions use the local voice
+without the usual paid-minutes notice. Numeric IDs work only after the account's dialog list or an existing cache
+provides their access hash; usernames are the supported configuration form.
+
+The reader reuses the radio's existing `telethon_python`, `account_api_command`, and `account_session_command`.
+It only reads posts already available to that account: it never joins a channel, posts, or marks a message read.
+Each run considers only the preceding hour and at most 50 posts per channel. Resolved channel IDs and access hashes are cached in an
+owner-only state file. The existing bridge text-model route
+is used when available; otherwise the representative post is reduced to one sentence locally. Both source text and
+the final script pass the shared spoken-content suitability checker.
+
+News editions are queued only with the private-listen speech path and its existing voice budget. They are never
+mixed into the group/public stream, posted to a chat or topic, or copied to a public mirror. The scheduler permits
+one edition at a time and makes at most one attempt per hour; channel names and post or summary text are not logged.
+
 ## Private Cockpit player
 
 The Cockpit home tab has a compact Listen/Pause control, a live indicator and an off state. On iPhone it uses
@@ -49,7 +70,7 @@ run starts without a title.
 
 `GET /listen/<token>/now.json` answers `{"title": ..., "updated": <unix seconds>}` with the same token check as the
 listen link's page and audio (a wrong or revoked token answers 403, the `listen_link` add-on off answers 404). While
-the radio is off, or before anything was said, the title is the station's name and `updated` is 0. The Harnessgram
+the radio is off, or before anything was said, the title is the station's name and `updated` is 0. The HarnessGram
 app polls it while it plays the listen link.
 
 This is the JSON fallback, not timed ID3 metadata inside the HLS stream: the private stream's segmenter is a separate
@@ -79,18 +100,15 @@ minutes, and starts afresh with each run of the radio.
   opened or ended from this path, whatever the "Live stream in the group" switch says. The owner's own start (Cockpit,
   `/radio on`, `ctb radio start`) is unchanged and still opens the group stream when that switch is on.
 - **Presence is the fetches.** Every authenticated playlist or segment response records its time
-  (`player-listener.json`, no URL, token or address). A station Play started carries the marker `play-started.json`
-  and stops by itself after `play_idle_minutes` (default **10**, 1 to 240) with no fetch: the station's idle loop asks
-  for `ctb radio stop --play`, which decides again under the radio's control lock.
+  (`player-listener.json`, no URL, token or address). Every private station stops after
+  `private_idle_minutes` (default **10**) of continuously detected absence. The stop clears the saved intent,
+  follows the regular stop path and sends one owner-chat notice. When detection is unavailable or uncertain,
+  the interval resets and the station stays on. Group live stations are not stopped by this rule.
 - **A queued start checks again.** The start runs in its own process, a moment after the request. Under the radio's
   control lock it re-checks that nothing stopped the radio since the request, the add-on and the listening link are still
   on, and the cap is not spent; otherwise it does nothing (`radio_play_skipped`).
-- **The idle stop is atomic with the fetches.** Recording a listener fetch and the idle decision (and the stop that
-  follows) share one lock (`player-listener.lock`), and the decision re-checks the mirror there. Starting the YouTube
-  mirror takes a Play-started station over (removes the marker), so it is never stopped under the mirror.
-- **Only Play's own station.** A station started any other way has no marker and is never stopped by this. Starting the
-  radio by hand while a Play-started one runs removes the marker: it is yours now. A Play-started station is not
-  resumed after a restart of the Mac (pressing Play starts it again).
+- **The idle stop is atomic with fetches.** The decision rechecks the station, the current listener and fetches
+  since the interval began under the presence and control locks. A new station or listener cancels the stop.
 - **Guards.** A valid listening token, the `listen_link` add-on on, the radio configured with its player allowed, and
   mirroring on. At most one start attempt per 60 seconds (a fetch inside that window gets the "starting" answer and
   starts nothing). No start when today's paid-speech cap for listening (`tts_listening_minutes`) is spent or the usage
@@ -98,10 +116,8 @@ minutes, and starts afresh with each run of the radio.
   nothing, so it does not block). No start while the radio is wanted by the owner (it resumes by itself), or while a
   start or stop is already in progress. A wrong token is refused as before (403) and starts nothing. The segment route
   never starts anything. Nothing is logged with the token or the URL.
-- **The YouTube mirror edition is never touched.** A Play start and a Play stop skip the mirror's home-sync, and a
-  Play-started station is never stopped while a standing owner-started mirror follows it.
-- **Settings** (in the `"radio"` object of `config.json`): `play_start` (default `true`; `false` brings back "switch
-  the radio on first") and `play_idle_minutes` (default `10`). The Cockpit and `/radio` switches stay as they were.
+- **Settings** (in the `radio` object): `play_start` (default `true`) controls starting on Play;
+  `private_idle_minutes` (default `10`) controls the private station's idle stop.
 - `ctb radio status` shows `play_started`.
 
 Playback of the silence and of the switch should be confirmed once on a real iPhone, in Safari and in the app's player.
@@ -110,7 +126,7 @@ Playback of the silence and of the switch should be confirmed once on a real iPh
 
 The add-on switch "Live stream in the group" (`radio_group_live`, Cockpit Settings, default **on**) decides whether the
 radio also opens the Telegram live stream in the home group. The private listen stream (Cockpit player, native
-Harnessgram player, Safari link) is always made.
+HarnessGram player, Safari link) is always made.
 
 **The switch is read only when the radio starts.** `ctb radio start` (and the resume after a restart) reads it once and
 records the result as the radio's mode in `state.json`; the running radio keeps that mode. Flipping the switch while the
@@ -132,8 +148,9 @@ starts" while the switch and the running mode differ. (Stop and start the radio 
   the group mode this removes a 1280x720 15 fps H.264 encode (libx264 `veryfast`, or VideoToolbox), the 2 to 10 fps frame
   decode and scale, the Swift card renderer on each change and the project show's painter, which is most of the radio's CPU
   and memory; what is left is a stereo AAC encode (a percent or two of one core).
-- **The YouTube mirror edition** takes only the home radio's private HLS audio and draws its own picture, so it needs no
-  home picture. With the group stream off it keeps working from the audio-only private stream.
+- **The YouTube mirror edition** reads the separate station-speech HLS output (`public-hls`) and draws its own picture.
+  With the group stream off, a local audio-only encoder supplies that speech output. Private library music and
+  episodes never enter the group or mirror source.
 - **A stream recorded earlier.** With the switch off, start never touches the account: a live stream the radio recorded
   in an earlier run stays recorded exactly as it is, and only `ctb radio stop` ends it (and never anyone else's).
 - **Listener detection** skips Telegram's participant count while the group stream is off; only the Cockpit/Safari
@@ -143,6 +160,15 @@ starts" while the switch and the running mode differ. (Stop and start the radio 
 
 ## How it works
 
+- **Installed-code handover (macOS).** The heartbeat compares the radio's recorded running build with the
+  installed build. A stale, still-running radio is kickstarted only when the offline `radio youtube status`
+  reports both `on: false` and `broadcast: false`, with no audible private episode, active room, or
+  playing/paused/downloading podcast item. Unknown status waits. Each installed build gets at most one
+  attempt, persisted before launchctl runs, with a 15-minute cooldown between builds; a failed attempt
+  stays visible to `doctor` instead of looping. A live YouTube broadcast is left alone. During the gap,
+  the authenticated player can use a fresh legacy `radio/hls` feed only while the recorded radio process
+  is known to run older code. A fresh `private-hls` feed takes precedence; segments never fall back
+  independently from a fresh private playlist. Both paths retain the same file and playlist guards.
 - **It comes back after a restart.** `start` records that the radio is wanted (`radio/wanted.json`); only `stop`
   (or the radio giving up after repeated failures) clears it, never a shutdown. When the listener starts and the
   radio is wanted but its job is gone (the Mac was restarted), the listener starts it again once, after a short
@@ -172,9 +198,12 @@ starts" while the switch and the running mode differ. (Stop and start the radio 
   separate worker; status and Cockpit requests only read the cache. Failed or stale checks mean unknown
   and do not authorize paid speech. The private player state contains only the last fetch timestamp; the
   call cache contains only a check timestamp and an aggregate participant count (or null on failure).
-  The choice is made once per bulletin. Without a listener, even cached premium audio is bypassed in favor
-  of the system voice (`say_voice`, Carmit for Hebrew), which is local and free. Over the cap, or when Vertex
-  fails, the free voice also continues. Rooms share this budget, with an additional smaller room sub-cap,
+  The default `voice_route` is `local`: the configured offline `tts_command` is used for all narration, with the
+  system voice (`say_voice`, Carmit for Hebrew) as fallback. Set `voice_route` to `cloud` to explicitly opt in with
+  your own credentials. In cloud mode, a listener permits Vertex, followed on failure or an exhausted daily cap by
+  Cloud TTS `he-IL-Chirp3-HD-<radio voice>`, `he-IL-Wavenet-B`, the offline engine, and finally the system voice.
+  The Cloud routes use the same project and access token as Vertex. Rooms share the paid budget,
+  with an additional smaller room sub-cap,
   and also require listening.
   On installations with neither the player nor account status configured, `tts_daily_minutes` remains the
   fallback cap (default 25); the example below sets it to 0. Existing configuration is never rewritten.
@@ -185,6 +214,22 @@ starts" while the switch and the running mode differ. (Stop and start the radio 
   was billed (the audio token count or the audio length, whichever is more). A request whose result is unknown
   (a timeout) stays counted at its full reservation and blocks further paid requests that day. Only a billing
   limit actually enforced by the provider can guarantee an absolute spending ceiling; a budget alert alone cannot.
+
+## Private music and podcasts
+
+The optional **Private listening music** add-on is off by default. When enabled, the DJ selects only library
+items that passed the radio's suitability checks, favours liked tracks, excludes disliked tracks, and does not
+repeat a track within 24 hours. Owner-selected podcast episodes use the same fail-closed gate and play to the end.
+Station speech has priority: it immediately ducks music and temporarily interrupts an episode only for an urgent
+line. Like and skip controls, the current title, and the add-on switch are on the Cockpit radio card.
+
+Copyright isolation is structural. Music and episodes enter `PrivateMixer` and the `private-hls` encoder only.
+The group stream, staff edition, and YouTube mirror receive `SpeechMixer` through the separate `public-hls` path;
+that mixer ignores every background/show source. The existing private title endpoint also receives track and
+episode titles for the iPhone lock screen. This adds no encoder or long-running media process.
+
+**בקצרה:** המוזיקה והפודקאסטים כבויים כברירת מחדל, עוברים בדיקת התאמה, ומתנגנים רק בקישור ההאזנה הפרטי.
+הדיבור קודם להם תמיד; אפשר לסמן אהבתי, לדלג ולכבות בכרטיס הרדיו.
 
 ## Configuration
 
@@ -197,6 +242,7 @@ Add a `"radio"` object to `config.json`. The radio stays off until it is configu
   "account_session_command": ["/usr/bin/security", "find-generic-password", "-s", "my.telegram", "-a", "session", "-w"],
   "rtmp_url_command": ["/usr/bin/security", "find-generic-password", "-s", "my.radio", "-a", "rtmp-url", "-w"],
   "rtmp_key_command": ["/usr/bin/security", "find-generic-password", "-s", "my.radio", "-a", "rtmp-key", "-w"],
+  "voice_route": "local",
   "tts_model": "gemini-2.5-flash-tts",
   "voice": "Sadaltager",
   "tts_listening_minutes": 60,
@@ -213,6 +259,7 @@ Add a `"radio"` object to `config.json`. The radio stays off until it is configu
 | `telethon_python` | (required) | A Python with Telethon, for `radio_call.py` |
 | `account_api_command`, `account_session_command` | (required) | Print the account's `api_id:api_hash` and its Telethon session string |
 | `rtmp_url_command`, `rtmp_key_command` | (required) | Print the group's RTMP server URL and stream key |
+| `voice_route` | `local` | `local` uses the offline `tts_command`; `cloud` explicitly opts in to Vertex and Cloud TTS, with local fallback |
 | `tts_model`, `voice`, `style` | `gemini-2.5-flash-tts`, `Sadaltager`, a calm radio host | The paid voice |
 | `tts_listening_minutes` | 60 | Daily cap of paid speech while a listener is detected; 0 = no new paid speech |
 | `tts_daily_minutes` | 25 | Fallback cap only when listening detection is unavailable (player disabled and account status unconfigured); 0 = no new paid speech |
@@ -318,6 +365,10 @@ room on the radio" switch in the control panel's radio settings; turning it off 
   The provider can charge beyond the requested output limit, including when a response is lost. A local cap
   cannot prevent or undo that charge; only a provider-enforced billing limit can guarantee a spending ceiling.
   A damaged shared or legacy room ledger disables paid speech until repaired or restored; it is never overwritten.
+  Cloud TTS uses a separate locked `<state>/radio/tts-free-usage.json` ledger with UTC-month hard ceilings of
+  900,000 Chirp3-HD characters and 3,800,000 WaveNet characters. A request reserves its characters before it is
+  sent, and a malformed ledger disables these routes without overwriting it. These ceilings deliberately stay
+  below Google's free allowances; after either ceiling, speech continues through the next fallback.
   Requests completing past midnight settle on their reservation date, without reducing the new day's usage.
   Usage is kept per date, so moving the clock to another day and back, or backwards, never frees minutes
   already spent. A 10-minute room speaks about 6 minutes: roughly $0.09 of Gemini 2.5 Flash
@@ -360,7 +411,10 @@ reboot/resume, a scheduled job or ordinary YouTube `start` never grants that per
 the channel invalidates it; the owner must explicitly enable the mirror again. Home start/resume only loads
 an already-authorized mirror job. Turning the mirror off revokes permission before attempting network cleanup.
 
-Audio comes from the home encoder's private `<state>/radio/hls/live.m3u8`, enabled by `radio.radio_player`.
+Audio comes from the isolated station-speech `<state>/radio/public-hls/live.m3u8`, enabled by `radio.radio_player`.
+The private listening playlist (`radio/hls/live.m3u8`) is never used as a fallback. A separate speech mixer ignores
+background/show assignments; the private mixer cannot be attached to a publishing pipeline. Routing does not depend
+on an expiring private-audio marker, so transitions and stale markers cannot leak licensed audio.
 The mirror waits quietly while that playlist is absent, stale, ended, or the home radio/player is off; it
 creates no broadcast during the wait. ffmpeg reads the local live edge at real-time pace. Bounded playlist
 reloads and pipeline reconnects handle disappearing/restarted playlists. Losing the home feed ends the
@@ -385,7 +439,7 @@ ffmpeg only sees a local playlist, image pipes and FLV on stdout, never ingest a
 
 ## Podcast queue (off until you add a feed or a link)
 
-Put a podcast episode on the air: the radio pauses its own talk, plays the episode, then goes on.
+Play an episode on the private listening stream. Station speech starts immediately and ducks the episode underneath.
 
 - **Sources.** Your feed list, `radio_podcasts` in `config.json` (a top-level key, default empty):
   `"radio_podcasts": [{"name": "Science Hour", "url": "https://example.org/feed.xml"}]`, and single episode links
@@ -395,9 +449,9 @@ Put a podcast episode on the air: the radio pauses its own talk, plays the episo
   `/podcast` alone says what is playing; `/podcast play | pause | skip | stop` are the same controls as the
   buttons. The queue holds at most 10 episodes; stop empties it.
 - **On the air.** The Cockpit shows a "now playing" line and play/pause, skip and stop. While an episode plays the
-  bed is replaced by it and the radio's clips wait (a clip already speaking finishes first; nothing is cut), and
-  routine updates are not prepared. When the episode ends or is stopped, the bed fades in and the waiting clips
-  go on. A brainstorming room that is live holds the queue; nothing plays while mirroring is off.
+  private stream mixes speech over it immediately, lowering the episode to -18 dB over 0.5 seconds and restoring
+  it over 1 second after speech. Pause keeps the episode's place. A live brainstorming room holds new episode
+  starts; bridge-off stops playback.
 - **Reading a feed safely.** https only, port 443, no login in the address; at most 2 MB and 12 seconds; at most
   3 redirects, each checked again; every address a name resolves to must be public, checked on the connection that
   is used (a loopback, private, link-local or carrier-grade address is refused); no proxy; a feed with a DTD or
@@ -413,10 +467,48 @@ Put a podcast episode on the air: the radio pauses its own talk, plays the episo
 - **Private cache.** The head of the queue is downloaded into `<state>/radio/podcast/cache/` (private, at most
   150 MB an episode, 20 minutes), decoded by ffmpeg, and deleted when it ends. The cache is pruned to 400 MB and
   two days, by exact file name only.
-- **Private stream only.** Episodes play on the owner's Telegram radio. The staff edition on YouTube is a separate
-  job with its own mixer and an allowlist with no audio section; it never receives an episode, and an episode's
-  title is never spoken, put on the card or sent to the alerts channel. Mirroring episodes to the staff stream is
-  not offered.
+- **Private stream only.** Episodes play only on the private listen stream, never the Telegram group or either
+  YouTube edition. Episode titles are never spoken, put on the card or sent to the alerts channel.
+
+## Private gap filler (Issue #407)
+
+`ctb radio music on|off` controls all private background playback (default on); the same switch is in the
+Cockpit radio settings. Without speech, eligible library tracks use the existing likes/skips weighting and
+exclude the last ten picks. An exhausted or empty library stays silent. Configure optional owner-chosen RSS feeds:
+
+```sh
+ctb radio podcast add https://feeds.example.org/program.xml
+ctb radio podcast list
+ctb radio podcast remove https://feeds.example.org/program.xml
+```
+
+Saved feed choices live in private state, without changing the bridge config; removing a configured feed suppresses
+it too. Every five minutes, a bounded background reader selects the newest unplayed suitable episode across those
+feeds. Only HTTPS audio enclosures qualify. Existing download limits, redirect/DNS protection and title/description
+checks apply again at queueing and playback. Completed episodes are recorded in `radio/podcast/played.json`.
+
+The station fans out only synthesized broadcast PCM to a separate speech queue. The private mixer alone reads library
+and episode decoders. Speech begins on its next 20 ms frame, ducks the background to -18 dB over 0.5 s, and restores it
+over 1 s afterward; PCM addition saturates safely. Mixing happens before the existing ffmpeg AAC/HLS encoder. The
+group and mirror read only the speech queue and `public-hls`; there is no private-audio fallback.
+
+The filler reuses the morning briefing's Shabbat and configured quiet-day windows. During those windows, when the
+switch is off, or if its quiet-day check fails, music and episodes are muted and stopped. Station speech retains its
+existing policy. No live-service restart or publication is part of installing these source changes.
+
+### Agent media (add-on `radio_agent_media`, default on)
+
+Agents can put an audio or video file they made in the private radio queue.
+
+- `ctb radio queue-file <path> --title T [--session S] [--text-file F]` resolves the path first, accepts only a
+  regular media file under the home folder (at most 500 MB), and binds approval to its size, time and SHA-256.
+- The complete title and transcript/captions pass the radio suitability check, which fails closed. Without text,
+  the owner receives a “Play on the radio?” card and only their tap queues it.
+- Mirrored audio and video carry an “On the radio” button. `ctb mirror --file F --radio-auto --radio-text-file T`
+  queues automatically only during car mode or while the owner is listening, and only after text passes.
+- The radio announces “Next: &lt;title&gt;, from &lt;project&gt;” before playing it. The podcast controls pause and skip it.
+  Agent media uses the podcast player's isolated private mixer; `public-hls` and the YouTube mirror contain only
+  station speech and never receive the file. Guards and the fingerprint are checked again immediately before play.
 
 ## Staff edition on YouTube (off by default)
 
@@ -453,7 +545,8 @@ harnessgram radio youtube disconnect        # revoke the sign-in and remove the 
 | `edition` | `"staff"` | `"staff"` keeps the independent allowlisted station; `"mirror"` needs the explicit standing owner start described above |
 | `projects` | `{}` (nothing) | Ledger project key → the label staff hear and see. Only these projects are ever read. A project picked in the Cockpit without a label here is shown as a neutral "Project A". Empty = the station only identifies itself |
 | `sections` | all three | Subset of the fixed list `station_id` (always on), `done_today`, `in_work` |
-| `title` | `רדיו הצוות` | The station's name. Used only when both lists below are in place and it passes them (and the team names); else the built-in name. The same title goes on screen, in the voice and on the YouTube broadcast |
+| `private_idle_minutes` | `10` | Stop private broadcasts after this many continuous minutes without a detected listener. When listening detection is unavailable, broadcasts stay on. |
+| `title` | `שידורי הקוקפיט` | The station's name. Used only when both lists below are in place and it passes them (and the team names); else the built-in name. The same title goes on screen, in the voice and on the YouTube broadcast |
 | `deny_terms_file` | the private deny-list | One PLAIN term per line (`#` comments), compared case-, space- and punctuation-insensitively. A line with regular-expression syntax is refused: `start` says so and a running broadcast ends until it is fixed |
 | `suitability_file` | the radio's `room_suitability_file` | A JSON object with a child-suitability `"pattern"` |
 | `client_command` | none | Prints a Google OAuth client file (`installed` or `web`) or `{client_id, client_secret}` |
@@ -643,7 +736,11 @@ Config key `listen_button` (default `true`) turns it off. On the first reply of 
   at most 1200 characters (a cut text ends with "the rest is in the topic"). It passes the same suitability rules as
   the radio's spoken lines (`room_suitability_file`); text they refuse, or rules that cannot be read, are not spoken.
   With no rule file the shared offline child-suitability gate (`radio_suitability`) still runs, and fails closed.
-- The voice is always the free local one (Carmit, converted to OGG/Opus); the paid voice is never used for this button.
+- The voice is local and free. By default it is the system voice (Carmit, converted to OGG/Opus). With
+  `tts_command` set (an argv list, no shell) the bridge runs that local engine instead: the text goes in on stdin,
+  `-o <file.ogg>` names the output, and `-v <tts_voice>` is added when `tts_voice` is set. The engine runs in its
+  own process group with a 90-second limit, its output and errors are never logged or sent, and a result that is not
+  OGG is dropped. When it fails, the system voice speaks instead. The paid voice is never used for this button.
 - One recording is made at a time and at most 20 an hour. The recording's Telegram file id is kept per reply, so a
   second tap sends the same voice note again (after the same text checks, off the update loop; the id is dropped only when
   Telegram says the file is gone). Anyone but the owner gets an "owner only" answer.

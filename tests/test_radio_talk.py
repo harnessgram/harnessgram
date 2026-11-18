@@ -93,6 +93,11 @@ def test_replies_that_come_close_together_go_out_as_one_bulletin():
     assert T.bulletin([a]) == "מסלול: המסך מוכן."
 
 
+def test_working_only_digest_item_is_identified_but_a_merged_pr_is_concrete():
+    assert T.working_only("Session alpha is working")
+    assert not T.working_only("PR 27 merged; 14 tests passed")
+
+
 def test_reply_bulletin_removes_email_and_account_local_part_and_is_bounded():
     text = T.bulletin([{"account": "secretname@example.com", "text": "חשבון secretname סיים."},
                        {"text": "עדכון ארוך מאוד. " * 100}])
@@ -167,7 +172,8 @@ def test_the_setting_is_in_the_panels_bridge_settings_on_by_default():
 
 def test_when_the_paid_minutes_run_out_the_free_voice_goes_on_and_says_so_once(tmp_path, monkeypatch):
     st = radio.Station.__new__(radio.Station)
-    st.cfg, st.s, st.dir = cfg(), dict(radio.settings(cfg()), lang="he", say_voice="", tts_daily_minutes=1), radio.folder()
+    st.cfg, st.s, st.dir = cfg(), dict(radio.settings(cfg()), lang="he", say_voice="", tts_daily_minutes=1,
+                                      voice_route="cloud"), radio.folder()
     st.mixer, st.usage, st.cache = radio.Mixer(bytes(4)), V.Usage(tmp_path / "u.json"), tmp_path / "c"
     st.status, st.snap, st._switch_day = {}, None, ""
     st.draw_lock, st.caption_lock, st.captions, st.tag, st.headline, st.talks = (

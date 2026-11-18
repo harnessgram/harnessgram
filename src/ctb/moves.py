@@ -319,10 +319,12 @@ def move(cfg: Config, bot, session: str, to_chat: int, topics: Optional[TopicMap
                     cur["chat"] = to_chat  # the ids tracked from here on are messages of the new chat
                     if cur.get("state") == "busy":
                         try:
+                            emoji = str(cur.get("placeholder_emoji") or PLACEHOLDER)
                             mid = bot.call("sendMessage", {"chat_id": to_chat, "message_thread_id": thread,
-                                                           "text": PLACEHOLDER, "disable_notification": True}).get("message_id")
+                                                           "text": emoji, "disable_notification": True}).get("message_id")
                             if type(mid) is int and mid > 0:
                                 cur["placeholder"], cur["all"] = mid, [mid]
+                                cur["placeholder_emoji"], cur["placeholder_emoji_at"] = emoji, 0
                         except TelegramError:
                             pass
                     write_private(path, json.dumps(cur))

@@ -89,7 +89,7 @@ def test_numbers_in_hebrew_words():
 def test_script_reads_what_waits_first_and_counts_english_items():
     s = snap()
     text = R.build_script(s, {}, NAMES, "he", when=time.localtime(0))
-    assert text.startswith("רדיו הצוות, השעה")
+    assert text.startswith("שידורי הקוקפיט, השעה")
     assert "יש ארבעה דברים חדשים שמחכים לך." in text
     # the three newest fresh items are read; the English one is the fourth, so it is counted ("ועוד אחד חדש")
     # (2026-11-11: every item here is within FRESH_WINDOW; the sample ledger times were 1.0 and 2.0, i.e. ancient)
@@ -455,6 +455,7 @@ def test_team_quota_reads_weekly_for_claude_and_codex_and_keeps_short_windows_fo
 
 def _settings(**kw):
     s = dict(radio.DEFAULTS, lang="he", say_voice="Carmit")
+    s["voice_route"] = "cloud"
     s.update(kw)
     return s
 
@@ -947,7 +948,7 @@ def _station(tmp_path, monkeypatch, pcm=b"\x01\x00" * radio.RATE):
 
 def test_every_update_starts_with_the_intro_and_registers_its_captions(tmp_path, monkeypatch):
     st = _station(tmp_path, monkeypatch)
-    text = "רדיו הצוות, השעה אחת וחצי. הסשן תיקון הגשר סיים לעבוד וממתין. זה הכול לעכשיו."
+    text = "שידורי הקוקפיט, השעה אחת וחצי. הסשן תיקון הגשר סיים לעבוד וממתין. זה הכול לעכשיו."
     assert st.speak(text)
     clip, tag = st.mixer.clips[0]
     assert clip.startswith(V.intro()) and len(clip) == len(V.intro()) + radio.RATE * 2
@@ -1204,7 +1205,7 @@ def test_a_manual_say_is_cut_at_a_sentence_not_in_a_word(monkeypatch, tmp_path):
     monkeypatch.setattr(radio, "folder", lambda: tmp_path)
     said = []
     monkeypatch.setattr(radio, "write_private", lambda path, text: said.append(text))
-    radio.say(" ".join("משפט ארוך מספר %d ברדיו הצוות." % n for n in range(1, 60)))
+    radio.say(" ".join("משפט ארוך מספר %d בשידורי הקוקפיט." % n for n in range(1, 60)))
     assert said and len(said[0]) <= radio.MAX_SAY and said[0].endswith(".") and "…" not in said[0]
 
 

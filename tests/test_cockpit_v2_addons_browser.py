@@ -1,4 +1,4 @@
-"""What Harnessgram adds to your agents, at phone widths in a real browser: contract, fit, spacing, taps, undo, back.
+"""What HarnessGram adds to your agents, at phone widths in a real browser: contract, fit, spacing, taps, undo, back.
 
 Every request is answered by the in-memory fake of /api/addons in cockpit_v2_browser: no bridge and no network."""
 import pytest

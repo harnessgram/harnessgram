@@ -113,7 +113,10 @@ def idle_items(rows: List[dict], now: float, threshold: float = DEFAULT_HOURS * 
             continue
         out.append({"project": r.get("project") or "", "id": r.get("id"), "title": r.get("title") or "",
                     "title_he": r.get("title_he") or None, "idle": int(idle),
-                    "push_updated": moved if r.get("urgent") and note == "pushed by owner" else None})
+                    # Bind a queued replay to the note that made this exact snapshot eligible. In particular,
+                    # an old owner push must not survive a later team pause merely because the ledger kept the
+                    # item's coarse `updated` timestamp unchanged.
+                    "last_note": note})
     return sorted(out, key=lambda x: (-x["idle"], str(x["project"]).casefold(), str(x["id"])))
 
 
@@ -309,8 +312,7 @@ def check(cfg, now: Optional[float] = None, items: Optional[List[dict]] = None, 
                 # parked or newly owner-waiting item from the earlier detection snapshot.
                 live = {_key(it["project"], it["id"]): it for it in read_items(cfg, now)}
                 todo[:] = [it for it in todo if _key(it["project"], it["id"]) in live
-                           and (it.get("push_updated") is None or
-                                live[_key(it["project"], it["id"])].get("push_updated") == it["push_updated"])]
+                           and live[_key(it["project"], it["id"])].get("last_note") == it.get("last_note")]
                 return bool(todo)
 
             if not still_open():

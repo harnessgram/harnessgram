@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import accounts
+from . import accounts, framing
 from . import lang as L
 from . import launch, scheduled
 from .lazy import lazy_module
@@ -62,7 +62,9 @@ MIN_LETTERS = 40  # shorter replies are not judged for language
 # Prompts that start with these are not the owner typing: bridge headers, and the carry-on prompt a reopened
 # session starts with (revive.WAKE_TEXT). They never clear the nudge pause, are never mirrored to the topic
 # as the owner's words and never name the session.
-NOT_OWNER_PROMPT = ("<", "[Owner message", "[Owner messages", "[Harnessgram:")
+NOT_OWNER_PROMPT = ("<", "[Owner message", "[Owner messages", "[HarnessGram:", "[Harnessgram:",
+                    framing.FORWARDED_HEADER, framing.TEAM_ONLY_HEADER,
+                    framing.TEAM_HEADER.split("{name}", 1)[0], framing.PANEL_HEADER)
 STOP_HEADER = "[Owner message via Telegram, written in this session's topic]"
 STOP_CLOSING = "Treat it as the owner's chat message within the current authorized scope."
 MIDTURN_HEADER = "[Owner message via Telegram, arrived mid-step]"
@@ -71,9 +73,27 @@ MIDTURN_STOP = ("[Owner via Telegram, mid-step: STOP. Make no further tool calls
                 "briefly report what is done and what is left.]")
 
 
-def delivery_text(items: List[dict]) -> str:
+def _has_owner_messages(items: List[dict]) -> bool:
+    return any(m.get("source") not in ("team", "mcp") and not m.get("forwarded") and not m.get("dropped")
+               and (m.get("text") or "").strip() for m in items)
+
+
+def _owner_delivery(header: str, items: List[dict], closing: str, session: str = "") -> str:
+    text = framing.deliver(header, items, closing)
+    if session and _has_owner_messages(items):
+        try:
+            from . import open_lines
+            reminder = open_lines.reminder(session)
+            if reminder:
+                text += "\n\n" + reminder
+        except Exception:
+            pass  # a reminder must never lose an already-taken message
+    return text
+
+
+def delivery_text(items: List[dict], session: str = "") -> str:
     """What the Stop hook and the wake hook hand to the model (queued messages, owner or team)."""
-    return framing.deliver(STOP_HEADER, items, STOP_CLOSING)
+    return _owner_delivery(STOP_HEADER, items, STOP_CLOSING, session)
 
 
 # --- reading the transcript --------------------------------------------------
@@ -482,6 +502,9 @@ def telegram_messages(session: str, midturn: bool = False, only=None, data: Opti
     step (via "agent") takes only an owner stop word, which never waits."""
     if not session:
         return []
+    from . import credit_mode
+    if via != "agent" and credit_mode.blocked(session):
+        return []  # preserve queued owner messages for subscription/reset
     until = hook_deadline() if until is None else until
     try:
         inbox = default_inbox()
@@ -533,7 +556,7 @@ def stop_output(data: dict, lines: List[str], cfg: Config, answer_to=_UNSET) -> 
     reply = "\n\n".join(t for _, t in blocks).strip()
     # Snapshot before detached work or taking the next turn's Telegram messages.
     if answer_to is _UNSET:
-        answer_to = default_inbox().consume_answer_to(session) if session and reply else None
+        answer_to = default_inbox().consume_answer_to(session, include_text=True) if session and reply else None
     if cfg.ready:
         mirror_files(data, lines)
     if reply:
@@ -547,14 +570,23 @@ def stop_output(data: dict, lines: List[str], cfg: Config, answer_to=_UNSET) -> 
             # Detached first: the app cancels a running Stop hook when the next prompt is sent.
             args = ["mirror", f"--title={title}", f"--session={session or title}"] + (
                 ["--translate"] if wants else ["--no-translate"])
+            prompt_path = None
             if answer_to:
                 args += [f"--reply-chat={answer_to['chat']}", f"--reply-to={answer_to['id']}"]
+                if answer_to.get("text"):
+                    tmp = private_dir(state_dir() / "tmp")
+                    prompt_path = tmp / f"prompt-{os.getpid()}-{time.time_ns()}.txt"
+                    write_private(prompt_path, answer_to["text"])
+                    args += [f"--reply-text-file={prompt_path}", "--delete-reply-text-file"]
+                if answer_to.get("source"):
+                    args += [f"--reply-source={answer_to['source']}"]
             if cfg.context_footer and data.get("transcript_path"):
                 args.append(f"--transcript={data['transcript_path']}")
             try:
                 spawn(args, text=reply)
             except Exception:
-                pass
+                if prompt_path:
+                    prompt_path.unlink(missing_ok=True)
         shown = False
         if wants:
             try:
@@ -571,12 +603,27 @@ def stop_output(data: dict, lines: List[str], cfg: Config, answer_to=_UNSET) -> 
     # Messages written in this session's Telegram topic continue the session now.
     msgs = telegram_messages(session, data=data, via="stop") if cfg.ready else []
     if msgs:
-        out.update(decision="block", reason=delivery_text(msgs))
+        out.update(decision="block", reason=delivery_text(msgs, session if not data.get("agent_id") else ""))
     try:
         drop_progress(session, cfg)  # the step ended: remove the live progress message
     except Exception:
         pass
+    from . import credit_mode
+    if credit_mode.blocked(session):
+        # Stop's decision=block asks Claude to keep working; at the budget gate
+        # allow this turn to end instead, without feeding another turn.
+        out.pop("decision", None)
+        out.pop("reason", None)
+        out["systemMessage"] = credit_mode.stop_line()
     return out
+
+
+def _retire_permissions(data: dict) -> None:
+    try:
+        from . import permission_request
+        permission_request.supersede(data.get("session_id") or "", data.get("agent_id"))
+    except Exception:
+        pass  # permission tracking must never interrupt the session's normal hooks
 
 
 def hook_stop(stdin_text: str) -> int:
@@ -585,6 +632,7 @@ def hook_stop(stdin_text: str) -> int:
         if not isinstance(data, dict):
             return 0
         _clear_ask(data.get("session_id") or "")  # the turn ended: no question is pending any more
+        _retire_permissions(data)
         _direct(data)
         cfg = load_config()
         session = data.get("session_id") or ""
@@ -632,7 +680,10 @@ def hook_stop(stdin_text: str) -> int:
                 pass
         msgs = telegram_messages(session, data=data, via="stop", until=deadline) if cfg.ready else []
         if msgs:
-            out.update(decision="block", reason=delivery_text(msgs))
+            out.update(decision="block", reason=delivery_text(msgs, session if not data.get("agent_id") else ""))
+        from . import credit_mode
+        if credit_mode.blocked(session):
+            out = {"systemMessage": credit_mode.stop_line()}
     except Exception:
         return 0
     if out:
@@ -995,23 +1046,26 @@ def hook_stop_failure(stdin_text: str) -> int:
         session = data.get("session_id") or ""
         if not session:
             return 0
+        _retire_permissions(data)
         transcript = data.get("transcript_path") or ""
         try:
             offset = os.path.getsize(transcript)
         except OSError:
             offset = None
         text = (data.get("last_assistant_message") or "").strip()
-        if not text and data.get("error"):
-            text = str(data.get("error"))
+        error_text = str(data.get("error") or "").strip()
+        api_error = bool(error_text == "usage_limit_reached" or accounts.QUOTA_HIT.search(error_text))
+        if not text or accounts.QUOTA_HIT.search(error_text):
+            text = error_text
         cfg = load_config()
         if not cfg.ready:
             return 0
-        if accounts.QUOTA_HIT.search(text):
+        if accounts.QUOTA_HIT.search(text) and (api_error or usage.limit_of(session)):
             if not data.get("agent_id"):
                 replay.turn_ended(session, text, None, data.get("transcript_path"))  # first: the offer below may start the account move
             from .mirror import limit_offer
             from .telegram import Bot
-            limit_offer(cfg, Bot.from_config(cfg), session, text)
+            limit_offer(cfg, Bot.from_config(cfg), session, text, api_error=api_error)
         # A background agent's failure is not the main turn's end; a prompt that arrived while the
         # limit offer ran started a new turn that must keep its working state and progress card.
         if not data.get("agent_id") and not (offset is not None and _newer_turn(transcript, offset)):
@@ -1148,6 +1202,8 @@ def prompt_output(data: dict, cfg: Config, store: Optional[dict] = None) -> Opti
         if hint:
             parts.append(hint)
     msgs = telegram_messages(data.get("session_id") or "", data=data, via="prompt", until=deadline) if cfg.ready else []
+    # A wake/loop prompt is synthetic; the messages actually taken determine whether the owner wrote.
+    data['_owner_messages_delivered'] = _has_owner_messages(msgs)
     if msgs:
         parts.append(framing.deliver("[Owner also wrote in this session's Telegram topic (chat message):",
                                      msgs, "End of the Telegram message.") + "]")
@@ -1167,13 +1223,13 @@ def prompt_output(data: dict, cfg: Config, store: Optional[dict] = None) -> Opti
     return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": " ".join(parts)}}
 
 
-EMPTY_WAKE = "Harnessgram: this wake had no message left to deliver (it was already delivered). Nothing to do."
-EMPTY_WAKE_NOTE = ("[Harnessgram: this wake line carried no new message; the owner's message was already delivered "
+EMPTY_WAKE = "HarnessGram: this wake had no message left to deliver (it was already delivered). Nothing to do."
+EMPTY_WAKE_NOTE = ("[HarnessGram: this wake line carried no new message; the owner's message was already delivered "
                    "to you earlier. Do not tell the owner that a message arrived empty and do not ask them to "
                    "resend: end this turn with no reply.]")
 
 
-WAKE_IN_FLIGHT_NOTE = ("[Harnessgram: this wake line carries no text of its own. A message from the owner that was "
+WAKE_IN_FLIGHT_NOTE = ("[HarnessGram: this wake line carries no text of its own. A message from the owner that was "
                        "handed over a moment ago may reach you right after it: answer that message normally. Do not "
                        "tell the owner that a message arrived empty.]")
 
@@ -1239,6 +1295,10 @@ def hook_prompt(stdin_text: str) -> int:
         data = json.loads(stdin_text or "{}")
         from .topics import main_turn_active, name_for_task, save_session_name, session_name
         session, prompt, cwd = data.get("session_id"), data.get("prompt"), data.get("cwd")
+        from . import credit_mode
+        if credit_mode.blocked(session):
+            print(json.dumps({"decision": "block", "reason": credit_mode.stop_line()}, ensure_ascii=False))
+            return 0
         if empty_wake(data, load_config()):
             # before anything marks the session busy: no turn starts, so no Stop hook would clear the mark
             print(json.dumps({"decision": "block", "reason": EMPTY_WAKE}))
@@ -1288,18 +1348,21 @@ def hook_prompt(stdin_text: str) -> int:
                 out = with_reminder(out, progress_nudge(session, store=store), "UserPromptSubmit")
         except Exception:
             pass
+        try:
+            if (cfg.ready and not data.get("agent_id") and isinstance(session, str) and session
+                    and (data.get('_owner_messages_delivered')
+                         or (isinstance(prompt, str) and prompt.strip() and not is_wake_prompt(prompt)
+                             and not is_loop_prompt(prompt) and not prompt.lstrip().startswith(NOT_OWNER_PROMPT)))):
+                from . import open_lines
+                out = with_reminder(out, open_lines.reminder(session), "UserPromptSubmit")
+        except Exception:
+            pass
         try:  # owner rules or skills changed since this session loaded them: one line, once per change
             if not data.get("agent_id") and cfg.ready and isinstance(session, str) and session:
                 from . import recall
                 out = with_reminder(out, recall.prompt_notice(session), "UserPromptSubmit")
         except Exception:
             pass
-        try:
-            if _addon_on(cfg, "title_sync", store=store):
-                from .title_sync import with_title
-                out = with_title(out, data)  # the topic's name becomes the session's title too
-        except Exception:
-            pass  # a title is never worth the prompt's own context
     except Exception:
         return 0
     if out:
@@ -1318,7 +1381,7 @@ def post_output(data: dict, cfg: Config, stop_only: bool = False) -> Optional[di
     stops = {w.strip().lower() for w in cfg.stop_words}
 
     def is_stop(m: dict) -> bool:
-        return (m.get("source") not in ("team", "panel") and not m.get("forwarded")  # someone else's words never stop
+        return (m.get("source") not in ("team", "panel", "mcp") and not m.get("forwarded")  # someone else's words never stop
                 and (m.get("text") or "").strip().lower().rstrip("!. ") in stops)
 
     deadline = hook_deadline()
@@ -1335,7 +1398,8 @@ def post_output(data: dict, cfg: Config, stop_only: bool = False) -> Optional[di
         return None
     nonce = framing.lease_nonce(items)
     team = [m for m in items if m.get("source") == "team"]
-    owner = [m for m in items if m.get("source") not in ("team", "panel")]
+    owner = [m for m in items if m.get("source") not in ("team", "panel", "mcp")]
+    session = (data.get("session_id") or "") if not stop_only and not data.get("agent_id") else ""
     if any(is_stop(m) for m in owner):
         try:  # a stopped turn is cancelled: nothing it was given may come back as a replay
             replay.clear_all(data.get("session_id") or "")
@@ -1344,10 +1408,10 @@ def post_output(data: dict, cfg: Config, stop_only: bool = False) -> Optional[di
         # The stop word itself becomes MIDTURN_STOP; every other message taken with it (the owner's other
         # instructions, team members, panel taps) is still handed over: the lease certifies the whole batch.
         rest = [m for m in items if not is_stop(m)]
-        note = MIDTURN_STOP + (("\n" + framing.deliver(MIDTURN_HEADER, rest, MIDTURN_CLOSING)) if rest
+        note = MIDTURN_STOP + (("\n" + _owner_delivery(MIDTURN_HEADER, rest, MIDTURN_CLOSING, session)) if rest
                                else ("\n" + framing.receipt(nonce) if nonce else ""))
     else:
-        note = framing.deliver(MIDTURN_HEADER, items, MIDTURN_CLOSING)
+        note = _owner_delivery(MIDTURN_HEADER, items, MIDTURN_CLOSING, session)
     return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": note}}
 
 
@@ -1403,6 +1467,8 @@ PROGRESS_NUDGE = ('The owner follows this work on a phone and this session is on
                   "... --at <finished steps> --percent <n>` (3 to 6 short steps, in the owner's language), then keep "
                   "it current with `ctb card progress --id <id> --at <n> --percent <n>` as each step finishes. Skip it "
                   "only if the work ends within a minute or two.")
+TASK_LIST_NUDGE = ("Keep your own task list current with TaskCreate/TaskUpdate (or TodoWrite); it is the primary "
+                   "source for the automatic progress card.")
 PROGRESS_UPDATE = ("Your progress card {id} has not changed for a while. Update it to where the work really is: "
                    "`ctb card progress --id {id} --at <finished steps> --percent <n>`. If the work has moved on "
                    "to something else, rewrite the steps too with `--step <name> --step <name> ...` "
@@ -1541,8 +1607,9 @@ def progress_nudge(session: str, now: Optional[float] = None, store: Optional[di
 def _progress_nudge(session: str, now: Optional[float] = None) -> str:
     """One sentence asking a session on a long task (long_task) that has no progress card of its own for one,
     at most once per PROGRESS_EVERY, or asking for an update of its card left untouched (at most once per
-    PROGRESS_STALE). The bridge's automatic card does not count as the session's own. "" when it is too soon,
-    when the owner chose the quiet activity level, or when the card is fresh. One small read per tool call
+    PROGRESS_STALE). A fresh automatic card replaces either card-command nudge with a short reminder to keep
+    the agent's task list current. "" when it is too soon,
+    when the owner chose the quiet activity level, or when a reminder is not yet due. One small read per tool call
     until the turn is long."""
     from .config import activity_level
     now = time.time() if now is None else now
@@ -1564,8 +1631,18 @@ def _progress_nudge(session: str, now: Optional[float] = None) -> str:
         stamp = 0
     if state.get("cards_stamp") == stamp and start <= now < state.get("cards_next", 0):
         return ""
-    mine = [c for c in cards.open_cards() if c["session"] == session and c["kind"] == "progress"
-            and not c.get("automatic")]
+    progress_cards = [c for c in cards.open_cards() if c["session"] == session and c["kind"] == "progress"]
+    from . import auto_cards
+    if auto_cards.enabled() and any(c.get("automatic") and 0 <= now - c["updated"] < PROGRESS_EVERY
+                                    for c in progress_cards):
+        if nudged and 0 <= now - nudged < PROGRESS_EVERY:
+            state.update(cards_stamp=stamp, cards_next=max(start, nudged + PROGRESS_EVERY))
+            write_private(mark, json.dumps(state))
+            return ""
+        state.update(nudged=now, cards_stamp=stamp, cards_next=now + PROGRESS_EVERY)
+        write_private(mark, json.dumps(state))
+        return TASK_LIST_NUDGE
+    mine = [c for c in progress_cards if not c.get("automatic")]
     if mine:
         last = max((c.get("nudged_at", 0) for c in mine), default=0)
         eligible = [c for c in mine if cards.is_stale(c, now) and
@@ -1627,6 +1704,7 @@ def hook_post(stdin_text: str) -> int:
         session = data.get("session_id") or ""
         if not session:
             return 0
+        # Not here: with parallel tool calls another tool can finish while a permission prompt is still waiting.
         try:
             from . import live_activity
             live_activity.record(session, data)
@@ -1642,7 +1720,14 @@ def hook_post(stdin_text: str) -> int:
                 pass
         cfg = load_config()
         try:
-            if not data.get("agent_id") and data.get("tool_name") == "TodoWrite":
+            if not data.get("agent_id"):
+                from . import state_emoji
+                state_emoji.update(cfg, session, data)
+        except Exception:
+            pass
+        try:
+            from . import auto_cards
+            if not data.get("agent_id") and data.get("tool_name") == "TodoWrite" and auto_cards.enabled():
                 inp = data.get("tool_input") or {}
                 if isinstance(inp, dict) and isinstance(inp.get("todos"), list):
                     from .decisions import _place_of
@@ -1701,6 +1786,48 @@ def hook_ask(stdin_text: str) -> int:
     except BaseException as exc:  # noqa: BLE001 - nothing may escape into Claude Code
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
+    return 0
+
+
+LONG_COMMAND_WARNING = "run this with run_in_background and wait for the notification"
+_LONG_BASH_PATTERNS = (
+    re.compile(r"(?is)(?:^|[;&|]\s*)(?:while|until)\b.*?\b(?:sleep)\b"),
+    re.compile(r"(?i)(?:^|[;&|]\s*)tail\s+(?:[^\n;&|]*-[^\n;&|]*f\b|-f\b)"),
+    re.compile(r"(?i)(?:^|[;&|]\s*)watch(?:\s|$)"),
+    re.compile(r"(?i)\bpython(?:3)?\s+-m\s+http\.server\b"),
+    re.compile(r"(?i)\bnpm\s+run\s+(?:dev|start)\b"),
+    re.compile(r"(?i)(?:^|[;&|]\s*)uvicorn(?:\s|$)"),
+    re.compile(r"(?i)(?:^|[;&|]\s*)(?:uv\s+run\s+)?(?:python\s+-m\s+)?pytest(?:\s+[^\n;&|]*)?\s+tests\s*(?:$|[;&|])"),
+    re.compile(r"(?i)(?:^|[;&|]\s*)codex\s+exec\b"),
+)
+
+
+def long_running_bash(tool_input) -> bool:
+    """Whether a foreground Bash input has the bounded set of long-running warning signs."""
+    if not isinstance(tool_input, dict) or tool_input.get("run_in_background"):
+        return False
+    timeout = tool_input.get("timeout")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 300_000:
+        return True
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return False
+    # An explicit shell background makes the warning unnecessary for server-like commands.
+    if re.search(r"(?:^|\s)&\s*(?:$|[#;])", command):
+        return False
+    return any(pattern.search(command) for pattern in _LONG_BASH_PATTERNS)
+
+
+def hook_bash(stdin_text: str) -> int:
+    """Advise on likely long foreground Bash calls without blocking or changing their input."""
+    try:
+        data = json.loads(stdin_text or "{}")
+        if (isinstance(data, dict) and data.get("hook_event_name") == "PreToolUse"
+                and data.get("tool_name") == "Bash" and long_running_bash(data.get("tool_input"))):
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                      "additionalContext": LONG_COMMAND_WARNING}}))
+    except (ValueError, TypeError):
+        pass
     return 0
 
 
@@ -1799,6 +1926,9 @@ def hook_notify(stdin_text: str) -> int:
         if not session or not cfg.ready:
             return 0
         ntype = re.sub(r"[^a-z_]", "", str(data.get("notification_type") or "").lower())
+        if ntype == "idle_prompt" and _addon_on(cfg, "title_sync"):
+            from . import title_sync
+            title_sync.flush(session)
         if ntype == "idle_prompt" and background_running(data.get("transcript_path") or ""):
             return 0
         # Real terminal dialogs each need a fresh card. Generic rings retain the

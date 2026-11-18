@@ -94,7 +94,7 @@ def test_the_card_sits_under_the_decisions_and_the_tabs_switch(opened):
     order = page.evaluate("()=>[...document.querySelectorAll('#app>section')].map(s=>s.dataset.v2Section)")
     assert order[:2] == ["decisions", "schedule"]
     page.locator("[data-sc-tab=tomorrow]").click()
-    assert page.locator(".sc-empty").inner_text().startswith("מחר עוד ריק")
+    assert page.locator(".sc-empty").inner_text().startswith("לוח ההמראות למחר ריק")
     page.locator("[data-sc-tab=today]").click()
     assert page.locator(".sc-row").count() == 5
 
@@ -175,3 +175,20 @@ def test_disconnect_takes_one_tap_and_offers_connect_again(opened):
     page.locator("[data-sc=google-disconnect]").click()
     page.locator("[data-sc=google-connect]").wait_for()
     assert bridge.posts[-1] == {"action": "google-disconnect"} and errors == []
+
+
+@pytest.mark.parametrize("lang", ["he", "en"])
+@pytest.mark.parametrize("width", [360, 390])
+def test_hour_timeline_and_actions_fit_phone_width_without_overflow(opened, lang, width):
+    bridge = FakeBridge(lang)
+    bridge.view["timeline"] = {"today": {"available": True, "blocks": [
+        {"id": "topic1", "title": "נושא ארוך בעברית Mixed project title " * 4, "summary": "תכנון לשעה הקרובה " * 8,
+         "start": 480, "end": 540, "current": True, "fixed": False},
+        {"id": "topic2", "title": "Topic two", "start": 540, "end": 600, "fixed": False},
+        {"id": "anchor", "title": "Appointment", "start": 630, "end": 690, "fixed": True}]}}
+    page, bridge, errors = opened(lang=lang, width=width, bridge=bridge)
+    page.locator("[data-sc-hour=topic1]").wait_for()
+    got = page.evaluate("""()=>({overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+      small:[...document.querySelectorAll('.sc-hour-actions button')].filter(b=>b.getBoundingClientRect().height<44||b.getBoundingClientRect().width<44).length,
+      anchors:document.querySelectorAll('[data-sc-hour=anchor] button').length})""")
+    assert got == {"overflow": 0, "small": 0, "anchors": 0} and errors == []

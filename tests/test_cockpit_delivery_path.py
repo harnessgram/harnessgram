@@ -41,7 +41,7 @@ def flow(tmp_path, bot, monkeypatch, real_wake):
     monkeypatch.setattr(I, "_tmux", lambda *a: panes[a[a.index("-t") + 1]](*a))
     from ctb import autopilot
     monkeypatch.setattr(autopilot, "at_prompt", lambda p: True)
-    monkeypatch.setattr(autopilot, "type_into", lambda p, t: I.typed_nudge(A if p == "%10" else B, p, t))
+    monkeypatch.setattr(autopilot, "type_into", lambda p, t, session: I.typed_nudge(A if p == "%10" else B, p, t))
 
     class Inline:
         def __init__(self, target, args=(), kwargs=None, **kw):
@@ -59,7 +59,7 @@ def endpoint(f, method, body):
     results = []
     handler = SimpleNamespace(_request=lambda: body, _json=lambda code, data: results.append((code, data)),
                               _body=json.dumps(body).encode(),
-                              server=SimpleNamespace(cfg=f.cfg, inbox=lambda: f.box, bot=lambda: f.bot))
+                              server=SimpleNamespace(cfg=f.cfg, inbox=lambda: f.box, bot=lambda: f.bot, owner_id=7))
     getattr(panel.PanelHandler, method)(handler)
     return results[0]
 

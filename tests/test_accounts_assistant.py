@@ -730,13 +730,15 @@ def test_harmless_managed_settings_do_not_refuse(plain, tmp_path):
 # --- a fork keeps the role (finding 3) -----------------------------------------------------------------------------
 
 def test_a_fork_of_an_assistant_session_stays_an_assistant(env, plain):  # noqa: F811
+    # The fork fixture fakes shutil.which; resolve the launcher under that same fake environment.
+    expected = "exec " + " ".join(shlex.quote(w) for w in [*launch.argv(), "assistant-exec"])
     write_config({"assistant": {"sessions": [SOURCE]}})
     cfg, bot, topics, calls = env
     sid = confirmed(env)
     first = calls[0][-1]
     assert "assistant-exec" in first and "--chrome" not in first     # the fork's first launch
     assert assistant.is_assistant(sid)                                # and every later one
-    assert accounts.shell_command(sid) == EXEC
+    assert accounts.shell_command(sid) == expected
     assert (state_dir() / assistant.DERIVED / sid).is_file()
 
 

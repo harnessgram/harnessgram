@@ -1,6 +1,8 @@
 """The control panel page in three tabs: agent cards drawn safely, the /api/card call, native Mini App touches
 behind feature checks, and the layout guards the redesign must keep."""
+from pathlib import Path
 import re
+import subprocess
 
 from ctb import panel, panel_page
 
@@ -27,6 +29,19 @@ def test_both_languages_have_the_new_tab_and_card_strings():
     for kind in ("progress", "choice", "ask", "link", "numbers"):
         assert he["k_" + kind] and en["k_" + kind]
     assert he["tabMe"] == "בשבילי" and he["tabAgents"] == "סוכנים" and he["settings"] == "הגדרות"
+    assert he["activityAgent"] == "סוכן" and en["activityAgent"] == "Agent"
+    assert 'x.task||x.type||x.name||S.activityAgent' in func("activityFeed")
+
+
+def test_old_home_offers_one_tap_return_to_v2_only_when_it_is_off():
+    assert panel_page.STRINGS["he"]["backToV2"] == "חזרה לעיצוב הקוקפיט החדש"
+    assert panel_page.STRINGS["en"]["backToV2"] == "Back to the new Cockpit design"
+    card = func("v2ReturnCard")
+    assert 'if(!d.settings||d.settings.ui_v2!=="off")return null' in card
+    assert 'post("/api/setting",{name:"ui_v2",value:"on"})' in card
+    assert '.then(function(){load();})' in card
+    render = func("render")
+    assert 'if(view==="me"){var v2Return=v2ReturnCard(d);if(v2Return)app.appendChild' in render
 
 
 def test_session_fork_button_requires_arm_then_explicit_confirmation():
@@ -132,14 +147,44 @@ def test_the_tap_note_and_motion_guards_stay():
     assert '"+ "+S.' not in page  # no plus-shaped marks in the copy
 
 
-def test_the_policy_only_adds_same_origin_radio_media():
+def test_the_policy_allows_only_the_official_youtube_player_origins():
     assert panel_page.csp("N", "https://web.telegram.org") == (
-        "default-src 'none'; script-src https://telegram.org/js/telegram-web-app.js 'nonce-N'; style-src 'nonce-N'; "
-        "connect-src 'self'; media-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; "
+        "default-src 'none'; script-src https://telegram.org/js/telegram-web-app.js 'nonce-N' https://www.youtube.com/iframe_api https://www.youtube.com/s/player/; style-src 'nonce-N'; "
+        "connect-src 'self'; media-src 'self'; img-src 'self' data:; frame-src 'self' https://www.youtube-nocookie.com; base-uri 'none'; form-action 'none'; "
         "frame-ancestors https://web.telegram.org")  # frame-src: cockpit apps' sandboxed frames, this server only
     page = panel.render_page("he", "N").decode()
     assert page.count('nonce="N"') == 2 and len(re.findall(r"<script\b", page)) == 2
     assert not re.search(r"\son[a-z]+=", page)  # no inline event handlers
+
+
+def test_my_music_tile_uses_official_player_and_ducks_under_radio():
+    page = panel_page.PAGE
+    assert "המוזיקה שלי" in panel_page.STRINGS["he"].values()
+    assert 's.src="https://www.youtube.com/iframe_api"' in page
+    assert 'host:"https://www.youtube-nocookie.com"' in page
+    assert 'setVolume(20)' in page and "myMusicDuck" in page
+    assert "min-inline-size:200px;min-block-size:200px" in page
+
+
+def test_my_music_radio_ducking_is_idempotent_and_restores_on_every_exit():
+    duck = func("myMusicDuck")
+    assert "on===myMusicDucked" in duck
+    assert duck.index("myMusicPreviousVolume=myMusicPlayer.getVolume()") < duck.index("myMusicDucked=true")
+    assert "myMusicPlayer.setVolume(myMusicPreviousVolume);myMusicDucked=false" in duck
+
+    radio = func("radioPlayerDraw")
+    assert 'if(typeof myMusicDuck==="function")myMusicDuck(event==="play"||event==="playing"||event==="waiting")' in radio
+    assert 'event==="pause"||event==="ended"||event==="error"' in radio
+    assert "radioState=\"error\";radioMessage=S.radioPlayerError;if(typeof myMusicDuck===\"function\")myMusicDuck(false)" in func("radioPlayerPlay")
+
+    load = func("myMusicLoad")
+    assert "events:{onReady:function()" in load
+    assert "radioAudio&&!radioAudio.paused&&!radioAudio.ended&&!radioAudio.error" in load
+    assert "myMusicDuck(true)" in load
+
+    page = js()
+    assert 'window.addEventListener("pagehide",function(){myMusicDuck(false);})' in page
+    assert 'document.addEventListener("visibilitychange",function(){if(document.hidden)myMusicDuck(false);})' in page
 
 
 def test_the_youtube_staff_radio_card_keeps_its_guards():
@@ -155,3 +200,79 @@ def test_the_youtube_staff_radio_card_keeps_its_guards():
     assert "if(!y.setup||!y.setup.client||!y.setup.base){c.appendChild(el(\"div\",\"safe\",S.ytSetup));return c;}" in card
     assert 'post("/api/youtube",body)' in func("ytPost")
     assert 'role","switch"' in func("ytSwitch") and 'cb.type="checkbox"' in func("ytProjects")
+
+
+def test_poll_render_stabilizes_the_viewport_and_skips_unchanged_trees():
+    render = func("render")
+    page = panel_page.PAGE
+    assert "fp===renderFingerprint" in render
+    assert "updateRelativeTimes(previous)" in render
+    assert "firstVisibleAnchor()" in render and "settleAndRestore(anchor,y,oldHeight,!changedView&&!newContent)" in render
+    assert 'if(changedView)app.style.minHeight="";else app.style.minHeight=Math.ceil(oldHeight)+"px"' in render
+    assert "panelEditing()||now-lastInteraction<800" in render
+    assert "now-renderDeferredSince<10000" in render
+    assert "restoreEditor(editor)" in render
+    assert '["touchstart","touchmove","scroll","wheel"]' in page
+    assert 'animateEntries=changedView||renderedView===null' in render
+    assert 'data-key","session:"+s.id' in page
+
+
+def test_every_generated_image_reserves_intrinsic_space():
+    page = panel_page.PAGE
+    assert 'img.width=4;img.height=3' in page
+    assert 'img.width=160;img.height=100' in page
+
+
+def test_poll_fingerprint_covers_the_whole_payload_except_clock_fields():
+    page = panel_page.PAGE
+    fingerprint = func("fingerprint")
+    assert "stableCopy(d)" in fingerprint and "viewPayload" not in page
+    volatile = func("volatileKey")
+    for clock_key in ('k==="age"', 'k==="now"', '/_age$/', '/_ago$/', 'server_'):
+        assert clock_key in volatile
+    # No rendered domain field may become another allow-list omission.
+    for key in ("tasks", "mac", "topic_cleanup", "deliveries", "quota", "bank",
+                "radio", "room", "podcast", "youtube", "default_model", "models",
+                "listen_link", "widget_devices"):
+        assert key not in volatile
+
+
+def test_scroll_stability_helpers_require_an_explicit_test_flag():
+    page = panel_page.PAGE
+    assert 'if(window.__CTB_TEST__===true)window.__ctbTest=Object.freeze({fingerprint:fingerprint,render:render});' in page
+    assert page.count("window.__ctbTest=") == 1
+
+
+def test_deferred_render_and_anchor_restore_have_hard_safety_guards():
+    page = panel_page.PAGE
+    render = func("render")
+    settle = func("settleAndRestore")
+    assert "render(last,false)" in render
+    assert "if(!renderDeferred)" in render
+    assert "now-renderDeferredSince<10000" in render
+    assert "Math.abs(window.scrollY-token.expectedY)>4" in settle
+    assert "pendingRestore!==token" in settle
+    assert 'renderNewContent=true;render(last,true)' in (Path(panel_page.__file__).with_name("cockpit_v2_screens.js").read_text())
+
+
+def test_no_comma_return_that_leaks_globals():
+    # `return null,x=[]` returns the last value and assigns an undeclared global (a throw in strict mode).
+    assert not re.search(r"return\s+null\s*,", panel_page.PAGE)
+
+
+def test_settle_and_restore_runs_in_strict_mode():
+    # The page is strict: a comma chain after a statement (`a=b,imgs=...`) assigns undeclared globals and
+    # throws a ReferenceError on every full render ("error showing the board").
+    page = panel_page.render_page("en", "test").decode()
+    start = page.index("function settleAndRestore(")
+    end = page.index("\nfunction ", start + 10)
+    script = '"use strict";\n' + r'''
+var pendingRestore=null;
+var app={style:{},querySelectorAll:function(){return [];}};
+global.window={scrollY:0,scrollTo:function(){},scrollBy:function(){}};
+global.requestAnimationFrame=function(f){f();};
+''' + page[start:end] + r'''
+settleAndRestore(null,0,0,true);
+if(pendingRestore===null)throw new Error("token not kept");
+'''
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True, timeout=20)

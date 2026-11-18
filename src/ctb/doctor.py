@@ -19,7 +19,8 @@ from typing import List, Tuple
 
 from . import accounts
 from . import config as C
-from .install import SERVICES, is_hook_command, service_files, service_states, settings_path
+from .install import (HOME, PANEL_JOB, SERVICES, _panel_port, is_hook_command, launchd_status, panel_answers,
+                      service_files, service_states, settings_path)
 from .telegram import DEFAULT_API, Bot, TelegramError
 
 Result = Tuple[str, str]  # (level, message)
@@ -311,6 +312,14 @@ def check_extras(cfg: "C.Config") -> List[Result]:
             out.append(("ok", "engine nllb") if have else
                        ("warn", "engine nllb listed but ctranslate2/sentencepiece or nllb_model_dir is missing "
                         "(pip install 'harnessgram[nllb]' and set nllb_model_dir)"))
+    apns_configured = bool(cfg.apns_key_id and cfg.apns_team_id and cfg.apns_bundle_id)
+    if apns_configured:
+        have_apns = (importlib.util.find_spec("cryptography") is not None and
+                     importlib.util.find_spec("httpx") is not None and
+                     importlib.util.find_spec("h2") is not None)
+        out.append(("ok", "APNs Live Activity delivery is available") if have_apns else
+                   ("warn", "APNs Live Activity is configured but dependencies are missing. Fix: install "
+                    "'harnessgram[live-activity]'"))
     voice = [shutil.which("ffmpeg"), shutil.which("whisper-cli"), cfg.whisper_model]
     out.append(("ok", "voice notes: ffmpeg, whisper-cli and model configured") if all(voice) else
                ("ok", "voice notes are off (optional; to turn on: install ffmpeg and whisper.cpp, then set whisper_model in the config)"))
@@ -374,6 +383,34 @@ def check_running_code(stale=None) -> List[Result]:
             out.append(("warn", "the radio still runs the previous version; turn it off and on"))
         else:
             out.append(("warn", f"{name} still runs the previous version. Fix: run harnessgram install"))
+    return out
+
+
+def check_launch_agents() -> List[Result]:
+    """On macOS, catch launchd's terminal spawn failure and verify that the panel answers on loopback."""
+    if sys.platform != "darwin":
+        return []
+    jobs = [(s.name, s.label, service_files(s)[0], s.kind == "keepalive", False) for s in SERVICES]
+    panel_path = HOME / "Library" / "LaunchAgents" / f"{PANEL_JOB}.plist"
+    if panel_path.exists():
+        jobs.append(("panel", PANEL_JOB, panel_path, True, True))
+    out = []
+    for name, label, path, needs_pid, is_panel in jobs:
+        if not path.exists():
+            continue
+        state = launchd_status(label)
+        if state.spawn_failed:
+            out.append(("FAIL", f"LaunchAgent {name} is in spawn failed. Fix: harnessgram install"))
+        elif not state.loaded:
+            out.append(("FAIL", f"LaunchAgent {name} is not loaded. Fix: harnessgram install"))
+        elif needs_pid and state.pid is None:
+            out.append(("FAIL", f"LaunchAgent {name} has no running pid. Fix: harnessgram install"))
+        elif is_panel:
+            port = _panel_port(path)
+            out.append(("ok", f"panel answers locally on port {port}") if port and panel_answers(port) else
+                       ("FAIL", "panel does not answer locally. Fix: harnessgram install"))
+        else:
+            out.append(("ok", f"LaunchAgent {name} is healthy"))
     return out
 
 
@@ -454,7 +491,8 @@ def collect(offline: bool = False, bot=None, listener=None) -> list:
     except (SystemExit, OSError):
         results.append(("warn", "Could not read Claude Code settings to check the status line."))
     results += check_tmux() + check_claude()
-    results += (check_listener() if listener is None else list(listener)) + check_hooks() + check_running_code()
+    results += ((check_listener() if listener is None else list(listener)) + check_hooks() + check_running_code()
+                + check_launch_agents())
     if cfg is not None:
         if cfg.panel_funnel_port is not None:
             from . import panel_funnel

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import hashlib
 import os
 import re
@@ -26,7 +27,7 @@ def reset_time(body: str, stamp: datetime) -> datetime:
     used to fall back to +5 hours and promised a reset days too early)."""
     try:
         local = stamp.astimezone().replace(tzinfo=None)
-        match = re.search(r"resets\s+(?:([A-Z][a-z]{2})\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b",
+        match = re.search(r"resets\s+(?:at\s+)?(?:([A-Z][a-z]{2})\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b",
                           body, re.I)
         if not match:
             raise ValueError("no reset clock")
@@ -61,7 +62,7 @@ def _restarted_with_room(session: str, hit_at: float) -> bool:
         from . import accounts
         for rec in accounts.live_session_records():
             if rec.get("sessionId") == session and float(rec.get("startedAt") or 0) / 1000.0 > hit_at:
-                return not accounts.spent(accounts.account_for(session))
+                return accounts.has_headroom(accounts.account_for(session))
     except Exception:
         pass
     return False
@@ -75,7 +76,7 @@ def reset_early(session: str, hit_at: float) -> bool:
         from . import accounts
         name = accounts.origin_account(session)  # never account_for: its fallback is the default for NEW sessions
         reading = accounts._read(accounts.usage_path(name), {})
-        return accounts.iso_epoch(reading.get("at")) > hit_at and not accounts.spent(name)
+        return accounts.iso_epoch(reading.get("at")) > hit_at and accounts.has_headroom(name)
     except Exception:
         return False
 
@@ -307,9 +308,15 @@ def _parse_time(val) -> Optional[float]:
 
 
 def has_five_hour(u: dict) -> bool:
-    """False for an account with only a weekly window: its usage file names the 5-hour reset and leaves it
-    empty. A file without that key (older writers) is taken to have a 5-hour window."""
-    return not ("five_hour_resets" in u and not u["five_hour_resets"])
+    """A reported value, including zero, identifies a window; legacy zero placeholders do not."""
+    value = u.get("five_hour")
+    if not (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            and 0 <= value <= 1000):
+        return False
+    if "five_hour_present" in u:
+        return u["five_hour_present"] is True
+    return (
+        bool(u.get("five_hour_resets")) or value != 0 or "five_hour_resets" not in u)
 
 
 def big_plan(account: str) -> bool:
@@ -321,10 +328,8 @@ def big_plan(account: str) -> bool:
 
 
 def window_5h(u: dict, account: str) -> bool:
-    """Whether this account's usage shows a 5-hour number: never. Claude's and Codex's plans here have
-    only a weekly limit (plus a bank of resets); a 5-hour number misled every reader. The
-    recorded five_hour fields stay for the account logic; they are just not shown."""
-    return False
+    """Use the reported window, not a guess based on the account's plan name."""
+    return has_five_hour(u)
 
 
 def banked_resets(u: dict) -> Optional[int]:
@@ -377,7 +382,9 @@ def quota_line(lang: str, state_path: Optional[Path] = None, now: Optional[float
         return ""
     s = L.strings(lang)
     ago = s["minutes_ago"].format(n=int(age // 60)) if age < 3600 else s["hours_ago"].format(n=int(age // 3600))
-    weekly = int(u.get("weekly", 0))
+    if not isinstance(u.get("weekly"), (int, float)):
+        return ""
+    weekly = int(u["weekly"])
     warn = " ⚠️" if weekly >= 80 else ""
     # Weekly only, with its reset time and the banked resets when the record has them (no 5-hour window).
     reset_time_str = when(u.get("weekly_resets"), now=now_ts, lang=lang)
@@ -444,12 +451,15 @@ def claude_five_hour(session: Optional[str] = None, account: Optional[str] = Non
     (same file and freshness rule as quota_lines)."""
     try:
         import calendar
-        path = claude_usage_file(session=session, account=account)
+        acct = account or claude_account(session)
+        path = claude_usage_file(session=session, account=acct)
+        if Path(path) != state_dir() / f"claude-usage-{acct}.json":
+            return None  # the shared fallback file may belong to another account
         u = json.loads(Path(path).read_text(encoding="utf-8"))
         at_ts = _parse_time(u.get("at"))
         now_ts = now if now is not None else time.time()
         if at_ts is not None and now_ts - at_ts <= 12 * 3600:
-            if not window_5h(u, account or claude_account(session)):
+            if not window_5h(u, acct):
                 return None
             return float(u["five_hour"])
     except Exception:
@@ -554,8 +564,10 @@ def quota_rows(full: bool = False, session: Optional[str] = None, account: Optio
         if at_ts is not None and now_ts - at_ts <= 12 * 3600:
             base_label = translate_ui("quota_claude", lang=lang)
             who = base_label + ("" if acct == "main" else " " + acct)
-            weekly = float(u.get("weekly", 0))
-            rows.append(("week", who, weekly, u.get("weekly_resets")))  # weekly only: no 5-hour window
+            if Path(usage_file) == state_dir() / f"claude-usage-{acct}.json" and window_5h(u, acct):
+                rows.append(("5h", who, float(u["five_hour"]), u.get("five_hour_resets")))
+            if isinstance(u.get("weekly"), (int, float)):
+                rows.append(("week", who, float(u["weekly"]), u.get("weekly_resets")))
             if full:
                 for x in u.get("extra") or []:
                     if isinstance(x, dict) and isinstance(x.get("percent"), (int, float)):

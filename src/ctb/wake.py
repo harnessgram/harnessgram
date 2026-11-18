@@ -253,6 +253,9 @@ def hook_start(stdin_text: str) -> int:
                     panes.pop(previous, None)
                 panes[session] = pane
             write_private(path, json.dumps(dict(list(panes.items())[-200:])))
+        if source in ("clear", "resume", "startup"):
+            from . import credit_mode
+            credit_mode.session_changed(previous or os.environ.get("CTB_CREDIT_SESSION"), session, transcript)
         if source in ("clear", "resume") and load_config().ready:
             # the topic says so, and follows the window when the new conversation has no topic (direct.py)
             spawn(["direct-note", f"--session={session}", "--field=switch", f"--value={source}:{previous}"])
@@ -300,6 +303,9 @@ def wait_for_message(data: dict, inbox: Optional[Inbox] = None, poll: float = PO
     tried_cold = False
     deadline = time.time() + max_wait
     while time.time() < deadline:
+        from . import credit_mode
+        if credit_mode.blocked(session):
+            return 0, ""  # no cold compaction or Telegram turn after consent/budget expires
         try:
             if marker.read_text() != token:
                 return 0, ""
@@ -317,13 +323,19 @@ def wait_for_message(data: dict, inbox: Optional[Inbox] = None, poll: float = PO
                     held = before_take(inbox, session, until=until)
                 except Exception:
                     held = False
+                if credit_mode.blocked(session):
+                    return 0, ""  # quota/budget can change during the wait/compaction
+                lease = delivery_lease(data, "wake")
                 msgs = inbox.take(session, only=(lambda i: False) if held else None,
-                                  lease=delivery_lease(data, "wake"), until=until)
+                                  lease=lease, until=until)
             except OSError:
                 msgs = []  # the lock is busy: try again on the next look
             if msgs:
+                if credit_mode.blocked(session):
+                    inbox.settle(session, lease["nonce"], "lost", until=until)
+                    return 0, ""
                 spawn_delivered(msgs)  # 👌 here too: most messages reach an idle session through this path
-                return 2, delivery_text(msgs)
+                return 2, delivery_text(msgs, session if not data.get("agent_id") else "")
         try:
             if os.path.getsize(transcript) > baseline + GROWTH:
                 return 0, ""  # working again; its next Stop starts a new waiter

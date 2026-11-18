@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot
+from conftest import GOOD_TOKEN, FakeBot, signed_in
 from ctb import accounts, dialogs, inbox as I, recover, usage
 from ctb.config import Config
 
@@ -67,6 +67,7 @@ class ExitPane:
 
 @pytest.fixture
 def move(monkeypatch, tmp_path):
+    signed_in("main", "small")
     accounts.add("small")
     accounts.record(SID, "main")
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
@@ -120,6 +121,22 @@ def test_a_manual_move_stops_the_tasks_with_option_one_and_moves(monkeypatch, mo
     assert I.t("account_move_bg_stopped", lang="en") in said
     assert I.bg_stopped(SID) == ["sleep 600", "sleep 601"]
     assert not any("refused" in l or "did not exit" in l for l in move.log)
+
+
+@pytest.mark.parametrize("fixture,stopped", [
+    ("exit-dialog-real.txt", []),
+    ("exit-dialog-scheduled-mixed.txt", ["sleep 600", "Inspect the example report"]),
+])
+def test_a_move_with_scheduled_tasks_exits_and_resumes(monkeypatch, move, fixture, stopped):
+    monkeypatch.setattr(f"{__name__}.DIALOG", (FIX.parent / fixture).read_text())
+    pane = ExitPane()
+    ok, said = run(monkeypatch, pane)
+    keys = pane.keys()
+    assert ok is True and accounts.account_for(SID) == "small"
+    assert keys.count("1") == 1 and "2" not in keys and "3" not in keys
+    assert any("--resume " + SID in k for k in keys)
+    assert I.bg_stopped(SID) == stopped  # cron survives; it must not be recreated by the continue nudge
+    assert (I.t("account_move_bg_stopped", lang="en") in said) is bool(stopped)
 
 
 def test_a_digit_that_only_moves_the_cursor_is_confirmed_with_enter(monkeypatch, move):
@@ -220,7 +237,7 @@ def test_replayed_messages_do_not_hide_the_stopped_commands(monkeypatch, move):
     monkeypatch.setattr(I, "_prompt_state", lambda pane: "ready")
     monkeypatch.setattr(I, "_write_pending", lambda *a: None)
     monkeypatch.setattr(I, "_nudge_without_waiter", lambda *a, **k: pytest.fail("replay path taken"))
-    monkeypatch.setattr("ctb.autopilot.type_into", lambda pane, text: typed.append(text))
+    monkeypatch.setattr("ctb.autopilot.type_into", lambda pane, text, session: typed.append(text))
     monkeypatch.setattr(usage, "prompt_since", lambda *a, **k: True)
     assert I._send_resume(SID, "%1", {"replayed": 2, "at": 0}) == "taken"
     assert typed and "./wait.sh" in typed[0]

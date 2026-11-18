@@ -1,7 +1,10 @@
-"""The YouTube mirror edition reads the home radio's HLS audio, so while an episode is on the air it must hold:
-the episode is never part of what the mirror carries."""
+"""The mirror reads speech-only public HLS; private episodes and music must never reach that source."""
+import array
+import io
 import os
 import time
+
+import pytest
 
 from ctb import radio, radio_youtube as Y
 from test_radio_youtube_mirror import isolated_channel, live_home, mirror_cfg  # noqa: F401 (the autouse fixture)
@@ -11,14 +14,44 @@ def mark():
     (radio.folder() / radio.PRIVATE_AUDIO).write_text("")
 
 
-def test_the_mirror_is_ready_only_while_no_episode_is_audible():
+@pytest.mark.parametrize("slot", ["show", "background"])
+def test_audible_private_audio_never_reaches_the_mirrors_public_source(monkeypatch, slot):
+    from ctb import radio_music
+    radio_music.set_enabled(True)
     c = mirror_cfg()
-    live_home()
+    monkeypatch.setattr(radio, "make_bed", lambda *args: bytes(4))
+    station = radio.Station(c)  # construct only: no jobs, encoders or streams
+    private, public = station.mixer, station.group_mixer
+    assert station.player.mixer is private and private.public is public
+    path = live_home()
+    assert Y.mirror_playlist() == path == radio.folder() / "public-hls" / "live.m3u8"
     assert Y.mirror_ready(c) is True
+
+    audio = array.array("h", [10000] * radio.FRAME).tobytes()
+    setattr(private, slot, io.BytesIO(audio * 100))
+    private.background_enabled = True
     mark()
-    assert Y.mirror_ready(c) is False          # an episode is on the air: the mirror holds
+    assert private.next() == audio             # the episode/music really is audible privately
+    assert public.next() == bytes(len(audio))  # the mirror's source contains none of it
+    assert Y.mirror_ready(c) is True            # speech-only HLS can continue during private playback
+
+    speech = array.array("h", [2000] * radio.FRAME).tobytes()
+    private.add(speech)
+    heard_speech = False
+    for _ in range(100):
+        frame = public.next()
+        assert set(array.array("h", frame)) <= {0, 2000}
+        heard_speech |= frame == speech
+    assert heard_speech                         # isolation preserves station speech
     (radio.folder() / radio.PRIVATE_AUDIO).unlink()
-    assert Y.mirror_ready(c) is True           # and carries on with the radio's own talk afterwards
+    assert Y.mirror_ready(c) is True
+
+    # A healthy private playlist must never substitute for a missing public source, even without a marker.
+    private_hls = radio.prepare_hls()
+    (private_hls / "segment-123.ts").write_bytes(audio)
+    (private_hls / "live.m3u8").write_text(path.read_text())
+    path.unlink()
+    assert Y.mirror_ready(c) is False
 
 
 def test_a_marker_left_by_a_dead_radio_job_does_not_hold_the_mirror_for_ever():

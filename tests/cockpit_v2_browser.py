@@ -33,20 +33,40 @@ def sample_state(lang="he"):
                                        detail=("המלצה: " if he else "Recommendation: ") + (
                                            "להמשיך לפי התכנון שהוכן." if he else "Continue with the prepared plan."),
                                        yes="כן" if he else "Yes", no="לא" if he else "No", age=900 if i < 2 else 400000,
-                                       old=i == 2, stale="old" if i == 2 else "", url=""))
+                                       old=i == 2, stale="old" if i == 2 else "", url="",
+                                       link=f"https://t.me/c/123/7/{40 + i}"))
     titles = ["לבדוק את נוסח ההודעה", "להכין חומרי לימוד", "לעדכן את התכנון"] if he else [
         "Review the message", "Prepare learning materials", "Update the plan"]
     for i, title in enumerate(titles):
         state["requests"].append(dict(project=names[i], id=i + 1, title=title, status="open", wait="team",
-                                      age=3600, updated=now, older=False, note="", steps=[]))
+                                      age=3600, updated=now, idle=0, long=False, older=False, note="", steps=[]))
     state["requests"].append(dict(project=names[0], id=4, title="בקשה ישנה" if he else "Older request", status="open",
-                                  wait="owner", age=400000, updated=now - 400000, older=True, note="", steps=[]))
+                                  wait="owner", age=400000, updated=now - 400000, idle=400000, long=True, older=True, note="", steps=[]))
+    state["requests"].append(dict(project=names[1], id=5, title="בקשה שהושלמה" if he else "Finished request", status="done",
+                                  wait="team", age=200000, updated=now - 200000, idle=200000, long=False, older=False,
+                                  note="", steps=[]))
     state["reminders"] = [dict(text="סקירת שבוע עם הצוות" if he else "Weekly team review", due="10:00", age=900,
                                topic=names[0], old=False, ref="12345678:1", url=""),
                           dict(text="תזכורת ישנה" if he else "Older reminder", due="", age=1500000,
                                topic=names[0], old=True, ref="12345678:2", url="")]
     cfg = SimpleNamespace(projects=[], brief={"project_art": dict(zip(names, ["plane", "book", "books", "visor"]))})
     state["cockpit_v2"] = cockpit_v2.presentation(cfg, state, entries, now)
+    return state
+
+
+def needs_state(lang="he"):
+    """All four waiting sources exceed the five-row preview, with unrelated requests beside them."""
+    state = sample_state(lang)
+    state["decisions"] = [dict(state["decisions"][0], id=f"{i:016x}") for i in range(1, 7)]
+    base = state["cards"][0]
+    state["cards"] += [dict(base, id=f"{i:016x}", kind="ask" if i % 2 else "choice",
+                            title="לאשר את הכיוון?" if lang == "he" else "Approve this direction?",
+                            options=["כן", "לא"] if lang == "he" else ["Yes", "No"])
+                       for i in range(20, 27)]
+    state["reminders"] = [dict(state["reminders"][0], ref=f"12345678:{i}", old=i % 2 == 0)
+                          for i in range(1, 9)]
+    state["requests"] += [dict(state["requests"][0], id=i, wait="owner") for i in range(10, 19)]
+    state["waiting_count"] = 30  # six decisions + seven asks/choices + eight reminders + nine owner requests
     return state
 
 
@@ -345,7 +365,7 @@ def addons_sample():
     return addons.view(Config())
 
 
-def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge=None, schedule=None, addons=None, family=None, height=844):
+def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge=None, schedule=None, addons=None, family=None, height=844, start=""):
     state = copy.deepcopy(state if state is not None else sample_state(lang))
     calls = []
     kview = knowledge if knowledge is not None else knowledge_sample(lang)
@@ -385,13 +405,16 @@ def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge
             request.fulfill(json={"enabled": True, "on": True, "token": "fixture", "expires": int(time.time()) + 3600})
         elif path.startswith("/api/"):
             body = request.request.post_data_json
-            if path not in ("/api/schedule-view", "/api/family-view"):  # the cards' own reads are not user actions
+            if path not in ("/api/schedule-view", "/api/family-view", "/api/request-detail"):  # reads, not user actions
                 calls.append((path, body))
             if path == "/api/setting":
                 state["settings"][body["name"]] = body["value"]
                 if body["name"] == "ui_v2":
                     state["ui_v2_enabled"] = body["value"] in ("on", "preview")
                 request.fulfill(json={"ok": True, "settings": state["settings"]})
+            elif path == "/api/request-detail":
+                row = next(r for r in state["requests"] if (r["project"], r["id"]) == (body["project"], body["id"]))
+                request.fulfill(json={"ok": True, "title": row["title"], "note": "", "steps": []})
             elif path == "/api/request":
                 state["requests"] = [r for r in state["requests"] if (r["project"], r["id"]) != (body["project"], body["id"])]
                 request.fulfill(json={"ok": True})
@@ -432,9 +455,19 @@ def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge
     page.route("**/*", route)
     page.knowledge = kview
     page.addons = aview
-    page.goto("http://127.0.0.1/")
+    page.goto("http://127.0.0.1/" + ("?tgWebAppStartParam=" + start if start else ""))
     page.locator(".v2-needs" if state.get("ui_v2_enabled") else "#tabs .tab").first.wait_for()
     return ctx, page, calls, errors, state
+
+
+def open_first_request(page):
+    """Open "Agents are on it" and its first row; the same path an owner takes."""
+    fold = page.locator('[data-v2-section="requests"] [data-block="requests-agents"]')
+    fold.locator(":scope > .compact-toggle").click()
+    page.wait_for_timeout(700)
+    row = fold.locator(".request-row").first
+    row.locator(".request-toggle").click()
+    return row
 
 
 def assert_contract(page, state):
@@ -451,10 +484,18 @@ def assert_contract(page, state):
         row = zone.locator('[data-v2-decision="%s"]' % decision["id"])
         assert row.locator('[data-v2-answer="yes"]').is_visible()
         assert row.locator('[data-v2-answer="no"]').is_visible()
-    for actions in page.locator('[data-v2-section="requests"] .request-actions').all():
+    for actions in page.locator('[data-v2-section="requests"] [data-block="requests-agents"] .request-actions').all():
         assert actions.locator("button").count() == 3
-        for button in actions.locator("button").all():
-            assert button.is_visible() and button.bounding_box()["height"] >= 44
+    # Items untouched for a week fold away and offer keep-open and drop instead.
+    for actions in page.locator('[data-v2-section="dormant"] .request-actions').all():
+        assert actions.locator("button").count() == 2
+    # Rows are compact lines; a tap opens one and shows its three buttons at a finger-sized height.
+    row = open_first_request(page)
+    for button in page.locator('[data-v2-section="requests"] .request-row.open .request-actions button').all():
+        assert button.is_visible() and button.bounding_box()["height"] >= 44
+    row.locator(".request-toggle").click()  # back out, so the way-out button closes the app and not a layer
+    page.locator('[data-v2-section="requests"] [data-block="requests-agents"] > .compact-toggle').click()
+    page.wait_for_timeout(700)
     assert page.locator('#tabs [role="tab"]').count() == 4
     assert page.evaluate("document.documentElement.scrollWidth <= 390")
     assert page.locator("html").get_attribute("dir") == ("rtl" if page.locator("html").get_attribute("lang") == "he" else "ltr")

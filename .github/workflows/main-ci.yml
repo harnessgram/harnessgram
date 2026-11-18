@@ -1,0 +1,75 @@
+name: Main CI and revert proposal
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+# A newer push to main tests everything an older queued run would; only the newest run waits for the shared runner.
+concurrency:
+  group: main-ci
+  cancel-in-progress: true
+jobs:
+  # One job on purpose: the shared runner admits every job separately (up to 30 minutes each), so a run waits once.
+  ci:
+    runs-on: [self-hosted, Linux, ARM64, lingoline-quality]
+    timeout-minutes: 90
+    outputs:
+      skip: ${{ steps.commit.outputs.skip }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: {persist-credentials: false}
+      - id: commit
+        name: Detect an automated revert
+        run: |
+          subject="$(git log -1 --format=%s)"
+          if printf '%s\n' "$subject" | grep -Eq '^Revert [0-9a-f]{7}: main went red$'; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: astral-sh/setup-uv@4959332f0f014c5280e7eac8b70c90cb574c9f9b # v6.6.0
+        if: steps.commit.outputs.skip != 'true'
+        with: {python-version: "3.12"}
+      - name: Tests
+        if: steps.commit.outputs.skip != 'true'
+        env: {CTB_SKIP_BENCH: "1"}
+        run: |
+          command -v tmux >/dev/null
+          uv run -q --with pytest --with pytest-timeout --with pytest-xdist --with pillow --with "cryptography>=42" --with-editable . python -m pytest -q --timeout 20 -n auto tests --ignore=tests/test_live.py
+      - name: Package
+        if: steps.commit.outputs.skip != 'true'
+        run: |
+          uv build
+          uvx twine check dist/*
+          uv venv "$RUNNER_TEMP/wheel-check"
+          uv pip install --python "$RUNNER_TEMP/wheel-check/bin/python" dist/*.whl
+          "$RUNNER_TEMP/wheel-check/bin/harnessgram" --version
+          "$RUNNER_TEMP/wheel-check/bin/python" -c "import importlib.resources as r; assert r.files('ctb.studio').joinpath('app.js').is_file()"
+  propose-revert:
+    needs: ci
+    if: always() && needs.ci.result == 'failure' && needs.ci.outputs.skip == 'false'
+    runs-on: [self-hosted, Linux, ARM64, lingoline-quality]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: {fetch-depth: 0}
+      - name: Revert the failing commit and open a draft PR
+        run: |
+          short_sha="${HEAD_SHA:0:7}"
+          branch="ci-revert/${HEAD_SHA}"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git revert --no-edit "$HEAD_SHA"
+          git commit --amend -m "Revert ${short_sha}: main went red"
+          git push origin "$branch"
+          gh label create ci-revert --color B60205 --description 'Proposed revert for a red main branch' --force
+          pr_url="$(gh pr create --draft --base main --head "$branch" --title "Revert ${short_sha}: main went red" --label ci-revert --body "Main CI failed after commit \`${HEAD_SHA}\`. This draft reverts that commit for review; it will not be merged automatically.")"
+          original_pr="$(gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" --jq 'map(select(.merged_at != null)) | first | .number // empty')"
+          if [ -n "$original_pr" ]; then
+            gh pr comment "$original_pr" --body "Main CI went red after merge. A draft revert is available: ${pr_url}"
+          fi

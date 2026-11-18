@@ -6,7 +6,7 @@ import json
 from conftest import GOOD_TOKEN, FakeBot
 from ctb import agents_card as AC, hooks as H, inbox as I, mirror as M
 from ctb.agents_topic import AGENTS_TOPIC
-from ctb.config import Config, set_setting, state_dir
+from ctb.config import Config, set_live_activity_in_cockpit, set_setting, state_dir
 from ctb.telegram import TelegramError
 from ctb.topics import TopicMap
 
@@ -87,6 +87,18 @@ def test_collapse_to_a_summary_line_keeps_buttons_and_may_notify():
     assert [b["callback_data"] for b in sent[1]["reply_markup"]["inline_keyboard"][0]] == ["agr:1:0", "agr:1:1"]
     assert [b["text"] for b in sent[1]["reply_markup"]["inline_keyboard"][0]] == ["📄 Full result 1", "📄 Full result 2"]
     assert any(p["message_id"] == 501 for p in bot.methods("deleteMessage"))  # the quiet card is replaced
+
+
+def test_cockpit_mode_still_announces_collapsed_card_with_full_result_buttons(monkeypatch):
+    monkeypatch.setenv("CTB_LIVE_ACTIVITY_COCKPIT", "1")
+    set_live_activity_in_cockpit(True)
+    bot = Bot()
+    start(bot, "a1", T0)
+    finish(bot, "a1", T0 + 10)
+    sent = bot.methods("sendMessage")
+    assert len(sent) == 1 and "disable_notification" not in sent[0]
+    assert sent[0]["text"].startswith("🤖 1 agent finished")
+    assert sent[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "agr:1:0"
 
 
 def test_new_agent_after_a_collapse_starts_a_fresh_card():

@@ -400,6 +400,16 @@ def test_scan_reads_only_complete_lines(tmp_path):
     assert index.state(str(path), "abcd1234abcd1234")[0] == "consumed"
 
 
+def test_leased_mcp_only_delivery_is_proven(tmp_path):
+    nonce = "abcd1234abcd1234"
+    path = tmp_path / "mcp.jsonl"
+    prompt = framing.mcp_fenced(["connector suggestion"], nonce)
+    path.write_text(json.dumps({"type": "user", "message": {"content": prompt}}) + "\n")
+    index = SW.TranscriptIndex()
+    index.new_pass()
+    assert index.state(str(path), nonce) == ("consumed", False)
+
+
 def test_settle_lost_skips_items_already_queued_again(world):
     box = world["box"]
     box.put("s", owner_msg("dup", 99))

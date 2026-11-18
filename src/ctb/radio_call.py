@@ -20,8 +20,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 BUSY = "the group already has another live stream or voice chat"
 
@@ -52,13 +54,14 @@ def _channel_id(chat: int) -> int:
 
 async def _run(req: dict) -> dict:
     from telethon import TelegramClient, functions
+    from telethon.errors import FloodWaitError
     from telethon.sessions import StringSession
-    from telethon.tl.types import InputGroupCall, PeerChannel
+    from telethon.tl.types import Channel, InputGroupCall, InputPeerChannel, PeerChannel
 
     action, chat = req.get("action"), req.get("chat")
-    if action not in ("ensure", "end", "status"):
+    if action not in ("ensure", "end", "status", "read_channels"):
         return {"ok": False, "error": "unknown action"}
-    if type(chat) is not int or chat not in (req.get("allowed") or []):
+    if action != "read_channels" and (type(chat) is not int or chat not in (req.get("allowed") or [])):
         return {"ok": False, "error": "chat not allowed"}
     creds = _secret(req.get("api_command"))
     api_id, _, api_hash = creds.partition(":") if ":" in creds else creds.partition(" ")
@@ -70,6 +73,109 @@ async def _run(req: dict) -> dict:
     try:
         if not await client.is_user_authorized():
             return {"ok": False, "error": "account not authorized"}
+        if action == "read_channels":
+            channels = req.get("channels") or []
+            since = req.get("since")
+            limit = req.get("limit")
+            if (not isinstance(channels, list) or not channels or len(channels) > 20 or
+                    not all(isinstance(value, str) and value.strip() for value in channels) or
+                    type(since) not in (int, float) or type(limit) is not int or not 1 <= limit <= 50):
+                return {"ok": False, "error": "bad read request"}
+            after = datetime.fromtimestamp(float(since), timezone.utc)
+            messages = []
+            refused = 0
+            cache_path = Path(req.get("cache_file", ""))
+            cache = {}
+            try:
+                if cache_path.is_absolute():
+                    loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        cache = {k: {"id": int(v["id"]), "access_hash": int(v["access_hash"])}
+                                 for k, v in loaded.items() if isinstance(k, str) and isinstance(v, dict)
+                                 and type(v.get("id")) is int and type(v.get("access_hash")) is int}
+            except (OSError, ValueError, TypeError):
+                cache = {}
+            configured_values = {value.strip() for value in channels}
+            cache = {key: value for key, value in cache.items() if key in configured_values}
+
+            async def read_posts(configured, value, entity):
+                full_entity = await client.get_entity(entity)
+                if not isinstance(full_entity, Channel) or not bool(getattr(full_entity, "broadcast", False)):
+                    return False
+                access_hash = getattr(entity, "access_hash", None)
+                if type(access_hash) is not int:
+                    access_hash = getattr(full_entity, "access_hash", None)
+                if type(access_hash) is not int:
+                    return False
+                cache[value] = {"id": int(full_entity.id), "access_hash": access_hash}
+                title = str(getattr(full_entity, "title", "") or "")
+                async for post in client.iter_messages(entity, limit=limit, offset_date=None):
+                    published = getattr(post, "date", None)
+                    if published is None or published < after:
+                        break
+                    messages.append({"channel_id": configured, "channel_title": title,
+                                     "text": str(getattr(post, "message", "") or ""),
+                                     "published_at": published.timestamp()})
+                return True
+
+            for configured in channels:
+                try:
+                    value = configured.strip()
+                    numeric = value.lstrip("-").isdigit()
+                    record = cache.get(value)
+                    entity = InputPeerChannel(record["id"], record["access_hash"]) if record else None
+                    if entity is not None:
+                        try:
+                            await client.get_entity(entity)
+                        except Exception:
+                            cache.pop(value, None)
+                            entity = None
+                    if entity is None and numeric:
+                        number = int(value)
+                        number = int(str(number)[4:]) if str(number).startswith("-100") else abs(number)
+                        async for dialog in client.iter_dialogs(limit=500):
+                            candidate = getattr(dialog, "entity", None)
+                            if (isinstance(candidate, Channel) and candidate.id == number and
+                                    bool(getattr(candidate, "broadcast", False)) and
+                                    type(getattr(candidate, "access_hash", None)) is int):
+                                entity = InputPeerChannel(candidate.id, candidate.access_hash)
+                                break
+                        if entity is None:
+                            refused += 1
+                            continue
+                    elif entity is None:
+                        entity = await client.get_input_entity(value)
+                    if not await read_posts(configured, value, entity):
+                        refused += 1
+                        continue
+                except FloodWaitError:
+                    return {"ok": False, "channels": len(channels), "posts": len(messages),
+                            "refused": refused, "errors": 1}
+                except Exception:
+                    if record and not numeric:
+                        cache.pop(value, None)
+                        try:
+                            entity = await client.get_input_entity(value)
+                            if await read_posts(configured, value, entity):
+                                continue
+                        except FloodWaitError:
+                            return {"ok": False, "channels": len(channels), "posts": len(messages),
+                                    "refused": refused, "errors": 1}
+                        except Exception:
+                            pass
+                    refused += 1
+                    continue
+            try:
+                if cache_path.is_absolute():
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    fd = os.open(str(cache_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                        json.dump(cache, stream, sort_keys=True)
+                    os.chmod(cache_path, 0o600)
+            except OSError:
+                pass
+            return {"ok": True, "messages": messages, "channels": len(channels), "posts": len(messages),
+                    "refused": refused}
         peer = await client.get_input_entity(PeerChannel(_channel_id(chat)))
         full = await client(functions.channels.GetFullChannelRequest(peer))
         active = full.full_chat.call

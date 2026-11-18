@@ -4,7 +4,7 @@ import random
 import threading
 import time
 
-from . import alerts, cards, decisions, panel_pin, sensitive_buttons
+from . import alerts, cards, decisions, menus, panel_pin, sensitive_buttons
 from .i18n import t
 from .telegram import Bot, TelegramError
 
@@ -15,7 +15,7 @@ def url(cfg, bot, ident):
     name = panel_pin.known_name(cfg) or panel_pin._bot_name(cfg, bot)
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]{3,64}", name):
         return ""
-    return f"https://t.me/{name}?startapp=q{ident}"
+    return panel_pin.app_url(cfg, "q" + ident)
 
 
 def _store(rec):
@@ -67,6 +67,11 @@ def update(cfg, rec, opened, bot=None):
         if store is decisions and sensitive_buttons.decision_sensitive(current):
             label = sensitive_buttons.mark_title(label)  # the app asks for Face ID before it opens a sensitive answer
         markup = {"inline_keyboard": [[{"text": label, "url": link}]]} if link else {"inline_keyboard": []}
+        if current.get("action") == "emergency_credit":
+            text = current["title"]
+            markup = {"inline_keyboard": [[
+                {"text": current["yes"], "callback_data": "cr:" + ident + ":yes"},
+                {"text": current["no"], "callback_data": "cr:" + ident + ":no"}], menus.close_row(lang)]}
         # Re-read after link lookup, which can itself contact Telegram.
         with store._locked() as path:
             data = store._load(path)
@@ -78,8 +83,21 @@ def update(cfg, rec, opened, bot=None):
                     store._save(path, data)
                 return False
         try:
-            sent = bot.call("sendMessage", {"chat_id": current["chat"], "message_thread_id": current["thread"],
-                                          "text": text, "reply_markup": markup}, timeout=5) or {}
+            params = {"chat_id": current["chat"], "message_thread_id": current["thread"],
+                      "text": text, "reply_markup": markup}
+            try:
+                sent = bot.call("sendMessage", params, timeout=5) or {}
+            except TelegramError as exc:
+                if current.get("action") != "emergency_credit" or "topic_closed" not in exc.description.lower():
+                    raise
+                # Credit offers are essential even for muted tasks; retry only in
+                # this decision's exact topic, never move consent to another one.
+                from . import sessions_menu
+                closed = sessions_menu.closed_marks().get(current["session"])
+                bot.call("reopenForumTopic", {"chat_id": current["chat"],
+                                              "message_thread_id": current["thread"]}, timeout=5)
+                sessions_menu.forget_reopened(cfg, current["session"], current["chat"], current["thread"], closed)
+                sent = bot.call("sendMessage", params, timeout=5) or {}
         except Exception:
             with store._locked() as path:
                 data = store._load(path)
@@ -96,6 +114,9 @@ def update(cfg, rec, opened, bot=None):
                 return False
             if type(message) is int and message > 0:
                 current["notice_message"] = message
+                # Public record field used by every owner surface to return to
+                # this exact question, rather than merely opening its topic.
+                current["msg"] = message
             else:
                 current.pop("notice_message", None)
             closed = current["state"] != "open"

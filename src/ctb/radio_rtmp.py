@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import threading
 import time
+from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -29,6 +33,97 @@ MAX_QUEUED_TAGS = 4000  # about 30 s of radio media; the reader blocks (ffmpeg's
 PLAYER_QUEUE = 20000  # FLV is read tag by tag (~180 small reads/s): items, not seconds
 PLAYER_BYTES = 8 << 20  # the real bound: ~3 minutes of radio waiting for a stuck segmenter
 PLAYER_RESTART_SECONDS = 60
+PLAYER_STALL_SECONDS = 15
+PLAYER_RESTART_LIMIT = 3
+PLAYER_RESTART_WINDOW = 300
+PLAYER_TEMP_SECONDS = 5
+PLAYER_FILE_LIMIT = 4096
+PLAYER_CLEANUP_LIMIT = 128
+PLAYER_WINDOW_SEGMENTS = 15  # ~30 s advertised; retain removed segments for another full window below
+
+
+@contextmanager
+def _player_directory(path):
+    """Anchor probes/unlinks to this directory, refusing a symlink as the directory itself."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _player_files(fd):
+    files = {}
+    with os.scandir(fd) as entries:
+        for n, entry in enumerate(entries):
+            if n >= PLAYER_FILE_LIMIT:
+                raise OSError("player directory scan limit")
+            if not re.fullmatch(r"live\.m3u8|segment-\d+\.ts(?:\.tmp)?", entry.name):
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:  # a segment may be renamed while scanning
+                continue
+            if stat.S_ISREG(st.st_mode):
+                files[entry.name] = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+    return files
+
+
+def retire_player_playlist(path):
+    """Mark the kept playlist stale (mtime 0) so readers that check freshness never replay aired audio.
+
+    The playlist stays on disk for a reader that already has it open; the next writer replaces it atomically.
+    """
+    try:
+        with _player_directory(path) as fd:
+            os.utime("live.m3u8", (0, 0), dir_fd=fd, follow_symlinks=False)
+    except OSError:
+        pass
+
+
+def cleanup_player_hls(path, orphan_temps=None):
+    """Bounded cleanup; temp identities are captured only after their writer has exited.
+
+    The live writer uses epoch-based new names. Never remove one of its temps, a changed orphan,
+    a symlink, or anything outside the opened HLS directory. Recent orphans age out on the next pass.
+    """
+    now, removed = time.time(), 0
+    try:
+        with _player_directory(path) as fd:
+            # A reader may still have the last playlist open while a replacement segmenter starts.  Keep every
+            # segment named by that playlist until ffmpeg atomically renames the next one into place; otherwise a
+            # home-radio restart can leave the mirror with a valid playlist whose media was pruned underneath it.
+            protected = set()
+            try:
+                playlist_fd = os.open("live.m3u8", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    body = os.read(playlist_fd, 1 << 20).decode("utf-8")
+                finally:
+                    os.close(playlist_fd)
+                protected = {line.strip() for line in body.splitlines()
+                             if re.fullmatch(r"segment-\d+\.ts", line.strip())}
+            except (OSError, UnicodeError):
+                pass
+            for name, stamp in _player_files(fd).items():
+                temporary = name.endswith(".ts.tmp")
+                if temporary and (orphan_temps or {}).get(name) != stamp:
+                    continue
+                age = PLAYER_TEMP_SECONDS if temporary else 120
+                if name in protected or not (temporary or name.endswith(".ts")) or now - stamp[2] / 1e9 <= age:
+                    continue
+                try:
+                    # Recheck identity before unlinking; unlink itself never follows a symlink.
+                    st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size) != stamp:
+                        continue
+                    os.unlink(name, dir_fd=fd)
+                    removed += 1
+                    if removed >= PLAYER_CLEANUP_LIMIT:
+                        break
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 class FlvTracker:
@@ -120,32 +215,64 @@ class PlayerSegmenter:
         self.dropped = 0
         self.queued = 0  # bytes waiting for the writer (approximate across threads; only a bound)
         self._last_start = float("-inf")
+        self._restarts = deque()
+        self._stall_restart = False
+        self._retired = None
+        self._orphan_temps = {}
         self._lock = threading.Lock()
         self._warned = False
         self.flv = FlvTracker()
         self._resync = False   # a segmenter that starts midway is given the stream's start and then a whole tag
         self._started_once = False
+        self._output_stamp = None
+        self._progress_at = 0.0
+        self._input_since = None
+        self._input_at = float("-inf")
+        self._health_at = float("-inf")
+        self._closed = False
 
     @staticmethod
     def args() -> List[str]:
         return ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-f", "flv", "-i", "pipe:0",
-                "-map", "0:a", "-c:a", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "6",
-                "-hls_delete_threshold", "1", "-hls_start_number_source", "epoch_us", "-hls_flags",
+                "-map", "0:a", "-c:a", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", str(PLAYER_WINDOW_SEGMENTS),
+                # RFC 8216 6.2.2: removed segments outlive the longest playlist plus one segment.
+                "-hls_delete_threshold", str(PLAYER_WINDOW_SEGMENTS + 2), "-hls_start_number_source", "epoch_us", "-hls_flags",
                 "delete_segments+temp_file+discont_start", "-hls_segment_filename", "segment-%d.ts",
                 "live.m3u8"]
 
     def _start(self) -> bool:
         now = time.monotonic()
         with self._lock:
+            if self._closed:
+                return False
             if self.process is not None and self.process.poll() is None:
                 return True
-            if now - self._last_start < PLAYER_RESTART_SECONDS:
+            # kill() is asynchronous: do not overlap writers or collect their temps until exit is confirmed.
+            if self._retired is not None:
+                if self._retired.poll() is None:
+                    return False
+                self._retired = None
+            while self._restarts and now - self._restarts[0] >= PLAYER_RESTART_WINDOW:
+                self._restarts.popleft()
+            if self._started_once and len(self._restarts) >= PLAYER_RESTART_LIMIT:
+                return False
+            if now - self._last_start < PLAYER_RESTART_SECONDS and not self._stall_restart:
                 return False
             self._last_start = now
+            self._stall_restart = False  # one cooldown bypass per confirmed stall, never a retry loop
+            if self._started_once:
+                self._restarts.append(now)
+            self._progress_at = now
+            self._input_since = None
             try:
                 self.path.mkdir(mode=0o700, parents=True, exist_ok=True)
                 if self.path.is_symlink():
                     raise OSError("linked HLS directory")
+                with _player_directory(self.path) as fd:
+                    self._orphan_temps = {name: stamp for name, stamp in _player_files(fd).items()
+                                          if name.endswith(".ts.tmp")}
+                cleanup_player_hls(self.path, self._orphan_temps)
+                self._output_stamp = self._stamp()
                 self.process = subprocess.Popen(self.args(), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                                 stderr=subprocess.DEVNULL, cwd=self.path)
             except OSError:
@@ -168,13 +295,52 @@ class PlayerSegmenter:
             self._warned = True
             self.report("radio player: output stalled or failed; continuing the broadcast")
 
+    def _stamp(self):
+        try:
+            with _player_directory(self.path) as fd:
+                return _player_files(fd)
+        except OSError:
+            return None
+
+    def cleanup(self) -> None:
+        cleanup_player_hls(self.path, self._orphan_temps)
+
+    def check_health(self) -> None:
+        """Retire only with recent input and a full window without playlist OR segment write progress.
+
+        A confirmed stall grants one fast restart, capped at three restarts per five minutes.
+        This never reconnects the publisher or changes its output directory; filesystem worker only.
+        """
+        now = time.monotonic()
+        if now - self._health_at < 1:
+            return
+        self._health_at = now
+        process = self.process
+        if process is None or process.poll() is not None:
+            return
+        stamp = self._stamp()
+        if stamp is None:  # a failed probe is not proof of a stalled writer
+            self._progress_at, self._input_since = now, None
+            return
+        if stamp != self._output_stamp:
+            self._output_stamp, self._progress_at = stamp, now
+            self._input_since = None
+        if (self._input_since is not None
+                and now - max(self._progress_at, self._input_since) >= PLAYER_STALL_SECONDS
+                and now - self._input_at < PLAYER_STALL_SECONDS):
+            self._disable(expected=process, stalled=True)
+
     def offer(self, data: bytes) -> None:
-        if not data:
+        if not data or self._closed:
             return
         first = self.flv.feed(data)
         if not self._start():
             self._resync = True
             return
+        offered_at = time.monotonic()
+        if self._input_since is None or offered_at - self._input_at >= PLAYER_STALL_SECONDS:
+            self._input_since = offered_at  # returning input gets a full window to produce output
+        self._input_at = offered_at
         head = b""
         if self._resync:
             # A restarted segmenter must not receive bytes from the middle of a tag, or without the stream's header:
@@ -193,10 +359,21 @@ class PlayerSegmenter:
             self.dropped += 1
             self._disable()  # kill is non-blocking; the Telegram reader proceeds immediately
 
-    def _disable(self, warn: bool = True) -> None:
+    def _disable(self, warn: bool = True, expected=None, stalled: bool = False) -> None:
         with self._lock:
+            if expected is not None and expected is not self.process:
+                return
             process, self.process = self.process, None
+            if process is not None:
+                self._retired = process
+                self._stall_restart = stalled
             self._resync = True
+            while True:
+                try:
+                    self.queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.queued = 0
         if warn:
             self._warn()
         if process is not None:
@@ -204,12 +381,6 @@ class PlayerSegmenter:
                 process.kill()
             except OSError:
                 pass
-        while True:
-            try:
-                self.queue.get_nowait()
-            except queue.Empty:
-                break
-        self.queued = 0
 
     def _write(self, process, source) -> None:
         try:
@@ -218,16 +389,17 @@ class PlayerSegmenter:
                     data = source.get(timeout=0.5)
                 except queue.Empty:
                     continue
+                if process is not self.process:
+                    return
                 self.queued -= len(data)
                 process.stdin.write(data)
                 process.stdin.flush()
         except (OSError, ValueError):
-            if process is self.process:
-                self._disable()
-        if process is self.process:
-            self._disable()
+            self._disable(expected=process)
+        self._disable(expected=process)
 
     def close(self) -> None:
+        self._closed = True
         self._disable(warn=False)
 
 

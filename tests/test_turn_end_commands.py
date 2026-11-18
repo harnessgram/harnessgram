@@ -209,9 +209,10 @@ def test_recovery_rechecks_live_session_before_keys(setup, monkeypatch, lost_at)
         assert not [call for call in pane.calls if call[0] == "send-keys"]
         assert dismissed == []
     else:
-        assert pane.box.startswith("/model ")
-        assert [call for call in pane.calls if call[0] == "send-keys"] == [
-            ("send-keys", "-t", "%1", "-l", pane.box)]
+        assert pane.box == ""
+        sends = [call for call in pane.calls if call[0] == "send-keys"]
+        assert sends[0][:4] == ("send-keys", "-t", "%1", "-l")
+        assert "BSpace" in sends[-1]
     notice, = bot.methods("sendMessage")
     assert notice["text"] == I.t("cw_uncertain", lang="en", command="/model")
 

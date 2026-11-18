@@ -10,11 +10,15 @@ import math
 import re
 from pathlib import Path
 
-from . import brief, panel_view, work_lines, work_map
+from . import brief, panel_view, project_art, work_lines, work_map
 from .config import state_dir, write_private
 
 MODES = ("off", "preview", "on")
 MODE_FILE = "cockpit-ui-v2"
+APP_SWITCHES = (
+    ("app_wide_cockpit", "wideCockpit", "appWideCockpit"),
+    ("app_summary_rows", "summaryRows", "appSummaryRows"),
+)
 # Project scenes may illustrate a project; the rest are fixed screen decorations.
 SCENES = frozenset({"plane", "book", "books", "visor", "clapper", "catalog", "generic"})
 # "What the system knows" (knowledge.py): its tiles and screen headers, cropped from the approved design.
@@ -42,6 +46,26 @@ def set_mode(value: str) -> None:
 
 def enabled(value: str, *, owner: bool) -> bool:
     return value == "on" or value == "preview" and owner
+
+
+def app_switch(setting: str) -> bool:
+    """Read an app visual switch; a missing off marker preserves the shipped default (on)."""
+    from .config import setting_on
+    if setting not in {row[0] for row in APP_SWITCHES}:
+        raise ValueError("unknown app switch")
+    return not setting_on(setting + "_off")
+
+
+def set_app_switch(setting: str, on: bool) -> None:
+    from .config import set_setting
+    if setting not in {row[0] for row in APP_SWITCHES} or not isinstance(on, bool):
+        raise ValueError("unknown app switch or value")
+    set_setting(setting + "_off", not on)
+
+
+def app_switches() -> dict:
+    """The stable camel-case switch contract consumed by the native Cockpit app."""
+    return {json_key: app_switch(setting) for setting, json_key, _copy in APP_SWITCHES}
 
 
 # Automatic art when the private config names none: generic subject words only (owner project names stay in
@@ -104,6 +128,26 @@ def asset(name: str, cfg=None, display: str = "") -> str:
     if not key:
         return "generic"
     return _configured(key, cfg) or auto_asset(name, display)
+
+
+def scene_bytes(scene: str) -> bytes:
+    """The bytes of one project scene, for the owner's "pick a scene" (the fixed catalogue only)."""
+    if scene not in SCENES:
+        raise KeyError(scene)
+    return (ASSET_ROOT / (scene + ".webp")).read_bytes()
+
+
+def known_projects(cfg) -> dict:
+    """line key -> display name of the configured projects (the keys a custom picture can belong to)."""
+    names = {work_lines.line_key(p.name): p.name for p in getattr(cfg, "projects", [])}
+    names.update(brief._names(cfg))
+    return {k: v for k, v in names.items() if k}
+
+
+def missing_art(cfg) -> list:
+    """The configured projects that have no custom picture yet, sorted by name."""
+    return sorted(((k, v) for k, v in known_projects(cfg).items() if not project_art.stamp(k)),
+                  key=lambda kv: kv[1].casefold())
 
 
 def _spread_projects(groups: dict, cfg) -> None:
@@ -171,6 +215,8 @@ def presentation(cfg, state: dict, entries, now: float) -> dict:
         key = key or work_lines.line_key(name) or "general"
         if key not in groups:
             groups[key] = {"key": key, "name": names.get(key) or name or key, "asset": asset(key, cfg, names.get(key) or name),
+                           # The owner's own picture (project_art.py) wins over the scene; None when there is none.
+                           "art": project_art.stamp(key),
                            "status": "on_track", "percent": None, "waiting": 0, "age": None,
                            "url": "", "summary": "", "_progress_age": float("inf"), "_blocked": False,
                            # Owner waits from the request ledger and from the brief's work lines (often the same
@@ -228,6 +274,7 @@ def presentation(cfg, state: dict, entries, now: float) -> dict:
         key = owner(d.get("url"), d.get("topic"))
         d["project_key"] = key
         d["project_asset"] = asset(key, cfg, names.get(key, ""))
+        d["project_art"] = project_art.stamp(key) if key else None
         d["project_name"] = names.get(key) or d.get("topic", "").split(":", 1)[0]
         # Old decisions are still open; replaced/ended decisions retain their
         # original warning and cannot be mistaken for fresh approvals.
@@ -236,6 +283,7 @@ def presentation(cfg, state: dict, entries, now: float) -> dict:
     for c in state.get("cards", []):
         key = session_keys.get(c.get("session")) or work_lines.line_key(c.get("topic", "").split(":", 1)[0])
         c["project_key"], c["project_asset"] = key or "general", asset(key, cfg, names.get(key, ""))
+        c["project_art"] = project_art.stamp(key) if key else None
         g = group(key, c.get("topic", "").split(":", 1)[0])
         if isinstance(c.get("age"), (int, float)) and (g["age"] is None or c["age"] < g["age"]):
             g["age"] = c["age"]
@@ -292,6 +340,7 @@ def presentation(cfg, state: dict, entries, now: float) -> dict:
         g = groups.get(item.get("project_key"))
         if g is not None:
             item["project_asset"] = g["asset"]
+            item["project_art"] = g["art"]
     live = {s["id"]: s for s in state.get("sessions", []) if s.get("state") != "ended" and not s.get("left")}
     for g in groups.values():
         ideas = sorted(g.pop("_ideas"), key=lambda r: -r["age"])

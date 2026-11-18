@@ -137,11 +137,11 @@ def test_gate_closed_skips_the_edit_and_the_next_reply_heals_it(bot, tmp_path):
 
 def test_gate_closed_skips_creation_too(bot, tmp_path):
     m, _ = make(bot, tmp_path)
-    flood.record_429(GROUP, 30)
+    from ctb import reply_outbox
+    flood.record_429(GROUP, reply_outbox.GATE_WAIT + 30)  # longer than the drain waits out
     assert reply(m) == 0
     assert not bot.methods("sendMessage")
     assert not index_sends(bot) and not bot.methods("pinChatMessage")
-    from ctb import reply_outbox
     assert reply_outbox.drain(m.cfg, bot) == 0
     (state_dir() / "flood.json").unlink()
     assert reply_outbox.drain(m.cfg, bot) == 1

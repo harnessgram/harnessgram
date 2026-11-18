@@ -68,6 +68,7 @@ def test_unknown_result_blocks_across_midnight(tmp_path):
     usage.settle(reservation, None)
     assert V.Usage(usage.path).reserve(1, 60, now=now) is None
     assert V.Usage(usage.path).reserve(1, 60, now=now + 86400) is None
+    assert V.Usage(usage.path).available(60, now=now + 86400) is None
 
 
 def test_only_one_process_can_reserve(tmp_path):

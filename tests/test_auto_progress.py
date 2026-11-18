@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from ctb import auto_progress, cards, config, panel, panel_page, sessions_menu, status
+from ctb import auto_cards, auto_progress, cards, config, panel, panel_page, sessions_menu, status
 from ctb.config import Config
 from test_panel_page import func
 
@@ -18,6 +18,7 @@ def home(tmp_path, monkeypatch):
     for module in (cards, config, panel):
         monkeypatch.setattr(module, "state_dir", lambda: tmp_path)
     auto_progress._cache.clear()
+    monkeypatch.setattr(auto_cards, "watcher", auto_cards.Watcher())
     return tmp_path
 
 
@@ -64,6 +65,23 @@ def test_the_task_list_is_read_from_the_transcript_incrementally(tmp_path):
     _write(path, [_use(8, "TodoWrite", todos=[{"content": "Plan", "status": "in_progress"}])], mode="a")
     assert auto_progress.task_list(str(path)) == [{"content": "Plan", "status": "in_progress"}]
     assert auto_progress.task_list(str(tmp_path / "missing.jsonl")) == []
+
+
+def test_task_ids_come_from_create_order_without_reading_tool_results(tmp_path):
+    path = tmp_path / "t.jsonl"
+    _write(path, [
+        _use(1, "TaskCreate", subject="First safe subject"),
+        _result(1, "Task #999 created; password and result body must be ignored"),
+        _use(2, "TaskCreate", subject="Second safe subject"),
+        _result(2, "Task #secret created"),
+        _use(3, "TaskUpdate", taskId="1", status="completed"),
+    ])
+    snapshot = auto_progress.activity_snapshot(str(path))
+    assert snapshot["tasks"] == [
+        {"content": "First safe subject", "status": "completed"},
+        {"content": "Second safe subject", "status": "pending"},
+    ]
+    assert "password" not in json.dumps(snapshot)
 
 
 def test_an_unchanged_transcript_is_not_read_again(tmp_path, monkeypatch):
@@ -115,8 +133,8 @@ def test_state_keeps_the_automatic_card_for_working_sessions_only(tmp_path, monk
     cards.sync_auto(rows[1].session, -100, 8, "other", [{"content": "x", "status": "pending"}], now=1)
     state = panel.build_state(Config(owner_chat_id=7), now=1000.0)
     shown = [c for c in state["cards"] if c.get("automatic")]
-    assert [c["title"] for c in shown] == ["lingo: fix"]
-    assert shown[0]["steps"] == ["Read the code", "Write the fix", "Run the tests"] and not shown[0]["stale"]
+    assert [c["title"] for c in shown] == ["עבודה על lingo"]  # panel JSON strips directional controls
+    assert shown[0]["steps"] == ["סקירת העבודה", "הכנת השינוי", "בדיקת התוצאה"] and not shown[0]["stale"]
     assert "never" not in json.dumps(state["cards"]) and "contents" not in json.dumps(state["cards"])
     rows[0] = rows[0]._replace(state="idle")
     state = panel.build_state(Config(owner_chat_id=7), now=1010.0)

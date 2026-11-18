@@ -103,13 +103,27 @@ can change something (a decision, a setting, a card action) forgets it. The cred
 returns text that holds none of the words or shapes it looks for without running its patterns, and remembers its answer
 for each short text. The cost budgets are tested in `tests/test_cpu_budget.py` (skip with `CTB_SKIP_BENCH=1`).
 
-**Automatic progress cards.** A working session whose agent made no progress card of its own gets one from the
-bridge (`auto_progress.py`, marked `automatic` in the card data): the topic's name as its title, the subjects of
-the session's task list (TaskCreate / TaskUpdate or TodoWrite in the transcript) as its steps and percent, and
-how many background tasks it runs. No tool output or file contents reach it. It is replaced as soon as the agent
-publishes its own card and closed when the session goes idle (with no background task left) or ends. The hooks
-also remind a session on a long task (background tasks, three minutes, or 25 tool calls in a turn) that has no
-card of its own to publish one, at most once every ten minutes.
+**Automatic progress cards.** `auto_cards` (Cockpit Settings → Automation) is on by default.
+The deterministic fallback uses the session's task subjects/statuses, or groups recent activity into
+3–6 short Hebrew steps when no task list exists. Tool-only percentages are estimates, not proof of
+successful tests or completed work. Short English product names within Hebrew text use FSI/PDI isolation.
+Only tool names, Bash descriptions, task subjects and short single-line assistant status messages are
+retained, scrubbed for credentials, paths, links and addresses before truncation. Commands, tool output,
+file contents, thinking and long/multiline assistant messages are excluded. The shared incremental
+transcript reader keeps at most 40 activities, 200 tasks, 200 characters per field and 64 KiB per record;
+its initial scan is capped at 64 MiB, then only appended bytes are scanned.
+
+The existing `harnessgram heartbeat` service schedules scans every 30 seconds, including when the Cockpit
+is closed and Telegram mirroring is off. Scans run in a background thread; an HTTP state refresh can seed
+a missing deterministic card but cannot replace a watcher's summary. English titles are translated there
+through the configured offline translation engines, with the existing translation deadline. If translation
+is unavailable or late, a short Hebrew fallback retains the product name inside a bidi isolate. The same open
+card ID is updated in place. An agent-authored card always wins, including when the agent adopts the
+auto card's ID. Idle sessions close their auto card once background tasks finish; ended or missing
+sessions close immediately. Disabling `auto_cards` closes automatic cards on the next scan/refresh.
+A card timestamp advances only with safe activity or a changed summary, not merely because it was polled.
+A fresh automatic card suppresses both long-task and stale-plan hook nudges for ten minutes; stale or
+disabled automatic cards do not suppress them. Agent cards keep their usual stale-plan reminders.
 
 **Newest first, stale folded away.** Decisions and reminders come newest first. A decision whose session has
 ended, or that the same session asked again later (the same words once ids and numbers are dropped), is marked
@@ -152,6 +166,22 @@ ledger read as Requests. No agent creates or maintains cards, and polling runs n
 requests. An untagged ledger item is one topic; an optional `topic` slug groups items within the same
 project. Valid slugs match `[a-z0-9][a-z0-9-]{0,63}`; invalid tags are ignored.
 
+**Conversation status cards.** An request-ledger item created from a session carries the creating
+session in its `session` field. The external ledger command obtains that value from
+`CLAUDE_CODE_SESSION_ID`, which the bridge sets for session tool processes; the bridge validates the
+identifier and joins it to the Telegram topic through `topics.json`. Items without that provenance
+remain in the global Requests view and are never guessed into a topic.
+
+The authenticated per-topic Cockpit view shows one compact card for each matching item. A new team
+item says **התקבל**, an item with a work note says **בעבודה**, an
+owner wait says **מחכה לך**, and a completed item says **הושלם**. Cards use `title_he` when available,
+show the latest note through the existing credential-filtered translation cache/queue, and show the
+elapsed time since the ledger's `updated` value. A completed card is retained for one day and then
+vanishes. The payload caps card count and title/note lengths. Because every group member can read a
+topic pin, the pin contains no ledger title or note: it shows only totals for Received, Working,
+Waiting for you, and Done today, followed by the authenticated Cockpit link. Pin refreshes retain the
+normal optional Telegram edit budget, and the totals form the pin digest.
+
 For a single item, completion wins first, then a latest note beginning with `Decided:`, `Owner picked`,
 or `Owner approved` (case insensitive) means Decided. Otherwise an open owner wait means Waiting for
 you; open team work updated within 24 hours means In progress, and more than 24 hours means Stuck.
@@ -162,17 +192,30 @@ the standard reversible disclosure. Eight active cards appear initially; More re
 
 Each card shows the first sentence of the oldest member's title, the last decision-like note, and
 the latest note as the next step. Cached Hebrew translations use the existing translator and privacy
-policy, with source text as fallback. PR references (`#123`) are deduplicated within the topic. There is
-currently no repository-scoped PR/CI state cache in the bridge, so only numbers are shown; prose never
-proves that a PR is merged. This feature does not call `gh pr view` or create a second PR poller.
+policy, with source text as fallback. PR references (`#123`) are deduplicated within the topic and
+remain references only; prose never proves a merge. Progress uses explicit validated `links` and
+the existing background request sweep's shared, repository-scoped snapshot. The sweep caches each
+link for ten minutes, including failed attempts, and reduces PR comments to a first-line `: ship`
+signal. Panel requests only read this snapshot and never refresh it or call GitHub. Until a refresh
+succeeds, cards retain the last known signal; an uncached link means Development.
+
+Every active card retains its state chip alongside a thin progress bar and a localized stage:
+Planning (10%, step 0) without notes or links; Development (40%, step 1) with notes or a link;
+Review (70%, step 2) for an open PR with the ship signal; Active (100%, step 4) for merged PRs,
+completed issues, or ledger completion. Closed unmerged PRs and not-planned issues do not prove
+completion. Integration (85%, step 3) is reserved and skipped because the reader cannot currently
+prove open integration-batch membership. A group uses its least advanced unfinished member/link;
+completed members cannot move unfinished work forward. Done items whose latest note starts with
+`Dropped` are removed from topics, leaving other members of the same topic intact.
 
 Tapping a card opens a phone-sized detail sheet with notes newest first, dated where the ledger supplies
 timestamps. String notes retain their ledger order; grouped undated notes use each item's update time
 as a sorting fallback, without displaying an invented timestamp. Close, Escape, and Back dismiss the
 sheet. The sheet remains readable during background state refreshes; reopen it to see new notes.
-Unlike the Requests checklist's seven-day completion window and last 50 notes, topics retain all
-completed items and notes accepted by the existing bounded reader (1 MiB per regular JSON file, first
-1,000 items, 1,500 display characters per text). Symlinks and malformed files are skipped, and source
+The state poll sends no notes (the sheet reads them from `POST /api/topic-detail` when it opens) and drops
+closed cards older than seven days. Topics retain the same last 50 notes and bounded reader as Requests
+(1 MiB per regular JSON file, first 1,000 items, 1,500 display characters per text).
+Symlinks and malformed files are skipped, and source
 and translated text pass through the same credential filters before reaching the browser.
 
 The external ledger CLI can optionally add `add "<item>" [--wait owner|team] [--topic slug]` and
@@ -184,6 +227,19 @@ That executable is maintained outside this repository; cards work without this o
 **Requests from the owner ledger.** Both home layouts place Requests after the decision/card area.
 The configured `brief.ledger_dir` (or `radio.ledger_dir`) remains the source of truth. State polls only read;
 explicit owner actions use `POST /api/request`. Each open row offers Done, Not relevant, and Push forward.
+The list is grouped, not endless: items that need the owner come first, one collapsible block per project with
+its count, five rows each (urgent first, then newest) and a "Show all (N)" button. Items waiting on agents fold
+under "Agents are on it". An open item nobody touched for seven days moves to a collapsed "Waiting a long time"
+section; nothing is deleted or closed automatically. Configured dormant owner requests also remain folded,
+with Still relevant / Not relevant actions. Main's project filter, readable three-line title, disclosure label
+and visible action buttons remain available. Opening a row fetches the full text, note and steps from
+`POST /api/request-detail`. On Cockpit v2, owner requests and all reminders stay in Needs you; other requests
+are grouped below without duplicates.
+`/api/state` therefore carries per item only the id, project, a 160-character title (and its Hebrew title),
+status, age, wait, update time, and the idle time with its `long` flag, plus urgency/dormancy flags when set.
+Both bounded language variants remain available for English and Hebrew pages. `topic_cards`
+carries the fields a card shows, including its cached progress stage and percentage, without notes (the detail sheet reads its timeline from
+`POST /api/topic-detail`), and drops closed cards older than seven days.
 All writes go through the existing installed ledger CLI. Set `brief.ledger_tool`
 (or `radio.ledger_tool`) to its executable path or an argv list for an existing wrapper. Without a configured
 tool, actions fail closed and the ledger remains readable. That tool must target
@@ -399,6 +455,11 @@ No permission mode, authentication rule or tap-to-answer rule is changed.
 
 ## Routes
 
+The page also exposes its install metadata and icon files at `GET /manifest.webmanifest`, `GET /favicon.svg`,
+`GET /favicon-32.png`, `GET /apple-touch-icon.png`, and `GET /icons/<icon file>`. These static files contain no
+owner data; the SVG favicon follows the browser's light or dark colour scheme, while the manifest supplies
+ordinary, maskable, and monochrome PWA icons.
+
 The server answers `GET /` (the page), the Cockpit app routes below and these `POST` routes, nothing else. The
 page is served without a login: it is a static document that holds no data, and it shows data only after it
 sends the signed login to `/api/state`. Every other route needs the signed login described under "Security model",
@@ -420,7 +481,9 @@ the body limit is in bytes. The list is the route table in `panel.py`, and
 | `/api/close` | 1280 | Closes the Telegram topics (up to 20) of sessions the server counts as left behind (open, untouched for a day). The terminal is not touched; writing in the topic reopens it. |
 | `/api/app-request` | 2600 | Request an app: `{"text": ...}` (up to 500 characters, with an `apps.apple.com` link or an App Store id) goes to the configured `app_request_command`. Owner login; one request every 10 seconds (`429`); `404` when the command is not configured. See "Request an app". |
 | `/api/knowledge` | 4096 | What the system knows (docs/knowledge.md): `{"action": "view"}` or `"scan"` returns the private index, with each item's plain-words `note` and the `sections` heading titles when the notes file has them; `toggle` {`id`, `on`}, `undo` {`log`} and `suggest` {`id`, `text`} change one switch or add one ledger request. Owner action login; locked safety rules answer 409. |
-| `/api/addons` | 256 | What Harnessgram adds to your agents (docs/addons.md): `{"action": "view"}` returns every add-on by group with its switch, the harnesses it applies to and whether it is locked; `set` {`key`, `on`} switches one globally and answers with the `previous` value for a one-tap undo. Locked safety add-ons answer 409, an unknown key 404. Owner action login. |
+| `/api/addons` | 256 | What HarnessGram adds to your agents (docs/addons.md): `{"action": "view"}` returns every add-on by group with its switch, the harnesses it applies to and whether it is locked; `set` {`key`, `on`} switches one globally and answers with the `previous` value for a one-tap undo. Locked safety add-ons answer 409, an unknown key 404. Owner action login. |
+| `/api/packs` | 512 | Read-only agent packs (docs/packs.md): `{"action": "view"}` returns each pack with its computed transparency card; items link to their existing switches. No write action. Owner read login. |
+| `/api/packs-edit` | 512 | Owner-confirmed pack changes (docs/packs.md): `preview` {`pack`, `on`} lists what would change and what is skipped as locked; `set` {`pack`, `on`} applies it through the existing knowledge and add-on switches and records an undo snapshot before the first change; `move` {`item`, `pack`} regroups one item; `export` {`pack`, `dir`} writes a plugin folder to an absolute path outside the agents' configuration folders, after scanning every file it copies. An unknown pack or item answers 404, a locked switch 409, a refused export 400. Owner action login. |
 | `/api/schedule` | 2048 | The owner's personal schedule (see "My schedule"): `{"action": "add", "text": ...}` (one line of up to 200 characters), `{"action": "done", "id": ..., "done": true or false}` or `{"action": "remove", "id": ...}`. Owner login (fresh within 15 minutes). Answers `{"ok": true, "view": ..., "item"?: ...}`; `400` for a bad line or body, `404` for an unknown id, `409` when 200 items are open, `503` when the file cannot be written. The text is never logged. Google Calendar (see "My schedule"): `{"action": "google-connect"}` answers `{"ok": true, "url": ...}`, a one-time sign-in link for the phone's browser; `{"action": "google-disconnect"}` deletes the token, revokes it at Google (best effort) and answers with the new view; both `409` when `google_calendar` or `panel_base_url` is not set. |
 | `/api/schedule-view` | 256 | `{}`: Today and Tomorrow for the Now card, the owner's items and the read-only calendar events together. A read with the same owner login as `/api/state`; the calendar is fetched only when `schedule_sources` is set. |
 | `/api/briefing-dismiss` | 256 | `{}`: puts away today's "Good morning" card on Now (see "Work map and morning briefing"). Owner login (fresh within 15 minutes). Answers `{"ok": true}`; the briefing itself is not deleted and a new one comes the next day. |
@@ -428,8 +491,16 @@ the body limit is in bytes. The list is the route table in `panel.py`, and
 | `/api/family-view` | 256 | `{}`: the week (Sunday first), the daily routine, the shopping list and the meal plan, with today's marks. A read with the same owner login as `/api/state`. |
 | `/api/client-error` | 256 | `{"name", "at"}`: the page received the state but could not draw it. Only the error's type (letters and digits) and the place the page threw it (`function:line:column`) are accepted, and the server writes them as one line to its log; any other field is refused. A read with the same owner login as `/api/state`. |
 | `/api/family-print` | 256 | `{}`: a link to the family board's A4 print page, `{"ok": true, "url": "/family/print?auth=<token>", "expires": ...}`. Owner login (fresh within 15 minutes); the token is good for 10 minutes and never past that login. |
+| `/api/project-art` | 1500000 | The owner's own picture for a Cockpit project (project_art.py): `{"action": "set", "project", "data": <base64 image>}`, `{"action": "scene", "project", "scene"}` or `{"action": "clear", "project"}`. Owner action login (fresh, like every action). `415` for a type other than webp/png/jpeg (png and jpeg also need Pillow), `413` over 1 MB, `400` for a damaged image or a malformed request, `404` for an unknown scene. |
+| `/api/project-art-image` | 256 | `{"name": <file stem>}`: the picture's bytes (`image/webp`). A read with the same owner login as `/api/state`; the name must match the strict file pattern and the file must be a regular, non-linked file, else `404`. There is no public URL for a custom picture. |
 | `/api/mac-tools` | 256 | Starts one Mac maintenance job: `{"action": "dry-run"}`, `{"action": "clean", "confirm": "<preview id>"}` or `{"action": "maintenance", "confirm": true}`. Owner login (fresh, like every action); answers at once with the job id (`200`), `409` when another job runs (`busy`), when no preview from the last ten minutes exists (`stale`) or the confirmation does not match (`confirm`), `404` when the command is not configured. See "Mac maintenance". |
 | `/api/mac-tools-status` | 64 | The running job, the last report and the last preview, plus the Mac's disk, memory, load and top processes. A read with the same owner login as `/api/state`; `404` when `mac_tools` is not configured. |
+| `/api/voice-copilot/start` | 64 | Starts a car voice co-pilot session (Gemini Live through the bridge). Owner login only; `404` while the `voice_copilot` switch is off (the default). |
+| `/api/voice-copilot/audio` | 22000 | Sends one short chunk of microphone audio for a running co-pilot session. |
+| `/api/voice-copilot/heartbeat` | 128 | Renews a running co-pilot's client grace window without uploading silence or touching the upstream voice socket. |
+| `/api/voice-copilot/events` | 128 | Returns the co-pilot's pending replies and status for a running session. |
+| `/api/voice-copilot/confirm` | 128 | Confirms one action the Tower prepared (`{"id"}`: add to the shopping list or a timed reminder). Owner login only; nothing is written before this tap; a pending action expires after one hour (`409` once expired). |
+| `/api/voice-copilot/stop` | 128 | Ends a co-pilot session. A relayed message is marked as a voice message and never approves anything. |
 | `/api/screen` | 64 | Returns the bridge's own redacted copy of one live session's terminal screen; nothing is typed into it. |
 | `/api/compact` | 64 | Sets one session's automatic-compaction threshold (the global one, never, or a fixed step). |
 | `/api/fork` | 256 | Owner-only, fresh authenticated actions: `arm` {`session`} returns a scoped confirmation; `start` {`session`, `armed`} consumes it and schedules a separate Claude fork. Ambiguous session prefixes are refused. |
@@ -438,16 +509,23 @@ the body limit is in bytes. The list is the route table in `panel.py`, and
 | `/api/model` | 64 | Sets the model new sessions start with. |
 | `/api/setting` | 64 | Changes one bridge setting. |
 | `/api/request` | 1024 | Owner ledger action: project, id, action (done/drop/push). Fresh owner login required. |
+| `/api/topic-detail` | 1024 | Owner-only read of one topic card's timeline: `key` (the card's key); answers its notes, newest first, with cached Hebrew. The detail sheet fetches it when it opens. |
+| `/api/live-activity-token` | 768 | Registration of an iPhone Live Activity push token by a paired app (bearer) or an owner login of read age (the same login can already read these cards): `card_id`, `token` (hex), `env` and `ended` (true removes it). Stored privately; the heartbeat sends queued updates through APNs when `apns_key_id`, `apns_team_id` and `apns_bundle_id` are set and the `live-activity` extra is installed. Its `content-state` is exactly the app's `HarnessgramTaskState`: `title` and the card's panel `topic`, the first eight `steps` (each string is at most 120 UTF-8 bytes), clamped `done`, optional integer/null `percent`, and boolean `finished`; it has no other keys. |
+| `/api/request-detail` | 1024 | Owner-only read of one ledger item: `project`, `id`; answers the full text, latest note and steps (with cached Hebrew). The list fetches it when a row opens. |
+| `/api/request-target` | 256 | Owner-only read: `key` (16 hex, from a widget deep link); answers the `project` and `id` of the ledger row it names, or 404. The list rows carry no link key, so the page asks once when it opens from a widget link. |
 | `/api/hooks-restore` | 64 | Owner-only hooks merge/backup; empty object; offers session reload after success. |
 | `/api/sessions-reload` | 64 | Owner-only background reload of stale idle sessions; empty object; results in state. |
 | `/api/app-token` | 64 | Owner-only, fresh login: `{"app": "<name>"}` returns `token` and `expires` for that app only (at most 10 minutes, capped at the owner's 15-minute action-login expiry). |
 | `/api/radio` | 64 | Turns the team radio on or off. |
 | `/api/listen-link` | 256 | The private "Listen in Safari" link (src/ctb/listen_link.py): `{"action": "create"}` mints a listening token and answers with its `/listen/<token>` path (404 while the `listen_link` add-on is off); `{"action": "revoke"}` revokes every token and always works. Owner action login. |
-| `/api/device-pair` | 256 | Pairs one Harnessgram widget device (see "Widget devices"): `{"label"?}` (up to 40 characters, default `iPhone`) answers `{"ok": true, "token", "id", "label", "created", "expires"}`; the token is shown this once and is valid for 30 days. Owner action login; at most 5 pairings an hour (`429` with `retry` seconds), at most 8 devices (the oldest is dropped). |
+| `/api/device-pair` | 256 | Pairs one HarnessGram widget device (see "Widget devices"): `{"label"?}` (up to 40 characters, default `iPhone`) answers `{"ok": true, "token", "id", "label", "created", "expires"}`; the token is shown this once and is valid for 30 days. Owner action login; at most 5 pairings an hour (`429` with `retry` seconds), at most 8 devices (the oldest is dropped). |
 | `/api/devices` | 256 | The paired widget devices for Settings: `{"action": "list"}`, `{"action": "revoke", "id"}` (`404` for an unknown id) or `{"action": "revoke-all"}`; each answers `{"ok": true, "devices": [{"id", "label", "created", "expires", "used"}]}`, never a token or a hash. Owner action login. |
 | `/api/widget-state` | 64 | `{}`: the widget's read-only snapshot: `bot_id`, open decisions (`id`, `title`, `yes`, `no`, `topic`, `url`, `stale`, `age`, `sensitive`), working sessions (`id`, `name`, `state`, `now`, `url`), progress cards and `radio_player` `{"enabled", "on"}`, with the Hebrew copies (`<field>_he`) when there are any. Only `Authorization: Bearer <device token>`; Telegram `initData` is not read here. At most 30 requests a minute per device (`429`). |
 | `/api/widget-decide` | 256 | `{"id", "choice"}`: a widget's yes or no on one decision, no note. A sensitive decision (any decision not asked with `--routine`, or whose words name a sensitive area; checked under the decisions lock) answers `403 {"error": "needs-app"}` (the app answers it after Face ID); the same answer again answers `200 {"ok": true, "already": true}`; otherwise as `/api/decide` (`404`, `409` closed or stale). Only the device token, like `/api/widget-state`. |
 | `/api/radio-player` | 64 | Read-only owner availability and ten-minute signed capability for the private radio player (1-hour Telegram login). |
+| `/api/my-music` | 64 | Read-only owner playlists and liked music from YouTube Data API v3. `youtube.account_token_command` is an argv list whose stdout is a short-lived access token; it is never stored, logged, or returned. Results are bounded and cached in memory for 30 minutes. |
+| `/api/radio-programs` | 8192 | Views, saves, selects and starts the owner's bounded private-radio running order. Blocks are music or news, with a duration and bounded source selection. |
+| `/api/radio-music` | 256 | Owner music controls for the private radio: state, Like, Skip and the music on/off switch. |
 | `/api/radio-say` | 2600 | Gives the radio a line to say now. |
 | `/api/room` | 2600 | The radio's brainstorming room (off by default; see docs/radio.md): `start` {`topic`, `minutes`, `project`?}, `pause`, `resume` {`text`?}, `summarize`, `end`, `close`, and `send` {`room`, `task`, `session`}, which claims one task of that room once (a second tap, a stale page or a retry queues nothing) and queues it to one live session as a held proposal that approves nothing. |
 | `/api/podcast` | 1280 | The radio's podcast queue (see docs/radio.md): `episodes` {`feed`} lists a configured feed's newest episodes, `add` {`feed`, `episode`} (an id from that list) or {`link`} queues one episode after the radio's suitability rules (an explicit or unsuitable episode is refused with `422`), `control` {`op`: `play`, `pause`, `skip` or `stop`} and `remove` {`id`}. An episode is taken only from a feed the owner configured (`radio_podcasts`) or from a pasted https link to a public site, never from the page's own audio address. |
@@ -477,13 +555,14 @@ The page is Hebrew and right to left unless `ui_language` is `en`, and it follow
 ## Decisions
 
 An agent asks from inside its session. `--routine` says that neither answer approves anything sensitive, so the
-owner may also answer it from a Harnessgram phone widget (see "Widget devices"); without it (the default, and every
+owner may also answer it from a HarnessGram phone widget (see "Widget devices"); without it (the default, and every
 decision asked before the flag existed) only the Cockpit or the app after Face ID answers it.
 
 
     ctb decide ask "Ship the fix?" [--detail TEXT] [--yes LABEL] [--no LABEL] [--routine]
     ctb decide list
     ctb decide cancel <id>
+    ctb decide public-key
 
 **Which session.** The command acts only for the session it runs inside, and proves it: the session id in
 `CLAUDE_CODE_SESSION_ID` must have a live Claude Code process in Claude's own session records (any
@@ -511,6 +590,19 @@ unknown id is refused (`409`, which names the recorded choice, or `404`). The an
 first and then queued to the session's inbox; if the message was not written the decision is reopened
 under the same lock (an accepted answer is never reopened; a failed trim of the queue is ignored). The
 progress boundary is added only after an accepted answer. The panel waits at most about 2 seconds for the decisions and inbox locks and then answers `503`.
+
+**Signed answers.** With the optional `sign` extra (`harnessgram[sign]`, the `cryptography` package), every
+answer is signed with an Ed25519 key that only the bridge holds: a raw 32-byte seed, base64, in the macOS Keychain
+(service `harnessgram.decision-signing`, account `ed25519-seed`), created on first use and never
+logged, printed or written to a file. The answered record gets `answer_sig`: `{"payload", "signature", "key"}`, each
+base64. The payload is the exact signed bytes, `json.dumps(obj, separators=(",", ":"), sort_keys=True,
+ensure_ascii=False)` in UTF-8, of `{"v": 1, "kind": "harnessgram-decision-answer", "id", "title", "detail", "choice",
+"note", "created", "closed", "routine", "by", "via"}`. `by` is the Telegram user id the answering route verified
+(never a value from the request body) and `via` is the route: `panel` (the Cockpit, `POST /api/decide`), `widget` (a
+paired device, `POST /api/widget-decide`) or `chat-widget` (a widget button in the owner's private chat).
+`ctb decide public-key` prints only the base64 raw 32-byte public key a verifier pins. When the package or the
+Keychain is unavailable the answer is still recorded and delivered, unsigned, with one content-free line in
+`poll.log`; an unsigned answer simply does not count for a verifier. A reopened decision drops its signature.
 
 **What the session receives.** An inbox message with `source: "panel"` (not `owner`), framed under its own
 header as a tap and not typed words, in fixed server wording: "The owner tapped YES (button: «Ship it») in
@@ -804,9 +896,9 @@ answers 403. A token expires after 30 days. The routes also need the radio playe
 saying now, for the iPhone lock screen (at most 80 characters, child-suitability checked; the station's name while the
 radio is off or has said nothing yet). See docs/radio.md, "Live title".
 
-## Widget devices (Harnessgram app)
+## Widget devices (HarnessGram app)
 
-The Harnessgram iPhone app's home and lock-screen widgets read the Cockpit without opening Telegram, so they have no
+The HarnessGram iPhone app's home and lock-screen widgets read the Cockpit without opening Telegram, so they have no
 `initData`. Instead the app pairs once while the owner is signed in: `POST /api/device-pair` with the fresh owner login
 returns a random device token (`hgw_` and 43 URL-safe characters, 256 random bits) valid for 30 days. The token is
 returned once; the bridge keeps only its SHA-256 hash, the label, the creation time and the last use in
@@ -841,7 +933,7 @@ deleting a topic forever, making a channel the alerts channel or posting full re
 front of its `callback_data`; an agent card's or a dialog's option is marked when its label names a sensitive area
 and does not read as a refusal. The bridge strips `hg!` before any handler reads the callback. A URL or web app button
 that leads to a sensitive answer (the "answer in the Cockpit" button of a sensitive decision) gets a title starting
-with "🔐 ". Only the acting button is marked, never its "No" or "Cancel". The Harnessgram app asks for Face ID or the
+with "🔐 ". Only the acting button is marked, never its "No" or "Cancel". The HarnessGram app asks for Face ID or the
 passcode before it acts on a marked button; this is defence in depth, and every handler keeps its own checks. A marked
 button whose data would pass Telegram's 64-byte limit is left out rather than sent unmarked.
 answers 403. A token expires after 30 days. The routes also need the radio player switch on, as `/radio/` does. When there is no fresh audio, a playlist request
@@ -958,7 +1050,7 @@ are for the owner's eyes only (a private card), as untrusted data. A session or 
   tolerated); the page then asks to close and reopen the panel. And `user.id` must be the paired owner
   (`owner_chat_id`). Everything else gets `403` with no data.
 - The bot token and `initData` are never logged or echoed; the server logs nothing.
-- Only `GET /`, the three `/app/<name>/...` routes and the `POST` routes in "Routes" exist. GET takes no body, each route has the body limit shown
+- Only `GET /`, the icon and manifest routes above, the three `/app/<name>/...` routes and the `POST` routes in "Routes" exist. GET takes no body, each route has the body limit shown
   there (a 300-character note takes up to 1200 bytes), chunked bodies are refused, a decision's answer body may
   hold only `id`, `choice` and `note`, sockets time out after 10 s, at most 16 connections are served at once, and every
   connection closes after one reply, so a reusing proxy cannot mix requests.
@@ -1203,7 +1295,7 @@ advice chip when an agent wrote a note for it (raw text otherwise), a read-only 
 history with one-tap undo. The page reads it through `/api/knowledge` with the owner's action login; the state poll
 never carries it. Details, privacy and configuration: docs/knowledge.md.
 
-## What Harnessgram adds to your agents
+## What HarnessGram adds to your agents
 
 The second Settings entry lists everything the bridge adds into or around an agent harness (addons.py), grouped as
 conversation, memory and continuity, voice and radio, Cockpit and safety. Each row has a title, one plain sentence, the
@@ -1300,4 +1392,3 @@ Configuration (all optional):
 
 The switches are the add-ons `work_map` and `morning_briefing` (Cockpit, Settings, add-ons; docs/addons.md). Both default
 to on; switching one off stops it everywhere (the card, the pinned message, the command and the delivery).
-

@@ -1,7 +1,7 @@
 """Conservative reminder dates: explicit calendar dates only, never guessed weekdays/times.
 
 Undated reminders age after 14 days; dated reminders after their deadline plus three
-days. Restoring grants 14 days in the active list without rewriting the original date.
+days. An owner's Keep tap protects a reminder until the owner clears it.
 """
 from __future__ import annotations
 
@@ -36,13 +36,19 @@ def deadline(value: str):
 
 
 def is_old(item: dict, now: float) -> bool:
-    if item.get("r", 0) > 0 and 0 <= now - item["r"] <= UNDATED_AGE:
+    if is_kept(item):
         return False
     due = deadline(item.get("d", ""))
     if due is not None:
         return now - due > OVERDUE_AGE
     at = item.get("at", 0)
     return at > 0 and now - at > UNDATED_AGE
+
+
+def is_kept(item: dict) -> bool:
+    """Whether the owner has permanently kept this reminder."""
+    restored = item.get("r")
+    return type(restored) in (int, float) and restored > 0
 
 
 def expired_text(item: dict, now: float) -> bool:
@@ -70,5 +76,4 @@ def expired_text(item: dict, now: float) -> bool:
         explicit = deadline(item["d"])
         if explicit is None or explicit >= now:
             return False
-    # An explicit restoration is the owner's instruction to keep it active.
-    return not (item.get("r", 0) > 0 and 0 <= now - item["r"] <= UNDATED_AGE)
+    return not is_kept(item)

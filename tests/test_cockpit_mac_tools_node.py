@@ -101,7 +101,7 @@ def test_tile_and_sheet_have_the_right_roles():
                 "title:dlg.querySelector('.topic-heading').childNodes[0].textContent,first:posted[0]});")
     assert got["tile"] == "1" and got["popup"] == "dialog" and got["open"] is True
     assert got["label"] == "mt-sheet-title" and got["dir"] == "rtl" and got["section"] == "mac-tools"
-    assert got["title"] == "תחזוקת המק" and got["text"].startswith("תחזוקת המק")
+    assert got["title"] == "כשירות מערכות המחשב" and got["text"].startswith("בדיקת כשירות המחשב")
     assert got["first"] == ["/api/mac-tools-status", {}]
 
 
@@ -170,7 +170,7 @@ def test_the_first_tap_disarms_by_itself_or_with_cancel():
     got = shown("btn('clean').click();var a=btn('clean').textContent;await tick(10000);var b=btn('clean').textContent;"
                 "btn('clean').click();btn('cancel').click();var c=btn('clean').textContent;"
                 "emit({a,b,c,posts:posts('/api/mac-tools').length,cancelGone:!btn('cancel')});", state="{dry:DRY}")
-    assert got["a"] == "לנקות 48 גיגה־בייט?" and got["b"] == "ניקוי עכשיו" and got["c"] == "ניקוי עכשיו"
+    assert got["a"] == "לנקות 48 גיגה־בייט?" and got["b"] == "פינוי מקום כעת" and got["c"] == "פינוי מקום כעת"
     assert got["posts"] == 0 and got["cancelGone"] is True
 
 
@@ -259,7 +259,7 @@ def last_card(report):
 @pytest.mark.parametrize("report,parts,tone", [
     ("{id:'a'.repeat(12),kind:'clean',state:'ok',finished_at:1800000000,duration:95,bytes:3*1073741824,free_before:10*1073741824,free_after:13*1073741824}",
      ["ניקוי", "התפנו 3 גיגה־בייט", "מקום פנוי: 10 גיגה־בייט ← 13 גיגה־בייט", "1:35"], "ok"),
-    ("{id:'b'.repeat(12),kind:'maintenance',state:'ok',finished_at:1800000000,duration:600}", ["תחזוקה שבועית", "הסתיים בהצלחה"], "ok"),
+    ("{id:'b'.repeat(12),kind:'maintenance',state:'ok',finished_at:1800000000,duration:600}", ["תחזוקה שבועית", "הפעולה הושלמה בהצלחה"], "ok"),
     ("{id:'c'.repeat(12),kind:'maintenance',state:'skipped',skipped:'memory',finished_at:1800000000,duration:2}", ["דולג: הזיכרון נמוך"], "wait"),
     ("{id:'d'.repeat(12),kind:'clean',state:'failed',finished_at:1800000000,duration:9}", ["נכשל"], "bad"),
     ("{id:'e'.repeat(12),kind:'dry-run',state:'timeout',finished_at:1800000000,duration:900}", ["נעצר: לקח יותר מדי זמן"], "bad"),

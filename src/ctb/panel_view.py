@@ -13,7 +13,7 @@ from typing import Dict, Iterable, Optional
 
 from . import fmt
 from .config import state_dir
-from .pins import SUPERGROUP_PREFIX
+from .pins import SUPERGROUP_PREFIX, link as message_link
 
 OLD_AFTER = 3 * 24 * 3600  # a waiting item (decision, ask card, reminder) older than this is "old": the page folds it away
 STALE_AFTER = OLD_AFTER  # an open decision older than this has most likely lost its moment
@@ -66,6 +66,15 @@ def topic_url(chat, thread) -> str:
     if type(chat) is not int or type(thread) is not int or not str(chat).startswith(SUPERGROUP_PREFIX):
         return ""
     return f"https://t.me/c/{str(chat)[len(SUPERGROUP_PREFIX):]}/{thread}"
+
+
+def waiting_link(record: dict) -> str:
+    """Exact posted-message link, falling back for records made before ``msg`` was stored."""
+    chat, thread, msg = record.get("chat"), record.get("thread"), record.get("msg")
+    topic = topic_url(chat, thread)
+    if topic and type(msg) is int and msg > 0:
+        return message_link(chat, thread, msg)
+    return topic
 
 
 def _tail_lines(path: str, size: int) -> list:

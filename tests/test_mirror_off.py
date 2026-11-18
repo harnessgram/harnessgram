@@ -193,17 +193,17 @@ class Telegram:
 
 
 def _run_listener(switch, monkeypatch, script, telegram_side=None, start=T0):
-    """Run the real listener loop, deterministically: its clock and its off-pause are its own hooks
-    (inbox._clock, inbox._off_pause), so nothing else in the process (a subprocess waiting for its child calls
-    time.sleep) can move the test along. One `script` step runs per round (an off-pause, or a long poll while
+    """Run the real listener loop, deterministically: its clock, config mtime and off-pause are its own hooks,
+    so neither filesystem timestamp behavior nor another wait in the process can move the test along. One
+    `script` step runs per round (an off-pause, or a long poll while
     on): "off" turns mirroring off; ("on", t) turns it on with the config file's time t (the edit's time);
     ("send", text, date), ("edit", text, date) and ("member", date) put an update into Telegram's queue; a list runs several steps in
     the same round. A long poll with nothing left to do ends the run before it returns (a crash at that point).
     Returns ([(text, delivered)] for the messages and edits handle() got, with the real freshness and off_until
     checks, plus ("member", None) for chat-member updates; the long polls)."""
-    import os
     from ctb import inbox as I
     bot, tg, clock = FakeBot(), telegram_side or Telegram(), [start]
+    config_mtime = [C.config_path().stat().st_mtime]
     steps, decided, polls = list(script), [], []
 
     def step():
@@ -215,7 +215,7 @@ def _run_listener(switch, monkeypatch, script, telegram_side=None, start=T0):
                 switch.off()
             elif one[0] == "on":
                 switch.on()
-                os.utime(C.config_path(), (one[1], one[1]))
+                config_mtime[0] = one[1]
             elif one[0] == "member":
                 tg.member(one[1])
             elif one[0] == "edit":
@@ -243,7 +243,9 @@ def _run_listener(switch, monkeypatch, script, telegram_side=None, start=T0):
     monkeypatch.setattr(I.Bot, "from_config", classmethod(lambda cls, cfg, strict=False: bot))
     monkeypatch.setattr(I, "relay_serve", lambda cfg, sock_path=None, stop_event=None, bot=None: None)
     monkeypatch.setattr("ctb.sweeper.Sweeper.run", lambda self, stop, tick=0: None)  # tested on its own below
+    monkeypatch.setattr(I, "_terminal_background", lambda session, action: False)
     monkeypatch.setattr(I, "_clock", lambda: clock[0])
+    monkeypatch.setattr(I, "_config_mtime", lambda: config_mtime[0])
     monkeypatch.setattr(I, "_off_pause", lambda seconds: step())
     monkeypatch.setattr(I, "handle", handle)
     with pytest.raises(Stop):
@@ -309,6 +311,14 @@ def test_a_config_time_in_the_future_falls_back_to_the_last_look_while_off(switc
         "off", [("send", "before the last look", T0 + 9), ("on", T0 + 99999), ("send", "later", T0 + 12)], []])
     assert _boundary() == T0 + 10  # the listener's last look while off
     assert decided == [("before the last look", False), ("later", True)]
+
+
+def test_the_boundary_time_is_read_from_the_config_file(real_policy, monkeypatch):
+    """Production's boundary source remains the settings file mtime; only the listener harness substitutes it."""
+    from ctb import inbox as I
+    write(mirror=True)
+    monkeypatch.setattr(os, "stat", lambda path: SimpleNamespace(st_mtime=T0 + 15.7))
+    assert I._config_mtime() == T0 + 15.7
 
 
 def test_a_chat_member_update_in_the_window_is_still_handled(switch, monkeypatch):
@@ -378,7 +388,8 @@ def test_the_heartbeat_skips_its_rounds_while_off(switch, monkeypatch):
         step()
     with pytest.raises(Stop):
         heartbeat.run(C.load(), every=1, sleep_fn=sleep)
-    assert rounds == [True, True]  # the round while off did nothing
+    # Every round reaches run_once, which enforces paid credit first and then does nothing while off.
+    assert rounds == [True, False, True]
 
 
 def test_the_panel_answers_every_request_with_the_fixed_off_state(switch, monkeypatch):

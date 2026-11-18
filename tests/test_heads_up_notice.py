@@ -92,6 +92,7 @@ def pane(monkeypatch):
     p = Pane()
     monkeypatch.setattr(I, "_tmux", p)
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
+    monkeypatch.setattr(I, "pane_runs_session", lambda pane, session: True)
     return p
 
 
@@ -123,6 +124,19 @@ def test_text_that_was_in_the_box_before_and_is_still_there_was_not_sent(monkeyp
     assert not I.submitted("%1", "📩 Telegram", "📩 Telegram")
 
 
+def test_an_unreadable_box_is_not_mistaken_for_a_submitted_line(monkeypatch):
+    monkeypatch.setattr(I, "input_box", lambda pane: (None, False))
+    monkeypatch.setattr(I, "pane_raw", lambda pane: "plain screen, no dialog")
+    assert not I.submitted("%1", "continue: work", "", wait=0)
+
+
+def test_an_unreadable_box_behind_an_open_dialog_counts_as_submitted(monkeypatch):
+    monkeypatch.setattr(I, "input_box", lambda pane: (None, False))
+    monkeypatch.setattr(I, "pane_raw", lambda pane: "dialog")
+    monkeypatch.setattr(I, "_dialog_open", lambda raw: raw == "dialog")
+    assert I.submitted("%1", "continue: work", "", wait=0)
+
+
 def test_no_number_is_pressed_while_a_real_question_is_open(monkeypatch):
     p = Pane(tip=ONE_ROW + "\n" + PERMISSION)
     monkeypatch.setattr(I, "_tmux", p)
@@ -132,7 +146,7 @@ def test_no_number_is_pressed_while_a_real_question_is_open(monkeypatch):
 
 def test_the_nudge_is_sent_past_the_notice_and_never_left_behind(pane, monkeypatch):
     monkeypatch.setattr(autopilot, "type_into", autopilot.type_into)
-    autopilot.type_into("%1", "📩 Telegram")
+    autopilot.type_into("%1", "📩 Telegram", "session")
     assert pane.sent == ["📩 Telegram"] and pane.box == ""
 
 
@@ -149,11 +163,11 @@ def test_an_unsent_nudge_is_taken_out_and_the_owners_draft_stays(monkeypatch):
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I.time, "monotonic", iter(range(0, 10_000)).__next__)
     with pytest.raises(OSError):
-        autopilot.type_into("%1", "📩 Telegram")
+        autopilot.type_into("%1", "📩 Telegram", "session")
     assert p.box == "my draft "  # only the bridge's own text came out
     for _ in range(4):  # the old failure: one more marker per round
         with pytest.raises(OSError):
-            autopilot.type_into("%1", "📩 Telegram")
+            autopilot.type_into("%1", "📩 Telegram", "session")
     assert "📩" not in p.box
 
 

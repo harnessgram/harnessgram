@@ -126,7 +126,10 @@ def test_a_line_that_enter_did_not_send_is_taken_back(monkeypatch):
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I.time, "monotonic", iter(range(0, 10_000)).__next__)
     assert I.type_command(SID, "%1", "/compact") == "failed"
-    assert p.box == "" and p.sent == []  # nothing left for the next line to join
+    assert p.box == "" and p.sent == []  # a line the bridge typed is taken back: nothing left for the next line
+    # an owner's line stays visible for the exact-match Send/Clear card
+    assert I.type_command(SID, "%1", "/status", keep_stuck=True) == "stuck"
+    assert p.box == "/status"
 
 
 # --- finding 1: nothing is typed unless an empty, ready box was read ---------------------------------------------
@@ -235,14 +238,14 @@ def test_the_other_nudge_paths_wait_for_a_pending_compaction(pane, monkeypatch):
 def test_autopilot_does_not_type_into_the_owners_draft_or_stack_on_leftovers(pane, monkeypatch):
     pane.box = "my half-written reply "
     with pytest.raises(OSError):
-        autopilot.type_into("%1", "[Autopilot] continue")
+        autopilot.type_into("%1", "[Autopilot] continue", SID)
     assert pane.sent == [] and pane.box == "my half-written reply "
     pane.box = NUDGE  # not proved to be the bridge's: nothing is typed after it either
     with pytest.raises(OSError):
-        autopilot.type_into("%1", "[Autopilot] continue")
+        autopilot.type_into("%1", "[Autopilot] continue", SID)
     assert pane.sent == [] and pane.box == NUDGE
     pane.box = ""
-    autopilot.type_into("%1", "[Autopilot] continue")
+    autopilot.type_into("%1", "[Autopilot] continue", SID)
     assert pane.sent == ["[Autopilot] continue"]
 
 
@@ -278,7 +281,7 @@ def test_compact_with_the_owners_draft_in_the_box_types_nothing_and_says_so(cli,
     assert say(cli, "/compact") == "cli"
     assert pane.sent == [] and pane.box == "do not lose this "
     assert cli.started == []  # no progress bar, so no false "did not see compaction start"
-    assert any(t("cli_draft_in_box") in p["text"] for p in cli.bot.methods("sendMessage"))
+    assert any("do not lose this" in p["text"] for p in cli.bot.methods("sendMessage"))
 
 
 def test_the_compact_button_uses_the_same_gate(cli, pane, monkeypatch):
@@ -448,6 +451,59 @@ def test_auto_compact_through_the_real_gate_says_started_only_after_it_was_sent(
     assert len(auto.bot.methods("sendMessage")) == 1  # the announcement, once, after the line went in
 
 
+def test_duplicate_worker_after_boundary_does_not_repeat_the_requested_note(pane, auto):
+    assert run_auto(auto, note="keep the plan", asked=True)
+    assert not run_auto(auto, note="keep the plan", asked=True)
+    compact.mark_done(SID)  # the queued worker wakes 0.2 seconds after the boundary
+    assert not run_auto(auto, note="keep the plan", asked=True)
+    assert pane.sent == ["/compact keep the plan"]
+
+
+def test_owner_can_override_cooldown_but_not_an_inflight_compaction(pane):
+    assert I.type_command(SID, "%1", "/compact first", automatic_compact=True) == "sent"
+    assert I.type_command(SID, "%1", "/compact") == "busy"
+    compact.mark_done(SID)
+    assert I.type_command(SID, "%1", "/compact again", automatic_compact=True) == "busy"
+    assert I.type_command(SID, "%1", "/compact owner") == "sent"
+    assert pane.sent == ["/compact first", "/compact owner"]
+
+
+def test_simultaneous_workers_reserve_before_typing(monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    sent, results = [], []
+
+    def type_once(session, pane, line, *args, **kwargs):
+        sent.append(line)
+        entered.set()
+        assert release.wait(2)
+        return "sent"
+
+    monkeypatch.setattr(I, "_type_command", type_once)
+    def worker():
+        results.append(I.type_command(SID, "%1", "/compact keep", automatic_compact=True))
+
+    first = threading.Thread(target=worker)
+    second = threading.Thread(target=worker)
+    first.start()
+    assert entered.wait(2)
+    second.start()
+    release.set()
+    first.join(2)
+    second.join(2)
+    assert sorted(results) == ["busy", "sent"]
+    assert sent == ["/compact keep"]
+
+
+def test_cooldown_expires_and_other_sessions_are_independent(pane):
+    import os
+    assert I.type_command(SID, "%1", "/compact", automatic_compact=True) == "sent"
+    compact.mark_done(SID)
+    assert I.type_command("other", "%1", "/compact", automatic_compact=True) == "sent"
+    old = time.time() - compact.COMPACT_COOLDOWN - 1
+    os.utime(compact.ended_marker(SID), (old, old))
+    assert I.type_command(SID, "%1", "/compact", automatic_compact=True) == "sent"
+
+
 def test_a_box_that_changes_between_the_precheck_and_the_gate_keeps_auto_compact_quiet(monkeypatch, auto):
     class Typing(Pane):  # the owner starts typing right after the pre-check has read an empty box
         reads = 0
@@ -531,3 +587,123 @@ def test_last_session_check_runs_after_before_enter_callback(pane, monkeypatch):
         before_enter=lambda: target.__setitem__(0, '%2')) == 'stale'
     assert not pane.sent
     assert not [c for c in pane.calls if c[0] == 'send-keys' and 'Enter' in c]
+
+
+def test_a_stale_inflight_reservation_never_blocks_compaction_for_good(tmp_path, monkeypatch):
+    import os, time
+    from ctb import compact
+    monkeypatch.setattr(compact, "directory", lambda: tmp_path)
+    s = "stale-session"
+    compact.write_private(compact.inflight_marker(s), "")
+    old = time.time() - compact.INFLIGHT_TTL - 5
+    os.utime(compact.inflight_marker(s), (old, old))
+    with compact.submission_lock(s):
+        assert compact.reserve_submission(s, owner=True)
+    with compact.submission_lock(s):
+        assert not compact.reserve_submission(s, owner=True)  # the fresh one blocks a second send
+
+
+def test_expired_reader_cannot_delete_a_new_reservation(monkeypatch):
+    import os
+
+    path = compact.inflight_marker(SID)
+    compact.write_private(path, "")
+    old = time.time() - compact.INFLIGHT_TTL - 5
+    os.utime(path, (old, old))
+    original_age = compact._age
+    replaced = False
+
+    def racing_age(candidate, now):
+        nonlocal replaced
+        age = original_age(candidate, now)
+        if candidate == path and not replaced:
+            replaced = True
+            with compact.submission_lock(SID):
+                assert compact.reserve_submission(SID, owner=True)
+        return age
+
+    monkeypatch.setattr(compact, "_age", racing_age)
+    assert not compact.command_pending(SID)
+    assert path.exists()
+    assert compact.command_pending(SID)
+    with compact.submission_lock(SID):
+        assert not compact.reserve_submission(SID, owner=True)
+
+
+def test_pre_enter_failure_releases_reservation_for_delivery_and_retry(pane):
+    def fail():
+        raise RuntimeError("recording failed")
+
+    assert I.type_command(SID, "%1", "/compact", before_enter=fail) == "failed"
+    assert not compact.command_pending(SID)
+    assert I.typed_nudge(SID, "%1")
+    assert I.type_command(SID, "%1", "/compact") == "sent"
+    assert pane.sent == [NUDGE, "/compact"]
+
+
+def test_enter_attempt_failure_keeps_reservation(pane, monkeypatch):
+    original = I._tmux
+
+    def fail_enter(*args):
+        if args[0] == "send-keys" and "Enter" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return original(*args)
+
+    monkeypatch.setattr(I, "_tmux", fail_enter)
+    assert I.type_command(SID, "%1", "/compact") == "failed"
+    assert compact.command_pending(SID)
+    assert I.type_command(SID, "%1", "/compact") == "busy"
+    assert not I.typed_nudge(SID, "%1")
+
+
+def test_draft_actions_are_bound_to_the_exact_visible_text(cli, pane, monkeypatch):
+    pane.box = "owner draft"
+    token = I._draft_digest(pane.box)
+    answers = []
+    monkeypatch.setattr(I, "pane_for_session", lambda session: "%1")
+    monkeypatch.setattr(I, "_answer_button", lambda bot, q, text, *a, **k: answers.append(text))
+    q = {"data": f"ib:c:{token}", "id": "q"}
+    pane.box = "owner changed it"
+    assert I.draft_button(q, cli.cfg, cli.bot, SID) == "changed"
+    assert pane.box == "owner changed it"
+    pane.box = "owner draft"
+    assert I.draft_button(q, cli.cfg, cli.bot, SID) == "cleared"
+    assert pane.box == ""
+
+
+@pytest.mark.parametrize("action", ["s", "c"])
+def test_draft_actions_never_press_keys_into_a_dialog(cli, pane, monkeypatch, action):
+    pane.box = "owner draft"
+    answers = []
+    monkeypatch.setattr(I, "pane_for_session", lambda session: "%1")
+    monkeypatch.setattr(I, "_answer_button", lambda bot, q, text, *a, **k: answers.append(text))
+    monkeypatch.setattr(I, "_dialog_open", lambda body, session=None: True)
+    sent = []
+    real = I._tmux
+    monkeypatch.setattr(I, "_tmux", lambda *a: sent.append(a) if a and a[0] == "send-keys" else real(*a))
+    q = {"data": f"ib:{action}:{I._draft_digest(pane.box)}", "id": "q"}
+    assert I.draft_button(q, cli.cfg, cli.bot, SID) == "changed"
+    assert sent == [] and pane.box == "owner draft"
+
+
+def test_send_never_presses_enter_after_the_text_changed(cli, pane, monkeypatch):
+    pane.box = "owner draft"
+    token = I._draft_digest(pane.box)
+    reads = iter([("owner draft", True), ("owner draft edited", True)])
+    monkeypatch.setattr(I, "pane_for_session", lambda session: "%1")
+    monkeypatch.setattr(I, "_answer_button", lambda *a, **k: None)
+    monkeypatch.setattr(I, "_dialog_open", lambda body, session=None: False)
+    monkeypatch.setattr(I, "input_box", lambda p: next(reads))
+    sent = []
+    real = I._tmux
+    monkeypatch.setattr(I, "_tmux", lambda *a: sent.append(a) if a and a[0] == "send-keys" else real(*a))
+    assert I.draft_button({"data": f"ib:s:{token}", "id": "q"}, cli.cfg, cli.bot, SID) == "changed"
+    assert sent == []
+
+
+def test_the_background_agents_list_never_blocks_typing(pane):
+    """Every session with background agents shows this list; Enter still reaches the input box."""
+    pane.tip = "⏺ main\n◯ general-purpose worker"
+    box, ready = I.input_box("%1")
+    assert box == "" and ready is True
+    assert I.dialogs.non_dialog_overlay(pane.tip) is None

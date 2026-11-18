@@ -111,14 +111,14 @@ def test_sections_are_shown_only_when_filled_in_the_fixed_order(cfg, bot, thread
     assert "Reminders" not in shown(bot)
 
 
-def test_message_is_created_and_pinned_once_then_edited(cfg, bot, thread):
+def test_message_is_created_unpinned_once_then_edited(cfg, bot, thread):
     for i in range(3):
         run(cfg, bot, "check", f"task {i}")
     sends = [p for p in bot.methods("sendMessage") if p.get("parse_mode") == "HTML"]
     assert len(sends) == 1 and sends[0]["message_thread_id"] == thread and sends[0]["disable_notification"] is True
-    assert len(bot.methods("pinChatMessage")) == 1 and len(bot.methods("editMessageText")) == 2
-    pin, edit = bot.methods("pinChatMessage")[0], bot.methods("editMessageText")[-1]
-    assert pin["message_id"] == edit["message_id"] == state()[key(thread)]["id"] and pin["chat_id"] == GROUP
+    assert not bot.methods("pinChatMessage") and len(bot.methods("editMessageText")) == 2
+    edit = bot.methods("editMessageText")[-1]
+    assert edit["message_id"] == state()[key(thread)]["id"] and edit["chat_id"] == GROUP
     assert not bot.methods("deleteMessage") and not bot.methods("unpinChatMessage")
     assert "task 0" in edit["text"] and "task 2" in edit["text"]
 
@@ -127,7 +127,7 @@ def test_state_key_and_private_file(cfg, bot, thread):
     run(cfg, bot, "check", "x")
     assert list(state()) == [f"{GROUP}:{thread}"]
     topic = state()[key(thread)]
-    assert topic["pinned"] is True and topic["items"][0]["s"] == "x" and topic["items"][0]["k"] == "check"
+    assert topic["pinned"] is False and topic["items"][0]["s"] == "x" and topic["items"][0]["k"] == "check"
     assert (state_dir() / board.STATE_FILE).stat().st_mode & 0o777 == 0o600
 
 
@@ -182,7 +182,7 @@ def test_only_five_ticked_items_stay_the_oldest_ticked_go_first(cfg, bot, thread
 def test_urls_other_than_http_and_tme_are_refused(cfg, bot, thread, capsys, bad):
     assert run(cfg, bot, "add", "title", url=bad) == 1
     err = capsys.readouterr().err
-    assert err.startswith("Harnessgram: ") and err.count("\n") == 1 and ("http(s) and t.me" in err or "valid link" in err)
+    assert err.startswith("HarnessGram: ") and err.count("\n") == 1 and ("http(s) and t.me" in err or "valid link" in err)
     assert not traffic(bot) and not (state_dir() / board.STATE_FILE).exists()
 
 
@@ -197,7 +197,7 @@ def test_accepted_urls(good, expected):
 def test_url_error_is_a_clear_one_liner(cfg, bot, thread, capsys):
     run(cfg, bot, "add", "t", url="ftp://x.com")
     err = capsys.readouterr().err
-    assert err == "Harnessgram: only http(s) and t.me links can go on the board\n"
+    assert err == "HarnessGram: only http(s) and t.me links can go on the board\n"
 
 
 def test_titles_are_capped_cleaned_and_escaped(cfg, bot, thread):
@@ -237,7 +237,7 @@ def test_a_skipped_creation_is_made_by_the_next_change(cfg, bot, thread):
     assert not traffic(bot) and state()[key(thread)]["id"] == 0
     (state_dir() / "flood.json").unlink()
     run(cfg, bot, "check", "second")
-    assert len(bot.methods("sendMessage")) == 1 and len(bot.methods("pinChatMessage")) == 1
+    assert len(bot.methods("sendMessage")) == 1 and not bot.methods("pinChatMessage")
     assert "first" in shown(bot) and "second" in shown(bot)
 
 
@@ -253,17 +253,7 @@ def test_a_deleted_board_message_is_made_again(cfg, bot, thread):
     bot.fail["editMessageText"] = "Bad Request: message to edit not found"
     bot.codes["editMessageText"] = 400
     run(cfg, bot, "check", "b")
-    assert len(bot.methods("sendMessage")) == 2 and len(bot.methods("pinChatMessage")) == 2
-
-
-def test_missing_pin_right_backs_off(cfg, bot, thread):
-    bot.fail["pinChatMessage"] = "Bad Request: not enough rights to pin a message"
-    bot.codes["pinChatMessage"] = 400
-    assert run(cfg, bot, "check", "a") == 0
-    assert state()[key(thread)]["pinned"] is False and state()[key(thread)]["pin_retry_at"] > 0
-    run(cfg, bot, "check", "b")
-    assert len(bot.methods("pinChatMessage")) == 1  # no retry inside the back-off
-    assert "cannot pin the board" in (state_dir() / "mirror.log").read_text()
+    assert len(bot.methods("sendMessage")) == 2 and not bot.methods("pinChatMessage")
 
 
 def test_no_topic_session_or_ready_bridge_exits_nonzero_with_one_line(cfg, bot, capsys, monkeypatch):
@@ -389,6 +379,22 @@ def test_tapping_clears_a_reminder(cfg, bot, thread, tap):
     assert tap.queued() == ["✅ owner cleared reminder: Approve"]
 
 
+def test_old_reminder_card_owner_can_keep_then_later_clear(cfg, bot, thread, tap):
+    run(cfg, bot, "remind", "Still useful?")
+    with board._locked() as path:
+        data = board._load(path)
+        data[key(thread)]["items"][0]["q"] = 100.0
+        C.write_private(path, json.dumps(data))
+    rows = board.keyboard(cfg, GROUP, thread, board.snapshot(GROUP, thread))
+    assert [button["text"] for button in rows[0]] == ["Keep", "Clear"]
+    assert tap.press(rows[0][0]["callback_data"]) == "board"
+    kept = state()[key(thread)]["items"][0]
+    assert "q" not in kept and kept["r"] > 100
+    assert tap.queued() == ["✅ owner kept reminder: Still useful?"]
+    assert tap.press(tap.buttons()[0]["callback_data"]) == "board"
+    assert state()[key(thread)]["items"] == []
+
+
 def test_a_tap_is_answered_even_when_the_flood_gate_is_closed(cfg, bot, thread, tap):
     run(cfg, bot, "check", "a")
     data = tap.buttons()[0]["callback_data"]
@@ -444,7 +450,7 @@ def test_a_project_group_session_has_its_board_and_taps_in_its_own_group(bot, tm
     assert board.run(cfg, "check", session="home-s", text="Home task", bot=bot) == 0
     assert list(state()) == [f"{orbit}:5", f"{GROUP}:5"]
     away = [p for m, p in bot.calls if m in ("sendMessage", "pinChatMessage") and p.get("chat_id") == orbit]
-    assert len(away) == 2 and "Approve" in away[0]["text"] and away[0]["message_thread_id"] == 5
+    assert len(away) == 1 and "Approve" in away[0]["text"] and away[0]["message_thread_id"] == 5
     assert all(p.get("chat_id") == GROUP for m, p in bot.calls if m in ("sendMessage", "pinChatMessage") and p not in away)
     markup = away[0]["reply_markup"]["inline_keyboard"][0][0]
 
@@ -482,6 +488,8 @@ def test_cli_parses_every_board_command(cfg, bot, thread, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "1. ⏰ wait (until 18:00)" in out and "2. ☑ do it" in out and "3. 📎 Title https://example.com/z" in out
     assert cli.main(["board", "add", "t", "ftp://x.com", "--session", SID]) == 1
+    assert cli.main(["board", "remind", "wait", "--ledger", "41", "--session", SID]) == 1
+    assert "--ledger must be project#id or an exact https link" in capsys.readouterr().err
     assert cli.main(["board", "remove", "9", "--session", SID]) == 1
     with pytest.raises(SystemExit):
         cli.main(["board"])

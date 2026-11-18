@@ -51,8 +51,8 @@ def test_configured_lead_wins_and_ended_sessions_are_never_asked():
 
 def run(body, lang="en", mutate=None):
     script = (ROOT / "cockpit_v2.js").read_text().replace("__V2_STRINGS__", json.dumps(panel_page.V2_STRINGS, ensure_ascii=False))
-    script = "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock",
-                                         "requestAction", "requestRow", "v2ModeRow", "settingsBox", "sendId")) + script
+    script = 'var requestProject="",requestOwnerOnly=false;\n' + "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock",
+                                         "requestAction", "requestRow", "requestRank", "requestDetail", "requestList", "requestGroups", "requestText", "requestBoard", "v2ModeRow", "settingsBox", "sendId")) + script
     script += "\nvar sends={};\n" + (ROOT / "cockpit_v2_screens.js").read_text()
     state = sample_state(lang)
     if mutate:

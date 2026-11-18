@@ -63,9 +63,8 @@ def requests(monkeypatch):
 @pytest.mark.parametrize("call", [
     lambda cfg: translate.ask("name this topic: " + OAUTH + " " + FAKE_KEY, cfg, system="project note " + HANDOFF),
     lambda cfg: translate.gemini("Open " + OAUTH + " then " + HANDOFF + " " + FAKE_KEY, cfg),
-    lambda cfg: translate.speak("שלום " + HANDOFF + " " + FAKE_KEY, cfg),
     lambda cfg: translate.google("Open " + OAUTH + " then " + HANDOFF, "he"),
-], ids=["ask", "gemini", "speak", "google"])
+], ids=["ask", "gemini", "google"])
 def test_each_outside_request_is_sanitized_at_the_wire(requests, call):
     """The last line of defence, per request: whatever a caller passes (prompt, system instruction), the body
     sent carries no owner-only link and no credential."""
@@ -75,6 +74,16 @@ def test_each_outside_request_is_sanitized_at_the_wire(requests, call):
         pass  # Google answers nothing in tests; what was sent is what counts
     assert requests, "no request was made"
     assert all(leaked(body) == [] for body in requests), requests
+
+
+def test_shared_speech_sanitizes_before_the_radio_voice(tmp_path, monkeypatch):
+    from ctb import radio, radio_voice
+    spoken = []
+    monkeypatch.setattr(radio, "folder", lambda: tmp_path / "radio")
+    monkeypatch.setattr(radio_voice, "speak", lambda text, *args, **kwargs: (spoken.append(text) or b"pcm", "vertex"))
+
+    assert translate.speak("שלום " + HANDOFF + " " + FAKE_KEY, make_cfg()) == b"pcm"
+    assert spoken and leaked(spoken[0]) == []
 
 
 def test_the_radio_voice_request_is_sanitized_text_and_style(monkeypatch):

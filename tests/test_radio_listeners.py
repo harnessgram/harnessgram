@@ -13,6 +13,7 @@ from test_radio_room import _station
 
 
 def settings(**overrides):
+    overrides.setdefault("voice_route", "cloud")
     return radio.settings(Config(radio=overrides))
 
 

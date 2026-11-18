@@ -92,6 +92,8 @@ def test_detection_rejects_transcript_approval_and_plain_spinner(body):
 @pytest.fixture
 def running(rig, monkeypatch):
     rig.scr.body = RUNNING
+    # Keep this focused suite fast while exercising the same configurable threshold with a fake clock.
+    rig.cfg.stuck_command_minutes = 1 / 3
     monkeypatch.setattr(I, "session_state", lambda session: {"state": "busy"})
     D._first_seen.clear()
     return rig
@@ -123,8 +125,10 @@ def test_card_waits_twenty_seconds_and_is_silent_in_session_topic(running):
     card = last_card(running)
     assert card["disable_notification"] is True
     assert card["chat_id"] == OWNER and card["message_thread_id"] == running.thread
-    assert len(buttons(card)) == 1
+    assert len(buttons(card)) == 2
     assert buttons(card)[0]["text"] == "Move to background"
+    assert buttons(card)[1]["text"] == "Stop it"
+    assert card["text"] == "a command has been running 1 min"
     assert t("bg_btn", lang="he") == "העבר לרקע"
 
 
@@ -284,6 +288,26 @@ def test_tap_sends_exactly_one_control_b_and_drops_keyboard(running, monkeypatch
     assert running.bot.methods("editMessageText")[-1]["text"] == t("bg_toast_done", lang="en")
     tap(running, card)
     assert running.scr.sent == ["C-b"]
+
+
+def test_stop_sends_escape_and_verifies_the_command_changed(running, monkeypatch):
+    card = show(running)
+    running.scr.after["Escape"] = IDLE
+    calls = []
+    original = running.scr.tmux
+
+    def tmux(*args):
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(I, "_tmux", tmux)
+    press(running, buttons(card)[1]["callback_data"])
+    assert calls == [("send-keys", "-t", "%1", "Escape")]
+    assert running.scr.sent == ["Escape"]
+    assert running.bot.methods("editMessageText")[-1]["text"] == "Stopped"
+    assert drops(running)[-1]["reply_markup"] == {"inline_keyboard": []}
+    assert not D.rec_get("s").get("typed")
+    assert running.bot.methods("answerCallbackQuery")[-1]["text"] == "Stopped"
 
 
 def test_failed_verification_sends_no_extra_keys_or_replacement_card(running):

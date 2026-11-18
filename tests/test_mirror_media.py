@@ -313,3 +313,42 @@ def test_a_large_file_whose_tracks_are_out_of_reach_is_never_sent_as_video():
             return (head + (5 * 1024 * 1024 - 24).to_bytes(4, 'big') + b'mdat' + bytes(n))[:n]
     assert M._media_info('.mp4', Big())[0] == 'sendDocument'
     assert M._media_info('.m4a', Big())[0] == 'sendAudio'
+
+
+def test_video_carries_its_display_size(tmp_path, monkeypatch):
+    """A vertical proof looked stretched in Telegram's player; width and height go with it."""
+    from ctb import mirror as m
+    monkeypatch.setattr(m, 'video_size', lambda path: (1080, 1920))
+    bot = RecordingBot()
+    sender = mirror_for(Config(bot_token=GOOD_TOKEN, owner_chat_id=7), tmp_path, bot)
+    path = tmp_path / 'clip.mp4'
+    path.write_bytes(mp4())
+    sender.send_file('session', 's', str(path))
+    sent = bot.methods('sendVideo')[0]
+    assert (sent['width'], sent['height']) == ('1080', '1920')
+
+
+def test_video_size_reads_ffprobe_with_rotation_and_aspect(monkeypatch):
+    import json as _json
+    import subprocess as _sp
+    from ctb import mirror as m
+    monkeypatch.setattr(m.shutil, 'which', lambda name: '/x/ffprobe')
+
+    def fake(stream):
+        return lambda *a, **k: _sp.CompletedProcess(a, 0, _json.dumps({'streams': [stream]}), '')
+    monkeypatch.setattr(m.subprocess, 'run', fake({'width': 1080, 'height': 1920, 'sample_aspect_ratio': '1:1'}))
+    assert m.video_size('v.mp4') == (1080, 1920)
+    monkeypatch.setattr(m.subprocess, 'run', fake({'width': 1920, 'height': 1080,
+                                                   'side_data_list': [{'rotation': -90}]}))
+    assert m.video_size('v.mp4') == (1080, 1920)
+    monkeypatch.setattr(m.subprocess, 'run', fake({'width': 720, 'height': 576, 'sample_aspect_ratio': '16:15'}))
+    assert m.video_size('v.mp4') == (768, 576)
+    monkeypatch.setattr(m.subprocess, 'run', fake({}))
+    assert m.video_size('v.mp4') is None
+
+
+def test_video_size_without_ffprobe_is_none(monkeypatch):
+    from ctb import mirror as m
+    monkeypatch.setattr(m.shutil, 'which', lambda name: None)
+    monkeypatch.setattr(m.os.path, 'exists', lambda p: False)
+    assert m.video_size('v.mp4') is None

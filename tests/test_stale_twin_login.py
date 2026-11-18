@@ -42,7 +42,7 @@ def stale_texts(bot):
 
 
 def full_window(name, until):
-    write_private(accounts.usage_path(name), json.dumps({"at": "2026-11-01T10:00:00Z", "five_hour": 100,
+    write_private(accounts.usage_path(name), json.dumps({"at": NOW, "five_hour": 100,
                                                         "five_hour_resets": until, "weekly": 10, "weekly_resets": until}))
 
 
@@ -50,6 +50,7 @@ def full_window(name, until):
 def twins_pair():
     """main = stale pro login, account2 = max login, one address."""
     accounts.add("account2")
+    write_private(accounts.usage_path("account2"), json.dumps({"at": NOW, "five_hour": 0, "weekly": 0}))
     set_emails(main="me@example.com", account2="me@example.com")
     set_plans(main="pro", account2="max")
 

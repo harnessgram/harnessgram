@@ -83,6 +83,7 @@ def test_records_search_and_open(context, bot, monkeypatch, tmp_path):
     I.history_open(cfg, bot, msg, topics, items[0])
     assert topics.thread_of(sid)
     assert calls[0][0] == 'new-session' and '--resume ' + sid in calls[0][-1]
+    assert calls[0][calls[0].index('-x'):calls[0].index('-x') + 4] == ('-x', '200', '-y', '60')
     assert not any(call[0] == 'kill-session' for call in calls)
 
 

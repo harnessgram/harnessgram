@@ -60,7 +60,7 @@ TOMBSTONE = 900.0          # a put-back lease is kept this long so that a late p
 
 # The bridge's own framed block, as framing.fenced / framing.receipt write it. Telegram texts are scrubbed of
 # these tags (framing.sanitize), so only the bridge can put one in a hook's output.
-TAG = re.compile(r'<telegram-(?:message|delivery) nonce="([0-9a-f]{16})"')
+TAG = re.compile(r'<(?:telegram-(?:message|delivery)|mcp-message) nonce="([0-9a-f]{16})"')
 
 
 def _texts(value) -> List[str]:
@@ -196,7 +196,7 @@ class TranscriptIndex:
     @staticmethod
     def _line(f: _File, line: bytes) -> None:
         here: set = set()
-        if b"telegram-" in line and b"nonce=" in line:
+        if (b"telegram-" in line or b"mcp-message" in line) and b"nonce=" in line:
             try:
                 event = json.loads(line)
             except ValueError:

@@ -76,7 +76,7 @@ def test_a_progress_update_keeps_the_steps_title_and_detail_it_does_not_restate(
 ])
 def test_a_bad_card_is_refused_with_a_reason_and_nothing_is_stored(rig, capsys, kw):
     assert run(rig, **kw) == 1
-    assert capsys.readouterr().err.startswith("Harnessgram: ")
+    assert capsys.readouterr().err.startswith("HarnessGram: ")
     assert cards.open_cards() == []
 
 
@@ -229,6 +229,15 @@ def test_a_failed_blocking_lock_is_a_refusal_not_a_crash(rig, monkeypatch):
         raise OSError("interrupted")
     monkeypatch.setattr(cards.fcntl, "flock", boom)
     assert run(rig, "progress", title="Building", percent=10) == 1
+
+
+def test_apns_storage_error_does_not_duplicate_saved_card(rig, monkeypatch):
+    from ctb import apns
+    monkeypatch.setattr(apns, "notify", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
+    rec = cards.publish(ORBIT_S, ORBIT, THREAD, "progress", "Build", percent=10, now=100)
+    assert cards.close(ORBIT_S, rec["id"], now=101)["state"] == "closed"
+    with pytest.raises(cards.CardError, match="already closed"):
+        cards.close(ORBIT_S, rec["id"], now=102)
 
 
 def test_a_progress_update_keeps_the_percent_it_does_not_mention():

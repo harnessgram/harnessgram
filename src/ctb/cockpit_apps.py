@@ -111,7 +111,7 @@ def _warn(name: str, reason: str) -> None:
         if key in _warned:
             return
         _warned.add(key)
-    print(f"Harnessgram: cockpit app {name!r} ignored: {reason}", file=sys.stderr)
+    print(f"HarnessGram: cockpit app {name!r} ignored: {reason}", file=sys.stderr)
 
 
 def _inside(path: str, root: str) -> bool:

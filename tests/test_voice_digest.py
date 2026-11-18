@@ -100,6 +100,24 @@ def test_hourly_includes_ordinary_updates(clock, bot, audio):
     assert D.tick(c, bot, clock + 3600)
 
 
+def test_hourly_drops_working_only_and_skips_empty_digest(clock, bot, audio):
+    c = cfg("hourly")
+    add(c, clock, important=False, text="Session alpha is working")
+    assert not D.tick(c, bot, clock + 3600)
+    assert not audio and not bot.calls
+    assert not list((D.folder() / "pending").glob("*.json"))
+
+
+def test_short_concrete_outcome_is_spoken_and_consumed_only_after_delivery(clock, bot, audio):
+    c = cfg("hourly")
+    add(c, clock, important=False, text="PR 27 merged; 14 tests passed")
+    pending = list((D.folder() / "pending").glob("*.json"))
+    assert len(pending) == 1
+    assert D.tick(c, bot, clock + 3600)
+    assert "PR 27 merged; 14 tests passed" in audio[0]
+    assert not pending[0].exists()
+
+
 @pytest.mark.parametrize("day,hour,minute,expected", [
     (9, 22, 59, False), (9, 23, 0, True), (10, 6, 59, True), (10, 7, 0, False),
     (13, 11, 59, False), (13, 12, 0, True), (14, 12, 0, True), (15, 7, 0, False),

@@ -8,13 +8,15 @@ links and paths are shielded with placeholders so no engine can mangle them.
 """
 from __future__ import annotations
 
-import base64
+import contextlib
+import fcntl
 import hashlib
 import contextvars
 import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -66,6 +68,54 @@ def _record_engine(engine: str) -> None:
         _used.set(_used.get() + (engine,))
 
 
+# Which Gemini model a call uses. Owner-facing text (the closing summary of a mirrored reply) keeps the configured
+# gemini_model; everything else (live step titles, interim prose, notices, cards, topic names, radio prompts) is
+# routine and goes to the cheaper routine model first. See _models.
+_owner_facing = contextvars.ContextVar("gemini_owner_facing", default=False)
+
+
+@contextlib.contextmanager
+def owner_facing():
+    """Inside this block Gemini calls use gemini_model first (the owner reads this text closely)."""
+    token = _owner_facing.set(True)
+    try:
+        yield
+    finally:
+        _owner_facing.reset(token)
+
+
+def _models(cfg: Config) -> List[str]:
+    """The models one call tries, in order. Owner-facing: gemini_model, then gemini_fallback_model. Routine:
+    gemini_routine_model (empty: the fallback model when one is set, else gemini_model), then gemini_model, so a
+    routine call that the cheap model cannot answer still gets an answer."""
+    main = cfg.gemini_model
+    fallback = getattr(cfg, "gemini_fallback_model", "") or ""
+    if _owner_facing.get():
+        order = (main, fallback)
+    else:
+        routine = getattr(cfg, "gemini_routine_model", "") or fallback or main
+        order = (routine, fallback if routine == main else main)
+    return [m for m in dict.fromkeys(order) if m]
+
+
+_HERE = os.path.normcase(os.path.abspath(__file__))
+
+
+def _source() -> str:
+    """The first caller outside this module ("progress.heading_he"), for the usage and failure logs: which
+    feature spends the Gemini calls. Module and function names only, never arguments or text."""
+    frame, first = sys._getframe(1), ""
+    while frame is not None:
+        if os.path.normcase(os.path.abspath(frame.f_code.co_filename)) != _HERE:
+            module = str(frame.f_globals.get("__name__", "?")).rsplit(".", 1)[-1]
+            name = f"{module}.{frame.f_code.co_name}"
+            if frame.f_code.co_name != "<lambda>":
+                return name
+            first = first or name  # a lambda says little: the function that holds it says more
+        frame = frame.f_back
+    return first or "translate"
+
+
 GEMINI_BUDGET = 7.0  # seconds for a raw ask (the default)
 REQUEST_CAP = 9.0  # one request waits at most this long: Vertex sometimes stalls past 13 s, and the
 # next route or the fallback model is better used than the rest of the budget
@@ -114,19 +164,33 @@ def _pause_route(name: str, seconds: float) -> None:
         pass
 
 
-def _log_failure(route: str, model: str, what: str) -> None:
-    """One line per failed Gemini attempt (no text, no credential), so failures are visible, not silent."""
+def _log_failure(route: str, model: str, what: str, source: str = "") -> None:
+    """One line per failed Gemini attempt (no text, no credential), so failures are visible, not silent. The
+    caller (`source`) is the last field."""
     try:
         log_path = state_dir() / "gemini-failures.log"
         private_dir(log_path.parent)
         with open(log_path, "a", encoding="utf-8") as lf:
-            lf.write(f"{int(time.time())} {route} {model} {what}\n")
+            lf.write(f"{int(time.time())} {route} {model} {what}" + (f" src={source}" if source else "") + "\n")
+    except OSError:
+        pass
+
+
+def _log_usage(prompt_tokens: int, out_tokens: int, model: str, source: str, digest: str) -> None:
+    """One line per answered Gemini call: time, input and output tokens, "text", the model, the caller and a short
+    hash of the request (the same hash twice is a repeated request). Never the text or a credential."""
+    try:
+        log_path = state_dir() / "gemini-usage.log"
+        private_dir(log_path.parent)
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(f"{int(time.time())} {prompt_tokens} {out_tokens} text {model} {source} {digest}\n")
     except OSError:
         pass
 
 
 def _gemini_call(prompt: str, cfg: Config, before_attempt: Optional[Callable[[], bool]] = None,
-                 system: str = "", budget: float = GEMINI_BUDGET) -> str:
+                 system: str = "", budget: float = GEMINI_BUDGET,
+                 accept: Optional[Callable[[str], bool]] = None) -> str:
     """One Gemini prompt over the configured routes (Vertex first, then API key); '' on failure.
     All routes (and the fallback model, cfg.gemini_fallback_model, tried only when the first model failed)
     share one `budget` in seconds; credentials stay in headers and in this process's memory. A route that
@@ -137,6 +201,8 @@ def _gemini_call(prompt: str, cfg: Config, before_attempt: Optional[Callable[[],
     clean = getattr(cfg, "redact_outgoing", True)
     prompt, system = for_outside(prompt, clean), (for_outside(system, clean) if system else "")
     deadline = time.monotonic() + budget
+    source = _source()
+    digest = hashlib.sha256(f"{system}\0{prompt}".encode("utf-8")).hexdigest()[:10]
     # Vertex refuses a turn without a role ("Please use a valid role"); the API-key route accepts both.
     generation = {"temperature": 0.2}
     if cfg.gemini_thinking:  # a thinking model left at its default thinks past the budget ("medium": 20 s)
@@ -145,10 +211,10 @@ def _gemini_call(prompt: str, cfg: Config, before_attempt: Optional[Callable[[],
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
     project = urllib.parse.quote(cfg.gemini_vertex_project, safe="-._")
-    models = [m for m in dict.fromkeys((cfg.gemini_model, getattr(cfg, "gemini_fallback_model", ""))) if m]
-    for n, name in enumerate(models):
+    for name in _models(cfg):
         model = urllib.parse.quote(name, safe="-._")
-        payload = json.dumps(body if n == 0 else dict(body, generationConfig={"temperature": 0.2})).encode()
+        # The thinking level is set for gemini_model only; the other models keep their defaults.
+        payload = json.dumps(body if name == cfg.gemini_model else dict(body, generationConfig={"temperature": 0.2})).encode()
         routes = []
         if project and cfg.gemini_token_command:
             routes.append(("vertex", f"https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/{model}:generateContent",
@@ -157,6 +223,7 @@ def _gemini_call(prompt: str, cfg: Config, before_attempt: Optional[Callable[[],
             routes.append(("key", f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                            cfg.gemini_key_command, "x-goog-api-key"))
         paused = _paused_routes(time.time())
+        rejected = False
         for route, url, command, header in routes:
             tag = f"{route}:{name}"
             if tag in paused:
@@ -180,82 +247,51 @@ def _gemini_call(prompt: str, cfg: Config, before_attempt: Optional[Callable[[],
                     prompt_tokens = int(u.get("promptTokenCount", 0))
                     candidates_tokens = int(u.get("candidatesTokenCount", 0)) + int(u.get("thoughtsTokenCount", 0))
                     if prompt_tokens or candidates_tokens:
-                        log_path = state_dir() / "gemini-usage.log"
-                        private_dir(log_path.parent)
-                        with open(log_path, "a", encoding="utf-8") as lf:
-                            lf.write(f"{int(time.time())} {prompt_tokens} {candidates_tokens}\n")
+                        _log_usage(prompt_tokens, candidates_tokens, name, source, digest)
                 except Exception:
                     pass
                 out = result["candidates"][0]["content"]["parts"][0]["text"].strip()
                 if out:
-                    return out
-                _log_failure(route, name, "empty")
+                    if accept is None or accept(out):
+                        return out
+                    _log_failure(route, name, "invalid translation", source)
+                    rejected = True
+                    break
+                _log_failure(route, name, "empty", source)
             except urllib.error.HTTPError as e:
-                _log_failure(route, name, f"http {e.code}")
+                _log_failure(route, name, f"http {e.code}", source)
                 if e.code == 401 and header == "Authorization":
                     _creds.pop((tuple(command), header), None)  # an expired token: fetch a new one next time
                 if e.code in ROUTE_PAUSE:
                     _pause_route(tag, ROUTE_PAUSE[e.code])
             except Exception as e:  # noqa: BLE001 - a broken route must never stop the next one
-                _log_failure(route, name, type(e).__name__)
+                _log_failure(route, name, type(e).__name__, source)
                 continue
+        if rejected:
+            continue
     return ""
 
 
-def speak(text: str, cfg: Config, voice: str = "Kore") -> bytes:
-    """Hebrew speech on Gemini (model gemini-2.5-flash-tts, voice Kore): raw 24 kHz 16-bit mono PCM bytes, or b'' on any failure."""
+def speak(text: str, cfg: Config) -> bytes:
+    """Speak with the radio's configured, cached and daily-budgeted voice.
+
+    Every non-radio caller comes through here, so voice notes and car summaries use
+    the same model and voice as the radio and share its paid-speech ledger.  The
+    radio voice implementation also supplies the free system-voice fallback.
+    """
+    # Local imports avoid making the radio/translation import graph cyclic at
+    # module import time.
+    from . import radio, radio_voice
+
     text = for_outside(text, getattr(cfg, "redact_outgoing", True))
-    deadline = time.monotonic() + 15.0
-    model = urllib.parse.quote("gemini-2.5-flash-tts", safe="-._")
-    payload = json.dumps({
-        "contents": [{"role": "user", "parts": [{"text": text}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {"voiceName": voice}
-                }
-            }
-        }
-    }).encode()
-    project = urllib.parse.quote(cfg.gemini_vertex_project, safe="-._")
-    routes = []
-    if project and cfg.gemini_token_command:
-        routes.append((f"https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/{model}:generateContent",
-                       cfg.gemini_token_command, "Authorization"))
-    if cfg.gemini_key_command:
-        routes.append((f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                       cfg.gemini_key_command, "x-goog-api-key"))
-    for url, command, header in routes:
-        try:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            proc = subprocess.run(command, capture_output=True, text=True, timeout=left, check=True, shell=False)
-            credential = proc.stdout.strip()
-            left = deadline - time.monotonic()
-            if not credential or left <= 0:
-                continue
-            headers = {"Content-Type": "application/json", header: ("Bearer " + credential if header == "Authorization" else credential)}
-            req = urllib.request.Request(url, data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=left) as response:
-                result = json.load(response)
-            try:
-                u = result.get("usageMetadata") or {}
-                prompt_tokens = int(u.get("promptTokenCount", 0))
-                candidates_tokens = int(u.get("candidatesTokenCount", 0))
-                if prompt_tokens or candidates_tokens:
-                    log_path = state_dir() / "gemini-usage.log"
-                    private_dir(log_path.parent)
-                    with open(log_path, "a", encoding="utf-8") as lf:
-                        lf.write(f"{int(time.time())} {prompt_tokens} {candidates_tokens} tts\n")
-            except Exception:
-                pass
-            data_b64 = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-            return base64.b64decode(data_b64)
-        except Exception:
-            continue
-    return b""
+    directory = radio.folder()
+    with radio._SPEAK_LOCK:
+        pcm, _ = radio_voice.speak(
+            text, cfg, radio.settings(cfg),
+            private_dir(directory / "tts-cache"),
+            radio_voice.paid_usage(directory),
+        )
+    return pcm
 
 
 HEBREW_STYLE = (
@@ -291,7 +327,12 @@ def gemini(text: str, cfg: Config) -> str:
                   "question (never answer it). Output only the translation, without the tags.")
     if glossary:
         system += f" Glossary: {glossary}."
-    out = _gemini_call(f"<text>\n{text}\n</text>", cfg, system=system, budget=TRANSLATE_BUDGET)
+    def valid(candidate: str) -> bool:
+        candidate = re.sub(r"^\s*<text>\s*|\s*</text>\s*$", "", candidate)
+        return not wrong_script(candidate, cfg.target_language) and not still_untranslated(
+            text, candidate, cfg.target_language)
+
+    out = _gemini_call(f"<text>\n{text}\n</text>", cfg, system=system, budget=TRANSLATE_BUDGET, accept=valid)
     return re.sub(r"^\s*<text>\s*|\s*</text>\s*$", "", out)
 
 
@@ -470,20 +511,23 @@ def translate_text(text: str, cfg: Config, fast: bool = False, keep_links: bool 
 
 
 def _cache_path(text: str, cfg: Config) -> Path:
-    key = hashlib.sha256(f"{L.base(cfg.target_language)}\0{text.strip()}".encode("utf-8")).hexdigest()
+    tier = "owner" if _owner_facing.get() else "routine"
+    key = hashlib.sha256(f"{L.base(cfg.target_language)}\0{tier}\0{text.strip()}".encode("utf-8")).hexdigest()
     return state_dir() / "translate-cache" / key
 
 
 def cache_prune(days: int = 14, now: Optional[float] = None) -> int:
     """Remove cached translations not written for `days` days. Returns how many."""
-    root, removed = state_dir() / "translate-cache", 0
+    removed = 0
     cutoff = (now or time.time()) - days * 86400
-    if root.is_dir():
+    for root in (state_dir() / "translate-cache", state_dir() / "translate-inflight"):
+        if not root.is_dir():
+            continue
         for f in root.iterdir():
             try:
                 if f.is_file() and f.stat().st_mtime < cutoff:
                     f.unlink()
-                    removed += 1
+                    removed += root.name == "translate-cache"  # in-flight marks are not translations
             except OSError:
                 pass
     return removed
@@ -526,15 +570,56 @@ def _one_held(text: str, cfg: Config, fast: bool) -> str:
         hit = _read_cache(cached, cfg)
         if hit is not None:
             return hit
-    out = _spaced(_engines(text, cfg, fast), cfg)
-    # A translation made inside the short Stop hook (fast) used a quick engine; caching it would stop
-    # the detached mirror from ever asking Gemini for the better one.
-    if cfg.translate_cache and not fast:
+    if fast or not cfg.translate_cache:
+        return _spaced(_engines(text, cfg, fast), cfg)
+    # Several processes often ask for the same text at once (a subagent's summary goes to its card, its notice
+    # and its report): the first one translates, the others wait for it and read its answer from the cache.
+    with in_flight(cached.name):
+        hit = _read_cache(cached, cfg)
+        if hit is not None:
+            return hit
+        out = _spaced(_engines(text, cfg, fast), cfg)
+        # A translation made inside the short Stop hook (fast) used a quick engine and is never cached (above):
+        # caching it would stop the detached mirror from ever asking Gemini for the better one.
         try:
             write_private(cached, json.dumps({"text": out, "engine": _used.get()[-1] if _used.get() else ""}, ensure_ascii=False))
         except OSError:
             pass
     return out
+
+
+IN_FLIGHT_WAIT = TRANSLATE_BUDGET + 2.0  # seconds a second asker waits for the first one before asking itself
+
+
+@contextlib.contextmanager
+def in_flight(key: str, wait: Optional[float] = None):
+    """Hold the in-flight mark for `key` (a cache key, hex) across processes: a second holder waits until the
+    first one finished (then it finds the answer in the cache) or until `wait` seconds passed (then it goes on
+    without the mark, never stuck behind a hung process). Any error while taking the mark goes on without it."""
+    lock = None
+    try:
+        folder = private_dir(state_dir() / "translate-inflight")
+        lock = open(folder / (re.sub(r"[^0-9A-Za-z]", "", key)[:64] or "x"), "a")
+        deadline = time.monotonic() + (IN_FLIGHT_WAIT if wait is None else wait)
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    lock.close()
+                    lock = None
+                    break
+                time.sleep(0.1)
+    except OSError:
+        if lock is not None:
+            lock.close()
+        lock = None
+    try:
+        yield
+    finally:
+        if lock is not None:
+            lock.close()  # closing releases the lock; the empty mark file stays (pruned with the cache)
 
 
 def _read_cache(cached: Path, cfg: Config) -> Optional[str]:
@@ -619,7 +704,8 @@ def _engines(text: str, cfg: Config, fast: bool) -> str:
 
 # --- whole replies: paragraphs already in the target language stay as they are
 
-def translate_reply(reply: str, translate_fn: Callable[[str], str], lang: str) -> str:
+def translate_reply(reply: str, translate_fn: Callable[[str], str], lang: str,
+                    summary_fn: Optional[Callable[[str], str]] = None) -> str:
     """Translate a whole reply with ONE translator call.
 
     * fenced code blocks are never sent to the translator;
@@ -629,6 +715,8 @@ def translate_reply(reply: str, translate_fn: Callable[[str], str], lang: str) -
       index. One call per paragraph took ~10 s on a long mixed reply, and the app cancels
       a Stop hook at its timeout. If the answer has a different paragraph count, the
       untouched paragraphs come first and then the translated block.
+    * `summary_fn`: the reply's last paragraph is its closing summary (fmt.join_summary). It is translated
+      on its own with summary_fn (the owner-facing model), at the same time as the rest.
     """
     items: List[Tuple[str, str]] = []  # ("keep" | "tr", text) in reply order
     for i, seg in enumerate(fmt.FENCE.split(reply.strip())):
@@ -638,6 +726,11 @@ def translate_reply(reply: str, translate_fn: Callable[[str], str], lang: str) -
         for para in (p.strip() for p in re.split(r"\n\s*\n", seg)):
             if para:
                 items.append(("tr" if L.needs_translation(para, lang) else "keep", para))
+    if summary_fn is not None and items and items[-1][0] == "tr":
+        if len(items) == 1:
+            out = summary_fn(apply_glossary(items[0][1], lang)).strip()
+            return fmt.unmix(out) if L.base(lang) == "he" else out
+        return _reply_with_summary(items, translate_fn, summary_fn, lang)
     todo = [apply_glossary(t, lang) for kind, t in items if kind == "tr"]
     if not todo:
         return "\n\n".join(t for _, t in items)
@@ -649,6 +742,36 @@ def translate_reply(reply: str, translate_fn: Callable[[str], str], lang: str) -
     it = iter(done)
     res = "\n\n".join(next(it) if kind == "tr" else t for kind, t in items)
     return fmt.unmix(res) if L.base(lang) == "he" else res
+
+
+def _reply_with_summary(items: List[Tuple[str, str]], translate_fn: Callable[[str], str],
+                        summary_fn: Callable[[str], str], lang: str) -> str:
+    """translate_reply for a reply whose last paragraph (a "tr" item) is its summary: the summary goes to
+    summary_fn in a worker thread while the body goes to translate_fn. A failed summary call fails the reply,
+    like a failed body call."""
+    import threading
+    box: dict = {}
+
+    def work() -> None:
+        try:
+            box["out"] = summary_fn(apply_glossary(items[-1][1], lang)).strip()
+            box["engines"] = used_engines()  # this thread's own copy of the record: handed back below
+        except Exception as e:  # noqa: BLE001 - raised again below, in the caller's thread
+            box["error"] = e
+
+    spaced = (lambda text: fmt.unmix(text)) if L.base(lang) == "he" else (lambda text: text)
+    th = threading.Thread(target=contextvars.copy_context().run, args=(work,), daemon=True)
+    th.start()
+    try:
+        rest = "\n\n".join(t for _, t in items[:-1])
+        body = translate_reply(rest, translate_fn, lang) if any(kind == "tr" for kind, _ in items[:-1]) else spaced(rest)
+    finally:
+        th.join()
+    if "error" in box:
+        raise box["error"]
+    for engine in box.get("engines", ()):
+        _record_engine(engine)
+    return body + "\n\n" + spaced(box.get("out") or items[-1][1])
 
 
 def needs_translation(reply: str, lang: str) -> bool:

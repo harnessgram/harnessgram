@@ -15,6 +15,12 @@ def test_defaults_and_coercion():
     assert cfg.ready
 
 
+def test_runner_socket_directory_setting():
+    assert C.from_dict({"runner_socket_dir": " /tmp/harnessgram-sockets "}).runner_socket_dir == "/tmp/harnessgram-sockets"
+    with pytest.raises(C.ConfigError):
+        C.from_dict({"runner_socket_dir": []})
+
+
 def test_bad_values_are_rejected():
     with pytest.raises(C.ConfigError):
         C.from_dict({"owner_chat_id": "abc"})

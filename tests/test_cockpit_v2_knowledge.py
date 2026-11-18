@@ -22,7 +22,7 @@ ROOT = Path(panel_page.__file__).parent
 
 def run(body, lang="he", data=None, reply=None):
     script = (ROOT / "cockpit_v2.js").read_text().replace("__V2_STRINGS__", json.dumps(panel_page.V2_STRINGS, ensure_ascii=False))
-    script = "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock", "requestAction", "requestRow", "v2ModeRow", "settingsBox")) + script
+    script = 'var requestProject="",requestOwnerOnly=false;\n' + "\n".join(func(n) for n in ("el", "icon", "svgAdd", "he", "shown", "compactStorageKey", "compactBlock", "requestAction", "requestRow", "requestRank", "requestDetail", "requestList", "requestGroups", "requestText", "requestBoard", "v2ModeRow", "settingsBox")) + script
     script += "\n" + (ROOT / "cockpit_v2_screens.js").read_text() + "\n" + (ROOT / "cockpit_v2_knowledge.js").read_text()
     script += "\n" + (ROOT / "cockpit_v2_addons.js").read_text()  # Settings' second entry
     script += "\nvar view='settings',rendered=0;function render(){rendered++;}vkData=%s;" % json.dumps(data or knowledge_sample(lang))

@@ -34,7 +34,7 @@ def test_card_lists_name_project_and_last_activity_with_keep_and_close(lang):
     assert got["title"] == c["title"] + " (2)" and got["rows"] == 2 and got["keep"] == got["close"] == 2
     assert got["all"] == c["closeAll"] and c["last"] in got["meta"]
     if lang == "he":
-        assert got["title"] == "נושאים ישנים (2)"
+        assert got["title"] == "סגירת נושאים ישנים (2)"
 
 
 def test_no_card_without_stale_topics():

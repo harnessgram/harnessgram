@@ -29,7 +29,7 @@ def isolated_channel(monkeypatch):
 
 def live_home():
     radio.set_wanted(True)
-    path = radio.folder() / "hls"
+    path = radio.folder() / "public-hls"
     path.mkdir(exist_ok=True)
     (path / "segment-123.ts").write_bytes(b"sample audio")
     (path / "live.m3u8").write_text("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:123\n#EXTINF:2,\nsegment-123.ts\n")
@@ -519,7 +519,7 @@ def test_wait_deadline_resets_only_after_stable_stream(monkeypatch, duration, ex
     assert len(waits) == expected_waits
 
 
-def test_setup_failure_counts_even_if_feed_disappears(monkeypatch):
+def test_setup_race_with_restarting_home_feed_waits_without_counting_failure(monkeypatch):
     c = mirror_cfg()
     live_home()
     Y.set_mirror(c, True)
@@ -531,10 +531,26 @@ def test_setup_failure_counts_even_if_feed_disappears(monkeypatch):
         raise RuntimeError("setup failed")
     monkeypatch.setattr(st, "start_board", fail)
     monkeypatch.setattr(st, "end_current", lambda svc: None)
-    monkeypatch.setattr(st, "give_up", lambda **kw: 0)
-    monkeypatch.setattr(st, "note_failure", lambda: Y.MAX_FAILURES)
+    monkeypatch.setattr(st, "note_failure", lambda: pytest.fail("missing playlist is not a hard failure"))
+    waits = []
+    def wait(seconds):
+        waits.append(seconds)
+        st.quit.set()
+    monkeypatch.setattr(st.quit, "wait", wait)
     assert st._run() == 0
-    assert st.status["failures"] == Y.MAX_FAILURES
+    assert waits == [Y.MIRROR_WAIT_POLL]  # the loop head polls for a fresh feed; no growing backoff
+    assert st.status["failures"] == 0
+
+
+def test_retired_playlist_is_kept_but_never_ready():
+    from ctb.radio_rtmp import retire_player_playlist
+    c = mirror_cfg()
+    playlist = live_home()
+    assert Y.mirror_ready(c)
+    retire_player_playlist(playlist.parent)
+    assert playlist.is_file() and (playlist.parent / "segment-123.ts").is_file()  # a reader that has it open keeps it
+    assert playlist.stat().st_mtime == 0
+    assert not Y.mirror_ready(c)  # aired audio is never replayed to YouTube
 
 
 def test_encoder_failure_counts_even_if_feed_disappears(monkeypatch):

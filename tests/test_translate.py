@@ -1,3 +1,7 @@
+import os
+import sys
+from types import SimpleNamespace
+
 from ctb import translate as T
 from ctb.config import Config
 
@@ -81,6 +85,18 @@ def test_chain_order_and_failure(monkeypatch):
         assert False, "expected TranslateError"
     except T.TranslateError:
         pass
+
+
+def test_mlx_does_not_change_hugging_face_offline_mode(monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(
+        load=lambda _model: (_ for _ in ()).throw(RuntimeError("stop")),
+        generate=lambda *_args, **_kwargs: ""))
+    try:
+        T.mlx("hello", Config(), fast=True)
+    except RuntimeError:
+        pass
+    assert "HF_HUB_OFFLINE" not in os.environ
 
 
 ARABIC = "• تعلم: educational games، quizzes، lesson plans"

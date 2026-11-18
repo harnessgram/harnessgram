@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from conftest import GOOD_TOKEN, FakeBot
+from conftest import GOOD_TOKEN, FakeBot, signed_in
 from ctb import addons, board, cockpit_v2, flood, i18n, work_lines, work_map
 from ctb import inbox as I
 from ctb.config import Config, ProjectConfig, state_dir, write_private
@@ -176,6 +176,7 @@ def test_the_map_is_created_unpinned_in_the_lead_topic_and_then_only_edited(tmp_
 
 
 def test_changes_edit_the_same_message_at_most_once_every_two_minutes(tmp_path):
+    signed_in("main")
     cfg, bot = make_cfg(tmp_path), FakeBot()
     entries = [working()]
     folder = ledger(tmp_path, [item(1, "First")])
@@ -319,6 +320,7 @@ def _joined(tmp_path):
 
 
 def test_the_ledger_and_the_group_sessions_are_one_map_under_the_ledger_key(tmp_path):
+    signed_in("main")
     cfg = _joined(tmp_path)
     folder = ledger(tmp_path, [item(1, "Needs you", wait="owner"), item(2, "Build 11")], project="harnessgram")
     entries = [working(name="גשר: the restart fix")]
@@ -333,6 +335,7 @@ def test_the_ledger_and_the_group_sessions_are_one_map_under_the_ledger_key(tmp_
 
 
 def test_a_map_pinned_under_the_display_name_is_moved_and_edited_in_place(tmp_path):
+    signed_in("main")
     cfg, bot = _joined(tmp_path), FakeBot()
     path = state_dir() / work_map.PINS_FILE
     write_private(path, json.dumps({"גשר": {"id": 777, "pinned": True, "pin_retry_at": 0.0, "digest": "x",
@@ -409,6 +412,7 @@ def _old_pin(**kw):
 
 
 def test_a_map_pinned_by_an_earlier_version_is_unpinned_exactly_once(tmp_path):
+    signed_in("main")
     cfg, bot = make_cfg(tmp_path), FakeBot()
     path = state_dir() / work_map.PINS_FILE
     write_private(path, json.dumps({"studio": _old_pin()}))

@@ -22,7 +22,9 @@ import time
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
+from . import decision_sign
 from .board import BIDI_CONTROLS
+from . import framing
 from .framing import PANEL_APPROVES
 from .config import Config, home_chat, private_dir, state_dir, write_private
 from .i18n import t
@@ -142,6 +144,11 @@ def _record(ident, raw) -> Optional[dict]:
            "created": float(raw["created"]), "state": state, "choice": "", "note": "", "closed": 0.0,
            # only an explicit True: an old, damaged or unmarked record is never routine (sensitive_buttons.py)
            "routine": raw.get("routine") is True}
+    if type(raw.get("msg")) is int and raw["msg"] > 0:
+        rec["msg"] = raw["msg"]
+    if raw.get("action") == "emergency_credit":
+        rec["action"] = "emergency_credit"
+        rec["routine"] = False
     if isinstance(raw.get("perm"), str) and PERM_RE.fullmatch(raw["perm"]):
         rec["perm"] = raw["perm"]  # answered only through permission_request.decide, never queued as a message
         # The exact request, verbatim (never cleaned: the owner approves what Claude Code will run), and whether the
@@ -151,12 +158,16 @@ def _record(ident, raw) -> Optional[dict]:
     if state != "open":
         rec["closed"] = float(raw["closed"]) if _num(raw.get("closed")) else 0.0
     if state == "answered":
+        if raw.get("answered_via") in decision_sign.VIAS | {"mcp"}:
+            rec["answered_via"] = raw["answered_via"]
         if raw.get("final_state") == "delivered" and _num(raw.get("final_at")):
             rec.update(final_state="delivered", final_at=raw["final_at"])
         if isinstance(raw.get("delivery_key"), str) and ID_RE.fullmatch(raw["delivery_key"]):
             rec["delivery_key"] = raw["delivery_key"]
         rec["choice"] = raw.get("choice") if raw.get("choice") in ("yes", "no") else ""
         rec["note"] = raw.get("note") if isinstance(raw.get("note"), str) else ""
+        if decision_sign.well_formed(raw.get("answer_sig")):  # the bridge's signature (decision_sign.py), kept as is
+            rec["answer_sig"] = {k: raw["answer_sig"][k] for k in decision_sign.SIG_FIELDS}
     _notice_fields(rec, raw)
     return rec
 
@@ -192,15 +203,18 @@ def _save(path, data: Dict[str, dict]) -> None:
 def open_decisions() -> List[dict]:
     """Every open decision, oldest first. Read without the lock: writes replace the file atomically."""
     data = _load(state_dir() / STATE_FILE)
+    from . import permission_request
     return sorted(({k: v for k, v in r.items() if not k.startswith("notice_")}
-                   for r in data.values() if r["state"] == "open"), key=lambda r: (r["created"], r["id"]))
+                   for r in data.values() if r["state"] == "open"
+                   and (not r.get("perm") or permission_request.pending(r["perm"]))),
+                  key=lambda r: (r["created"], r["id"]))
 
 
 # --- the agent's side -------------------------------------------------------------
 
 def create(session: str, chat: int, thread: int, title: str, detail: str = "", yes: str = "", no: str = "",
            lang: str = "en", now: Optional[float] = None, perm: str = "", request: str = "",
-           decline_only: bool = True, routine: bool = False) -> dict:
+           decline_only: bool = True, routine: bool = False, action: str = "") -> dict:
     """`perm`: the id of a Claude Code permission request (permission_request.py only). Its answer goes to that
     request's hook, never to the session as a message. `routine`: the asking agent says this question approves
     nothing sensitive, so the owner may also answer it from a phone widget. Text that names a sensitive area keeps it
@@ -214,7 +228,8 @@ def create(session: str, chat: int, thread: int, title: str, detail: str = "", y
            "yes": clean(yes, LABEL_CHARS, "yes label", required=False) or t("decide_yes", lang=lang),
            "no": clean(no, LABEL_CHARS, "no label", required=False) or t("decide_no", lang=lang),
            "created": now, "state": "open", "routine": routine is True and not perm,
-           **({"perm": perm, "request": request, "decline_only": bool(decline_only)} if perm else {})}
+           **({"perm": perm, "request": request, "decline_only": bool(decline_only)} if perm else {}),
+           **({"action": action} if action == "emergency_credit" else {})}
     if reads_as(rec["yes"], READS_AS_NO):
         raise DecisionError(f"the yes label {rec['yes']!r} reads as a no; name what yes does, e.g. \"Ship it\"")
     if reads_as(rec["no"], READS_AS_YES):
@@ -300,10 +315,17 @@ def _where(cfg: Config, rec: dict) -> Optional[Tuple[int, int]]:
     return (rec["chat"], rec["thread"]) if rec["chat"] in owner_chats(cfg) else None
 
 
-def delivered_text(rec: dict, choice: str, note: str) -> str:
+def delivered_text(rec: dict, choice: str, note: str, source: str = "panel") -> str:
     """What the session reads. The wording is the server's; the question and the labels are quoted as text
     this session wrote, the note as the owner's own."""
     word, mark, label = ("YES", "✅", rec["yes"]) if choice == "yes" else ("NO", "❌", rec["no"])
+    if source == "mcp":
+        lines = [f"{mark} An MCP connector, not the owner, answered {word} (button: {quoted(label)}).",
+                 f"The question this session asked: {quoted(rec['title'])}"]
+        if note:
+            lines.append(f"The connector's note: {quoted(note)}")
+        lines.append(framing.NEVER_APPROVAL)
+        return "\n".join(lines)
     lines = [f"{mark} The owner tapped {word} (button: {quoted(label)}) in the control panel.",
              f"The question this session asked: {quoted(rec['title'])}"]
     if note:
@@ -313,24 +335,31 @@ def delivered_text(rec: dict, choice: str, note: str) -> str:
 
 
 def answer(cfg: Config, inbox, ident: str, choice: str, note: str = "", now: Optional[float] = None,
-           check=None) -> dict:
+           check=None, by: Optional[int] = None, via: str = "", session: Optional[str] = None) -> dict:
     """Record the owner's answer once and queue it to the asking session. The decision is saved as closed
     first and the message queued second; a queueing that failed before the message was written reopens it
     under the same lock (a delivered answer is never reopened). A busy lock is
     waited for at most LOCK_WAIT seconds in all (DecisionError "busy"). `check(rec)`, when given, sees the open
     record under the lock before anything is changed and may refuse it by raising DecisionError (the widget
-    route refuses a sensitive decision this way, so no other answer path can slip between its check and the write)."""
+    route refuses a sensitive decision this way, so no other answer path can slip between its check and the write).
+    `by` (the Telegram user id the calling route verified, never a value from a request body) and `via` (the route:
+    decision_sign.VIAS) are signed into the record's `answer_sig`; without them, or when signing is unavailable, the
+    answer is saved unsigned and still delivered.
+    `session`, when given, limits the answer to that session's own decisions: another session's decision is refused
+    exactly like a missing one, before any check that would tell its state (closed, permission request)."""
     from .inbox import LockBusy
     from .progress import append_boundary
     if choice not in ("yes", "no"):
         raise DecisionError("choose yes or no")
     note = clean(note, NOTE_CHARS, "note", multiline=True, required=False, owner_text=True)
     now = time.time() if now is None else now
+    key = decision_sign.key_for_answer(by, via)  # outside the lock: a slow Keychain never holds it
     until = time.monotonic() + LOCK_WAIT
+    unsigned = ""
     with _locked(until) as path:
         data = _load(path)
         rec = data.get(ident) if isinstance(ident, str) else None
-        if rec is None:
+        if rec is None or (session is not None and rec["session"] != session):
             raise DecisionError("no such decision", "unknown")
         if rec["state"] != "open":
             raise DecisionError(f"already {rec['state']}", "closed", rec["state"], rec["choice"])
@@ -339,21 +368,46 @@ def answer(cfg: Config, inbox, ident: str, choice: str, note: str = "", now: Opt
         if check is not None:
             check(dict(rec))
         found = _where(cfg, rec)
-        rec.update(state="answered", choice=choice, note=note, closed=now, delivery_key=secrets.token_hex(8),
-                   notice_pending=True)
+        if rec.get("action") == "emergency_credit":
+            # A bridge action, never an instruction sent to the model. The durable answer
+            # is consumed by the heartbeat; closing under this lock makes a tap single-use.
+            from . import credit_mode
+            if choice == "yes":
+                credit_mode.check_answer(cfg, rec, now)
+            rec.update(state="answered", choice=choice, note="", closed=float(now),
+                       delivery_key=secrets.token_hex(8), notice_pending=True,
+                       final_state="delivered", final_at=float(now))
+            _save(path, data)
+            return dict(rec, where=found)
+        rec.update(state="answered", choice=choice, note=note, closed=float(now), delivery_key=secrets.token_hex(8),
+                   notice_pending=True, answered_via="mcp" if via == "mcp" else (via or "panel"))
+        if key is not None:
+            try:
+                rec["answer_sig"] = decision_sign.sign(rec, by, via, key)
+            except Exception as e:  # noqa: BLE001 - a failure to sign never blocks the owner's answer
+                unsigned = type(e).__name__
         _save(path, data)
         try:
-            inbox.put(rec["session"], {"text": delivered_text(rec, choice, note), "at": int(now), "id": None,
-                                       "source": "panel", "chat": found[0] if found else home_chat(cfg),
-                                       "key": rec["delivery_key"]},
+            source = "mcp" if via == "mcp" else "panel"
+            queued = {"text": delivered_text(rec, choice, note, source), "at": int(now), "id": None,
+                      "source": "panel", "chat": found[0] if found else home_chat(cfg),
+                      "key": rec["delivery_key"], "decision": rec["id"]}
+            if source == "mcp":
+                queued["source"] = "mcp"
+            inbox.put(rec["session"], queued,
                       until=until)
         except BaseException as e:
             rec.update(state="open", choice="", note="", closed=0.0, notice_pending=False)
             rec.pop("delivery_key", None)
+            rec.pop("answer_sig", None)  # a reopened decision carries no signature of an answer that never was
+            rec.pop("answered_via", None)
             _save(path, data)
             if isinstance(e, LockBusy):
                 raise DecisionError("busy, try again", "busy") from None
             raise
+    if unsigned:
+        from .inbox import poll_log
+        poll_log(f"decision sign: unsigned ({unsigned})")
     try:  # only for an answer that was delivered, outside the locks, and never for longer than the wait
         append_boundary(rec["session"], until=max(until, time.monotonic() + 0.5))
     except (OSError, TimeoutError) as exc:
@@ -365,6 +419,10 @@ def answer(cfg: Config, inbox, ident: str, choice: str, note: str = "", now: Opt
 def announce(cfg: Config, bot, inbox, rec: dict) -> bool:
     """Wake the session and mark its existing topic notice closed; the answer stays private."""
     from .inbox import _deliver_button_word, record_wake_error
+    if rec.get("action") == "emergency_credit":
+        from . import cockpit_notice
+        cockpit_notice.later(cfg, rec, bot)
+        return False
     try:
         _deliver_button_word(inbox, rec["session"])
     except Exception as exc:
@@ -416,7 +474,7 @@ def _place_of(cfg: Config, sid: str) -> Tuple[int, int]:
 
 
 def _fail(reason: str) -> int:
-    print(f"Harnessgram: {reason}", file=sys.stderr)
+    print(f"HarnessGram: {reason}", file=sys.stderr)
     return 1
 
 

@@ -33,8 +33,8 @@ def test_english_spinner_and_reset_labels():
 
 
 def test_context_size_uses_ui_language():
-    assert mirror.context_label(182_000, 1_000_000, "en") == "📏 182k · 18%"
-    assert mirror.context_label(182_000, 1_000_000, "he") == "📏 182 אלף · 18%"
+    assert mirror.context_label(182_000, 1_000_000, "en") == "📏 182k"
+    assert mirror.context_label(182_000, 1_000_000, "he") == "📏 182 אלף"
 
 
 @pytest.mark.parametrize("lang, expected", [("en", "General"), ("he", "כללי")])

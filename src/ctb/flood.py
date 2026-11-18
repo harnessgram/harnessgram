@@ -120,6 +120,22 @@ def is_open(chat, now: Optional[float] = None) -> bool:
     return remaining(chat, now) <= 0
 
 
+def _replies_waiting(key: str, now: Optional[float] = None) -> bool:
+    """True while the reply outbox holds a part for this chat. Read without its lock: a stale answer
+    only delays one optional send by a tick, and taking the outbox lock here could deadlock a drain."""
+    try:
+        from .reply_outbox import QUEUE_FILE
+        data = json.loads((private_dir(state_dir()) / QUEUE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return False
+    if not isinstance(data, list):
+        return False
+    now = time.time() if now is None else now
+    return any(isinstance(e, dict) and str(e.get("chat")) == key
+               and isinstance(e.get("created"), (int, float))
+               and 0 <= now - e["created"] < 120 for e in data)
+
+
 def allow_optional(chat, units: int = 1, budget: bool = True, now: Optional[float] = None) -> bool:
     """Reserve `units` optional calls for `chat`. False when the gate is closed or, with `budget`,
     when the last minute already holds OPTIONAL_PER_MIN of them (in any process)."""
@@ -130,6 +146,10 @@ def allow_optional(chat, units: int = 1, budget: bool = True, now: Optional[floa
             key = _key(chat)
             if _until(data, key, now) > now:
                 return False
+            # Reply edits are part of delivery, rather than optional traffic.  In addition, an
+            # abandoned outbox part must not suppress status traffic indefinitely.
+            if budget and _replies_waiting(key, now):
+                return False  # queued owner replies go first: optional traffic yields the chat's slots to them
             if not budget:
                 return True
             # entries from the future (a clock that jumped back) would block the chat for hours: ignore them

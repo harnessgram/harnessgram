@@ -109,9 +109,10 @@ URL = re.compile(r"\b(?:https?|wss?|rtmps?)://([A-Za-z0-9.-]+)")
 PUBLIC_HOSTS = {
     "t.me", "github.com", "raw.githubusercontent.com", "claude.com", "claude.ai", "code.claude.com", "api.anthropic.com", "api.telegram.org",
     "telegram.org", "web.telegram.org", "my.telegram.org", "aiplatform.googleapis.com",
-    "generativelanguage.googleapis.com", "translate.googleapis.com", "clients5.google.com", "pypi.org",
+    "generativelanguage.googleapis.com", "translate.googleapis.com", "texttospeech.googleapis.com", "clients5.google.com", "pypi.org",
     "www.w3.org", "supabase.com", "docs.astral.sh", "pipx.pypa.io", "www.googleapis.com", "accounts.google.com",
     "oauth2.googleapis.com",  # YouTube API
+    "www.youtube.com", "www.youtube-nocookie.com", "i.ytimg.com",  # official YouTube player and thumbnails (owner-approved)
     "apps.apple.com", "apps",  # App Store links (app requests; "apps" is the regex host fragment)
     "localhost", "127.0.0.1", "x", "a", "hgl", "user", "claude", "x.y", "...", "host",
 }

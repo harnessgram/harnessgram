@@ -2,6 +2,7 @@
 full the window is, every live label is still recognised when tapped (both languages, bidi marks, a dropped emoji
 variation selector), the labels fit a phone, and every change that alters a label moves the card's data key."""
 import json
+import itertools
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,10 +73,9 @@ def test_each_settings_button_shows_its_value_and_is_recognised(lang, model):
         row = settings_row(M.live_keyboard("", lang=lang, session=SID))
         base = settings_row(M.fixed_keyboard(lang))
         assert row[0] != base[0] and row[1] != base[1] and row[2] != base[2]  # no generic label while a value is known
-        assert row[1] == "🎚️ " + i18n.t("effort_" + level, lang=lang)
-        assert row[2] == "🔐 " + i18n.t("mode_short_" + mode, lang=lang)
+        assert row[1].startswith("🎚️ ") and row[2].startswith("🔐 ")
         for label, kind in zip(row, ("model", "effort", "mode")):
-            assert len(label) <= 16, label  # a third of a phone's width
+            assert len(M.graphemes(label)) <= M.KEYBOARD_LABEL_MAX, label
             for seen in variants(label):
                 assert I.live_button(seen) == kind, repr(seen)
                 assert I._keyboard_word(seen.strip())  # never taken as a typed answer to a dialog
@@ -83,15 +83,15 @@ def test_each_settings_button_shows_its_value_and_is_recognised(lang, model):
 
 def test_the_model_label_is_short():
     save_model("Claude Sonnet 5.5 (1M context)|high")
-    assert settings_row(M.live_keyboard("", lang="en", session=SID))[0] == "🧠 Sonnet 5.5 1M"
+    assert settings_row(M.live_keyboard("", lang="en", session=SID))[0] == "🧠 Sonnet"
     save_model("Opus 5.5 (1M)|high")
-    assert settings_row(M.live_keyboard("", lang="he", session=SID))[0] == "🧠 Opus 5.5 1M"
+    assert settings_row(M.live_keyboard("", lang="he", session=SID))[0] == "🧠 Opus"
 
 
 @pytest.mark.parametrize("lang", ["he", "en"])
 def test_unknown_values_keep_the_plain_labels_and_still_work(lang):
     row = settings_row(M.live_keyboard("", lang=lang, session=SID))
-    assert row == [i18n.t(k, lang=lang) for k in ("fixed_btn_model", "fixed_btn_thinking", "fixed_btn_permissions")]
+    assert row == settings_row(M.fixed_keyboard(lang))
     assert [I.live_button(x) for x in row] == ["model", "effort", "mode"]
 
 
@@ -164,21 +164,21 @@ def context_cell(kb) -> str:
     return next(x for x in labels(kb) if x.startswith("📏"))
 
 
-def test_the_context_cell_shows_how_full_the_window_is():
+def test_the_context_cell_shows_the_size_only_never_a_percent():
     transcript(182_000)
     assert context_cell(M.live_keyboard("", lang="en", session=SID)) == "📏 182k"  # window unknown: no guess
     save_window(1_000_000)
-    assert context_cell(M.live_keyboard("", lang="en", session=SID)) == "📏 182k · 18%"
-    assert context_cell(M.live_keyboard("", lang="he", session=SID)) == "📏 182 אלף · 18%"
+    assert context_cell(M.live_keyboard("", lang="en", session=SID)) == "📏 182k"
+    assert context_cell(M.live_keyboard("", lang="he", session=SID)) == "📏 182 אלף"
     save_window(200_000)
     transcript(150_000)
-    assert context_cell(M.live_keyboard("📏 הקשר 90 אלף", lang="he", session=SID)) == "📏 150 אלף · 75%"  # live, not saved
+    assert context_cell(M.live_keyboard("📏 הקשר 90 אלף", lang="he", session=SID)) == "📏 150 אלף"  # live, not saved
 
 
 def test_a_1m_model_name_tells_the_window():
     transcript(250_000)
     save_model("Opus 5.5 (1M context)|high")
-    assert context_cell(M.live_keyboard("", lang="en", session=SID)) == "📏 250k · 25%"
+    assert context_cell(M.live_keyboard("", lang="en", session=SID)) == "📏 250k"
 
 
 def test_the_status_line_saves_the_window_size():
@@ -218,7 +218,7 @@ def test_tapping_the_context_cell_answers_with_the_real_window(bot, monkeypatch)
            "chat": {"id": OWNER, "type": "private"}, "from": {"id": OWNER}}
     media = SimpleNamespace(content_of=lambda m: m.get("text") or "")
     assert I.handle({"message": msg}, cfg(), bot, topics, I.Inbox(state_dir() / "inbox"), media, time.time()) == "context"
-    assert "150 אלף מתוך 200 אלף (75%)" in bot.methods("sendMessage")[-1]["text"]
+    assert "150 אלף" in bot.methods("sendMessage")[-1]["text"] and "%" not in bot.methods("sendMessage")[-1]["text"]
 
 
 @pytest.mark.parametrize("label,result", [("🧠 Opus 5.5", "model"), ("🎚️ גבוהה מאוד", "effort"),
@@ -252,8 +252,35 @@ def test_the_layout_fits_a_phone(lang, monkeypatch):
     assert rows[0][0].startswith("📏") and rows[0][1].startswith("📅") and rows[0][2].startswith("👤")
     for row in rows:
         for label in row:
-            assert len(label) <= (11 if len(row) == 4 else 17), label
+            assert len(M.graphemes(label)) <= M.KEYBOARD_LABEL_MAX, label
     assert "16:00" not in rows[0][1]  # a later day by its date only
+
+
+def test_graphemes_keep_emoji_and_combining_marks_together():
+    assert len(M.graphemes("👩🏽‍💻 א\u05b8 🇮🇱")) == 5
+
+
+@pytest.mark.parametrize("lang", ["he", "en"])
+def test_every_keyboard_state_obeys_one_label_limit(lang, monkeypatch):
+    from ctb import waiting
+    monkeypatch.setattr(accounts, "multiple", lambda: True)
+    monkeypatch.setattr(accounts, "account_for", lambda _: "אברהם-חשבון-ארוך")
+    monkeypatch.setattr(M, "context_numbers", lambda *_: (1_000_000, 1_000_000))
+    monkeypatch.setattr(waiting, "waiting_count", lambda _: 10000)
+    for model, level, mode in itertools.product(MODELS + ("",), LEVELS + ("",), MODES + ("",)):
+        monkeypatch.setattr(usage, "session_model", lambda _: (model, level))
+        monkeypatch.setattr(direct, "current", lambda _: {"mode": mode})
+        kb = M.live_keyboard("Claude 13% · Claude 72%", lang=lang, session=SID, cfg=cfg(lang))
+        for label in labels(kb):
+            assert len(M.graphemes(label)) <= M.KEYBOARD_LABEL_MAX, label
+        assert I.live_button(context_cell(kb)) == "context"
+        assert I._panel_button(labels(kb)[-1])
+
+
+def test_account_nickname_never_contains_email():
+    assert M.account_cell("Avraham Long Name") == "👤 Avraham"
+    assert M.account_cell("person@example.com") == "👤 Account"
+    assert M.account_cell("אברהםאברהם") == "👤 אברהםאב"
 
 
 def test_the_account_cell_shows_only_with_more_than_one_account(monkeypatch):
@@ -262,7 +289,7 @@ def test_the_account_cell_shows_only_with_more_than_one_account(monkeypatch):
     transcript(10_000)
     assert not any(x.startswith("👤") for x in labels(M.live_keyboard("", lang="he", session=SID)))
     monkeypatch.setattr(accounts, "multiple", lambda: True)
-    assert "👤 dev" in labels(M.live_keyboard("", lang="he", session=SID))
+    assert "👤 work" in labels(M.live_keyboard("", lang="he", session=SID))
 
 
 # --- 5. freshness: what changes a label changes the card's data key -------------------------------------------

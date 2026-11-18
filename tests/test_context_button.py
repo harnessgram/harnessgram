@@ -117,6 +117,22 @@ def test_the_heartbeat_refreshes_a_card_whose_context_alone_moved(monkeypatch):
     assert context_cell(last_card(bot)["reply_markup"]) == "📏 160 אלף"
 
 
+def test_heartbeat_refreshes_when_only_waiting_count_changes(monkeypatch):
+    from ctb import accounts, heartbeat, waiting
+    bot = FakeBot()
+    tmap = topic(bot)
+    transcript(100_000)
+    count = [1]
+    monkeypatch.setattr(waiting, "waiting_count", lambda cfg: count[0])
+    monkeypatch.setattr(accounts, "live_session_records", lambda: [{"sessionId": SID}])
+    t0 = 1_800_000_000.0
+    assert M.refresh_card(cfg(), bot, SID, topics=tmap, create=True, now=t0)
+    count[0] = 2
+    assert heartbeat.refresh_cards(cfg(), bot, now=t0 + M.CONTEXT_BACKOFF + 5) == 0
+    assert heartbeat.refresh_cards(cfg(), bot, now=t0 + M.CARD_BACKOFF + 5) == 1
+    assert heartbeat.refresh_cards(cfg(), bot, now=t0 + M.CARD_BACKOFF + 10) == 0
+
+
 def test_run_reply_refreshes_the_card_at_turn_end(monkeypatch):
     seen = []
     monkeypatch.setattr(M, "refresh_card", lambda c, b, session, **kw: seen.append((session, kw)) or True)

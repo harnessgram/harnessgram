@@ -32,6 +32,8 @@ KEEP_DURATIONS = 10
 AUTO_COMPACT_STEPS = [0, 200, 250, 300, 400, 600]
 COLD_AFTER = 3600  # cache lifetime since the last assistant API activity
 COLD_MIN = 150_000  # context >=150k tokens worth compacting when cache is cold
+COMPACT_COOLDOWN = 300.0
+INFLIGHT_TTL = 900.0  # a reservation with no end signal stops blocking after this (never a session locked for good)
 
 
 def auto_compact_limit() -> int:
@@ -540,6 +542,8 @@ def in_progress(session: str, now: Optional[float] = None) -> bool:
     SessionStart, expires by itself)."""
     if not session:
         return False
+    if _inflight(session, now):
+        return True
     age = _running_age(session, now)
     return age is not None and age < PRE_TTL
 
@@ -558,6 +562,40 @@ def ended_marker(session: str) -> Path:
     return marker(session).with_name(marker(session).name + ".ended")
 
 
+def inflight_marker(session: str) -> Path:
+    return marker(session).with_name(marker(session).name + ".inflight")
+
+
+@contextlib.contextmanager
+def submission_lock(session: str):
+    path = inflight_marker(session)
+    private_dir(path.parent)
+    with open(str(path) + ".lock", "a") as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _inflight(session: str, now: Optional[float] = None) -> bool:
+    """Report a live reservation without mutating it; readers need not hold the lock."""
+    path = inflight_marker(session)
+    age = _age(path, time.time() if now is None else now)
+    if age is None:
+        return False
+    return age < INFLIGHT_TTL
+
+
+def reserve_submission(session: str, *, owner: bool = False) -> bool:
+    """Called under submission_lock, before typing; automatic requests honor the cooldown."""
+    if in_progress(session):
+        return False
+    age = _age(ended_marker(session), time.time())
+    if not owner and age is not None and age < COMPACT_COOLDOWN:
+        return False
+    write_private(inflight_marker(session), "")
+    return True
+
+
 def ended_since(session: str, at: float) -> bool:
     """A compaction of this session ended after `at` (whoever started it)."""
     try:
@@ -568,16 +606,15 @@ def ended_since(session: str, at: float) -> bool:
 
 def mark_done(session: str) -> bool:
     """Called when the compaction ended: tells the progress message. False when none is running."""
-    precompact_marker(session).unlink(missing_ok=True)
-    try:
+    with submission_lock(session):
+        precompact_marker(session).unlink(missing_ok=True)
         private_dir(directory())
         write_private(ended_marker(session), "")
-    except OSError:
-        pass
-    if not marker(session).exists():
-        return False
-    write_private(done_marker(session), "")
-    return True
+        inflight_marker(session).unlink(missing_ok=True)
+        if not marker(session).exists():
+            return False
+        write_private(done_marker(session), "")
+        return True
 
 
 def _history() -> Path:
@@ -632,7 +669,7 @@ def run(cfg: Config, bot, thread: Optional[int], session: str, read_pane: Callab
     except (TelegramError, KeyError, TypeError):
         marker(session).unlink(missing_ok=True)
         return False
-    seen, last = False, ""
+    seen, busy, last = False, False, ""
     while clock() - start < MAX_RUN:
         sleep(POLL)
         try:
@@ -671,10 +708,8 @@ def run(cfg: Config, bot, thread: Optional[int], session: str, read_pane: Callab
             write_private(_history(), json.dumps((past_durations() + [round(took, 1)])[-KEEP_DURATIONS:]))
         except OSError:
             pass
-        try:  # seen on the screen to run and to end, also when no SessionStart came to say so: a request is met
-            write_private(ended_marker(session), "")
-        except OSError:
-            pass
+        if seen and not busy and not done_marker(session).exists():
+            mark_done(session)  # the screen showed both the start and the end
     for f in (marker(session), done_marker(session), precompact_marker(session), hook_marker(session)):
         f.unlink(missing_ok=True)  # also the provisional mark of a compaction that never showed: nothing stays blocked
     return ok

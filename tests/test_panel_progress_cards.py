@@ -19,7 +19,7 @@ class Hebrew:
 def string_fields(row, prefix=""):
     """List every copy-bearing leaf in the actual wire schema, not just a handpicked subset."""
     for key, value in row.items():
-        if key.endswith("_he") or key in ("id", "kind", "session", "url", "topic_url"):
+        if key.endswith("_he") or key in ("id", "kind", "session", "url", "topic_url", "link"):
             continue
         path = prefix + key
         if isinstance(value, str):
@@ -56,7 +56,7 @@ def test_every_string_field_of_every_card_kind_is_translated(monkeypatch):
                 continue
             translated = row[key[0] + "_he"][key[1]] if isinstance(key, tuple) else row[key + "_he"]
             assert translated == "תרגום: " + value, path
-        assert card.get("url_he") is None and card.get("topic_url_he") is None
+            assert card.get("url_he") is None and card.get("topic_url_he") is None and card.get("link_he") is None
     assert seen == {"title", "detail", "topic", "live", "task", "activity", "steps[]", "options[]",
                     "label", "figures[].label", "figures[].value"}
     assert out["pending"] == 0

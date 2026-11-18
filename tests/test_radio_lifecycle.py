@@ -81,10 +81,14 @@ def _fake_telethon(monkeypatch, world: World):
     sessions.StringSession = lambda s: s
     tltypes = types.ModuleType("telethon.tl.types")
     tltypes.InputGroupCall = lambda id, access_hash: SimpleNamespace(id=id, access_hash=access_hash)
+    tltypes.InputPeerChannel = lambda id, access_hash: SimpleNamespace(id=id, access_hash=access_hash)
     tltypes.PeerChannel = lambda i: ("channel", i)
+    tltypes.Channel = type("Channel", (), {})
     tlpkg = types.ModuleType("telethon.tl")
+    errors = types.ModuleType("telethon.errors")
+    errors.FloodWaitError = type("FloodWaitError", (Exception,), {})
     for name, mod in (("telethon", tl), ("telethon.sessions", sessions), ("telethon.tl", tlpkg),
-                      ("telethon.tl.types", tltypes)):
+                      ("telethon.tl.types", tltypes), ("telethon.errors", errors)):
         monkeypatch.setitem(sys.modules, name, mod)
 
 

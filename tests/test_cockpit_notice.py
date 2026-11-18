@@ -29,6 +29,8 @@ def test_notice_is_edited_and_link_has_only_question_id(monkeypatch, tmp_path, b
     cfg = setup(monkeypatch, tmp_path, bot)
     monkeypatch.setattr(alerts, "alert", lambda *a, **k: True)
     cockpit_notice.update(cfg, REC, True, bot)
+    saved = decisions._load(tmp_path / decisions.STATE_FILE)[ID]
+    assert saved["msg"] == bot.methods("sendMessage")[0]["message_id"]
     cockpit_notice.update(cfg, REC, True, bot)
     decisions.cancel("sample", ID)
     cockpit_notice.update(cfg, REC, False, bot)
@@ -42,6 +44,17 @@ def test_notice_is_edited_and_link_has_only_question_id(monkeypatch, tmp_path, b
     button = bot.methods("sendMessage")[0]["reply_markup"]["inline_keyboard"][0][0]
     assert parse_qs(urlsplit(button["url"]).query) == {"startapp": ["q" + ID]}
     assert panel.start_param_of("start_param=q" + ID) == "q" + ID
+
+
+def test_choice_and_ask_cards_save_the_posted_message_id(monkeypatch, tmp_path, bot):
+    cfg = setup(monkeypatch, tmp_path, bot)
+    monkeypatch.setattr(alerts, "alert", lambda *a, **k: True)
+    made = [cards.publish("sample", -100123, 12, "choice", "Pick", options=["A", "B"]),
+            cards.publish("sample", -100123, 12, "ask", "What now?")]
+    for rec in made:
+        assert cockpit_notice.update(cfg, rec, True, bot)
+    stored = cards._load(tmp_path / cards.STATE_FILE)
+    assert [stored[r["id"]]["msg"] for r in made] == [p["message_id"] for p in bot.methods("sendMessage")[-2:]]
 
 
 def test_alert_is_once_even_if_other_question_intervenes(monkeypatch, tmp_path, bot):
@@ -220,11 +233,16 @@ function empty(ic,title){let n=node();n.title=title;return n;}
 function tabsFn(){ app.children.push({answer:true}); }
 const tabsRender=tabsFn;
 ''' + page[start:end].replace('tabs(d);', 'tabsRender(d);') + r'''
-function radioPlayerDraw(){} function hookHealthCard(){}
+function radioPlayerDraw(){} function hookHealthCard(){} function v2ReturnCard(){return null;} function enter(x){return x;}
 function v2Prepare(){} function v2Enabled(){return false;}
 function renderAll(){} function renderHere(){} function renderAgents(){} function renderSettings(){}
 function appOf(){return true;} function showApp(){} function applyChrome(){} function syncBack(){} function syncClose(){} function adoptBackLayers(){}
 function retireMissingBackLayers(){}
+var renderNewContent=false, renderedView=null, renderFingerprint=null, lastInteraction=0, renderDeferred=null, renderDeferredSince=0, animateEntries=false, pendingRestore=null;
+app.style={}; app.getBoundingClientRect=function(){return {height:0};};
+function fingerprint(){return null;} function panelEditing(){return false;} function firstVisibleAnchor(){return null;}
+function openState(){return null;} function focusedEditor(){return null;} function updateRelativeTimes(){}
+function ensureStableKeys(){} function restoreOpenState(){} function restoreEditor(){} function settleAndRestore(){} function scrollQuestion(){return false;}
 render({},true);
 assert.equal(app.children.length,1);
 assert.equal(app.children[0].title,"closed");
@@ -383,3 +401,11 @@ async function tick(){for(let i=0;i<10;i++) await Promise.resolve();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''
     subprocess.run(["node", "-e", js], check=True, capture_output=True, text=True)
+
+
+def test_waiting_link_points_at_the_exact_message_and_falls_back_to_the_topic():
+    from ctb import panel_view
+    assert panel_view.waiting_link({"chat": -100123, "thread": 12, "msg": 345}) == "https://t.me/c/123/12/345"
+    assert panel_view.waiting_link({"chat": -100123, "thread": 12}) == "https://t.me/c/123/12"
+    assert panel_view.waiting_link({"chat": -100123, "thread": 12, "msg": True}) == "https://t.me/c/123/12"
+    assert panel_view.waiting_link({"chat": -100123, "thread": 12, "msg": 0}) == "https://t.me/c/123/12"

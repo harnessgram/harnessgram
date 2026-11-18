@@ -20,6 +20,7 @@ Neither the token nor initData is ever logged or echoed.
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import functools
@@ -28,6 +29,7 @@ import hmac
 import http.server
 import json
 import os
+import queue
 import re
 import secrets
 import socket
@@ -36,14 +38,18 @@ import sys
 import threading
 import time
 import traceback
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from . import accounts, bank, board, blocks, brief, card_media, cards, cockpit_apps, decisions, models, panel_page, panel_settings, panel_text, panel_view, status, usage, session_usage
-from . import auto_progress, idle_lines, live_activity, mac_resources, panel_youtube, owner_requests, reminder_lifecycle, topic_cards
-from . import state_cache, sensitive_buttons, device_tokens
-from . import owner_request_actions, cockpit_v2, app_request, mac_tools, topic_cleanup, schedule, google_calendar, addons, family_board, family_print, listen_link, briefing
+from . import accounts, bank, board, blocks, brief, card_media, cards, cockpit_apps, credit_mode, decisions, models, panel_page, panel_settings, panel_text, panel_view, status, usage, session_usage
+from . import auto_progress, idle_lines, live_activity, mac_resources, panel_youtube, panel_my_music, owner_requests, reminder_lifecycle, topic_cards, topic_status
+from . import state_cache, sensitive_buttons, device_tokens, apns
+from . import voice_copilot, tower_home
+from . import owner_request_actions, cockpit_v2, app_request, mac_tools, topic_cleanup, schedule, google_calendar, addons, project_art, family_board, family_print, listen_link, briefing
 from .config import Config, home_chat, state_dir, write_private
+from .i18n import t
 from .creds import redact_channel, redact_pair
 from .work_lines import clean_text
 from .inbox import PanelQueueFull
@@ -82,14 +88,14 @@ WRITTEN_IN_PANEL = decisions.PANEL_APPROVES
 ROUTES = {"/api/state": MAX_BODY, "/api/decide": MAX_DECIDE_BODY, "/api/radio": MAX_BODY, "/api/model": MAX_BODY,
           "/api/setting": MAX_BODY, "/api/dismiss": 1280, "/api/radio-say": 2600, "/api/card": MAX_DECIDE_BODY, "/api/say": 2600, "/api/bank": MAX_BODY,
           "/api/unsay": MAX_BODY, "/api/close": 1280, "/api/remind": 2600, "/api/screen": MAX_BODY,
-          "/api/compact": MAX_BODY, "/api/room": 2600, "/api/podcast": 1280,
+          "/api/compact": MAX_BODY, "/api/room": 2600, "/api/podcast": 1280, "/api/radio-music": 256,
           "/api/brief-seen": MAX_BODY, "/api/block-mute": MAX_BODY, "/api/fork": 256,
           "/api/hooks-restore": MAX_BODY, "/api/sessions-reload": MAX_BODY, "/api/app-token": MAX_BODY,
           "/api/card-media-token": MAX_BODY}
 ACTIONS = {"/api/model": "_model", "/api/setting": "_setting", "/api/dismiss": "_dismiss", "/api/radio-say": "_radio_say",
            "/api/card": "_card", "/api/say": "_say", "/api/bank": "_bank", "/api/unsay": "_unsay",
            "/api/close": "_close", "/api/remind": "_remind", "/api/screen": "_screen",
-           "/api/compact": "_compact", "/api/room": "_room", "/api/podcast": "_podcast",
+           "/api/compact": "_compact", "/api/room": "_room", "/api/podcast": "_podcast", "/api/radio-music": "_radio_music",
            "/api/brief-seen": "_brief_seen", "/api/block-mute": "_block_mute", "/api/fork": "_fork",
            "/api/hooks-restore": "_hooks_restore", "/api/sessions-reload": "_sessions_reload"}
 ROOM_KEYS = {"start": ({"topic", "minutes"}, {"project"}), "pause": (set(), set()), "resume": (set(), {"text"}),
@@ -108,7 +114,7 @@ SCREEN_ROWS = 40  # rows of a session's terminal the page shows
 LEFT_BEHIND = 24 * 3600  # an open session nobody touched for a day is "left behind": the page offers to close it
 MAX_CLOSE = 20
 REMINDER_REF = re.compile(r"([0-9a-f]{8}):(\d{1,6})")  # the topic's hash and the item's id, as the board's buttons
-START_PARAM = re.compile(r"(?:t[0-9a-f]{8}|q[0-9a-f]{16})")  # what panel_pin puts in a topic's button
+START_PARAM = re.compile(r"(?:t[0-9a-f]{8}|[qr][0-9a-f]{16})")  # what panel links put in a button
 APP_GET = re.compile(r"/app/([a-z0-9-]{1,24})/(?:media/([^?#]+))?")
 APP_API = re.compile(r"/app/([a-z0-9-]{1,24})/api")
 AUTH_PARAM = "auth"
@@ -121,6 +127,12 @@ YOUTUBE_BODY = 512  # {"action": ..., "armed"|"on"|"keys": ...}
 ROUTES["/api/youtube"] = YOUTUBE_BODY  # routed before the off check (_youtube_post: stop and disconnect pass)
 ROUTES["/api/request"] = 1024
 ACTIONS["/api/request"] = "_owner_request"
+ROUTES["/api/request-detail"] = 1024  # {"project", "id"}: one item's full text, note and steps; a read, like /api/state
+ACTIONS["/api/request-detail"] = "_owner_request_detail"
+ROUTES["/api/request-target"] = 256  # {"key"}: which ledger row a widget deep link names; a read, like /api/state
+ACTIONS["/api/request-target"] = "_owner_request_target"
+ROUTES["/api/topic-detail"] = 1024  # {"key": [project, "topic"|"item", slug|id]}: one topic's timeline; a read, like /api/state
+ACTIONS["/api/topic-detail"] = "_topic_detail"
 ROUTES["/api/app-request"] = 2600  # {"text": <= 500 characters}: the owner's "request an app" action (app_request.py)
 ACTIONS["/api/app-request"] = "_app_request"
 # What the system knows (knowledge.py): owner-only, behind the same fresh owner login as every other action.
@@ -129,9 +141,16 @@ ACTIONS["/api/knowledge"] = "_knowledge"
 # Old topics the owner may close (topic_cleanup.py): owner-only, behind the same fresh login as every action.
 ROUTES["/api/topic-cleanup"] = 1280
 ACTIONS["/api/topic-cleanup"] = "_topic_cleanup"
-# What Harnessgram adds to your agents (addons.py): owner-only, behind the same fresh login as every action.
+# What HarnessGram adds to your agents (addons.py): owner-only, behind the same fresh login as every action.
 ROUTES["/api/addons"] = 256  # {"action": "view"} | {"action": "set", "key", "on"}
 ACTIONS["/api/addons"] = "_addons"
+ROUTES["/api/packs"] = 512
+ACTIONS["/api/packs"] = "_packs"
+ROUTES["/api/packs-edit"] = 512
+ACTIONS["/api/packs-edit"] = "_packs_edit"
+PACK_KEYS = {"view": set()}
+PACK_WRITE_KEYS = {"preview": {"pack", "on"}, "set": {"pack", "on"},
+                   "move": {"item", "pack"}, "export": {"pack", "dir"}}
 ADDON_KEYS = {"view": set(), "set": {"key", "on"}}
 ADDON_ERRORS = {"bad": 400, "unknown": 404, "locked": 409}
 KNOWLEDGE_KEYS = {"view": set(), "scan": set(), "toggle": {"id", "on"}, "undo": {"log"}, "suggest": {"id", "text"}}
@@ -144,8 +163,9 @@ ACTIONS["/api/schedule-view"] = "_schedule_view"
 ROUTES["/api/briefing-dismiss"] = 256  # {}: the owner puts away today's "Good morning" card (briefing.py)
 ACTIONS["/api/briefing-dismiss"] = "_briefing_dismiss"
 SCHEDULE_KEYS = {"add": {"text"}, "done": {"id", "done"}, "remove": {"id"},
+                 "swap": {"date", "id"}, "skip": {"date", "id"}, "extend": {"date", "id", "minutes"},
                  "google-connect": set(), "google-disconnect": set()}
-SCHEDULE_ERRORS = {"text": 400, "unknown": 404, "full": 409, "unavailable": 503}
+SCHEDULE_ERRORS = {"text": 400, "unknown": 404, "full": 409, "conflict": 409, "unavailable": 503}
 # The family home board (family_board.py): changes need the fresh owner login, the read is a state-style read.
 ROUTES["/api/family"] = 1024  # {"action": "check"|"add"|"edit"|"remove"|"clear", ...}
 ACTIONS["/api/family"] = "_family"
@@ -155,13 +175,29 @@ ROUTES["/api/client-error"] = 256  # {"name", "at"}: the page could not draw the
 ACTIONS["/api/client-error"] = "_client_error"
 ROUTES["/api/family-print"] = 256  # {}: a 10-minute link that opens the print page ("open as a page")
 ACTIONS["/api/family-print"] = "_family_print"
+ROUTES["/api/my-music"] = MAX_BODY
+ACTIONS["/api/my-music"] = "_my_music"
+ROUTES["/api/radio-programs"] = 8192
+ACTIONS["/api/radio-programs"] = "_radio_programs"
 FAMILY_KEYS = {"check": ({"id", "done"}, set()), "add": ({"list", "text"}, {"day"}), "edit": ({"id"}, {"text", "day"}),
                "remove": ({"id"}, set()), "clear": (set(), set())}
 FAMILY_ERRORS = {"text": 400, "unknown": 404, "full": 409, "shabbat": 409, "unavailable": 503}
+# The owner's own picture for a project (project_art.py): a change needs the fresh owner login; the image read is a
+# state-style read (the page keeps images in memory, so it needs bytes behind the owner's login, not a public URL).
+ROUTES["/api/project-art"] = 1_500_000  # {"action": "set", "project", "data": base64} | {"action": "scene", "project", "scene"} | {"action": "clear", "project"}
+ACTIONS["/api/project-art"] = "_project_art"
+ROUTES["/api/project-art-image"] = 256  # {"name": <file stem>}: the picture's bytes
+ACTIONS["/api/project-art-image"] = "_project_art_image"
+ART_KEYS = {"set": {"project", "data"}, "scene": {"project", "scene"}, "clear": {"project"}}
+ART_ERRORS = {"bad": 400, "type": 415, "needs_pillow": 415, "size": 413, "decode": 400}
 ROUTES["/api/mac-tools"] = 256  # {"action": "dry-run"|"clean"|"maintenance", "confirm"?}: starts a Mac maintenance job (mac_tools.py)
 ACTIONS["/api/mac-tools"] = "_mac_tools"
 ROUTES["/api/mac-tools-status"] = MAX_BODY  # {}: the running job, the last report and the Mac's state; a read, like /api/state
 ACTIONS["/api/mac-tools-status"] = "_mac_tools_status"
+for _voice_route, _voice_size in (("start", 64), ("audio", 22000), ("heartbeat", 128),
+                                  ("events", 128), ("stop", 128), ("confirm", 128)):
+    ROUTES["/api/voice-copilot/" + _voice_route] = _voice_size
+    ACTIONS["/api/voice-copilot/" + _voice_route] = "_voice_copilot"
 YOUTUBE_KEYS = {"connect": set(), "arm": set(), "start": {"armed"}, "stop": set(), "disconnect": set(),
                 "enable": {"on"}, "projects": {"keys"}, "mirror-arm": set(),
                 "mirror-on": {"armed"}, "mirror-off": set()}
@@ -199,16 +235,32 @@ def radio_player_on(cfg: Config) -> bool:
 
 
 def radio_audio(name: str) -> bytes:
-    """Only regular files beneath the private HLS directory, with a fresh live playlist."""
-    from . import radio
+    """Regular files beneath fresh private HLS; legacy HLS only while an older radio still runs."""
+    from . import buildstamp, radio
     if not RADIO_FILE.fullmatch(name):
         raise OSError("not a radio file")
-    root = radio.folder() / "hls"
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    root_fd = None
+    for directory in (radio.PRIVATE_HLS, "hls"):
+        if directory == "hls" and "radio" not in buildstamp.stale():
+            break
+        try:
+            candidate = os.open(radio.folder() / directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            playlist = os.stat("live.m3u8", dir_fd=candidate, follow_symlinks=False)
+            if not stat.S_ISREG(playlist.st_mode) or time.time() - playlist.st_mtime > RADIO_FRESH:
+                continue
+            root_fd = candidate
+            break
+        except OSError:
+            pass
+        finally:
+            if root_fd is None:
+                os.close(candidate)
+    if root_fd is None:
+        raise OSError("radio off")
     try:
-        playlist = os.stat("live.m3u8", dir_fd=root_fd, follow_symlinks=False)
-        if not stat.S_ISREG(playlist.st_mode) or time.time() - playlist.st_mtime > RADIO_FRESH:
-            raise OSError("radio off")
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
     finally:
         os.close(root_fd)
@@ -246,15 +298,16 @@ ACTIONS["/api/devices"] = "_devices"
 DEVICE_KEYS = {"list": set(), "revoke": {"id"}, "revoke-all": set()}
 ROUTES["/api/widget-state"] = MAX_BODY  # {}: the widget's read-only snapshot
 ROUTES["/api/widget-decide"] = 256  # {"id", "choice"}: an answer to a decision that is not sensitive
+ROUTES["/api/live-activity-token"] = 768
 WIDGET_ROUTES = ("/api/widget-state", "/api/widget-decide")
 BEARER = re.compile(r"Bearer (hgw_[A-Za-z0-9_-]{43})")  # device_tokens.TOKEN
 WIDGET_CALLS = 30  # requests per device per minute; the app refreshes every few minutes at most
 _widget_calls: dict = {}
 _widget_lock = threading.Lock()
 # What a widget shows, field by field (HarnessgramCockpitKit's parser reads these); "<field>_he" rides along.
-WIDGET_DECISION = ("id", "title", "yes", "no", "topic", "url", "stale", "age", "sensitive")
+WIDGET_DECISION = ("id", "title", "yes", "no", "topic", "url", "link", "stale", "age", "sensitive")
 WIDGET_SESSION = ("id", "name", "state", "now", "url")
-WIDGET_CARD = ("id", "kind", "title", "topic", "steps", "at", "percent", "topic_url", "finished", "ended", "stale")
+WIDGET_CARD = ("id", "kind", "title", "topic", "steps", "at", "percent", "topic_url", "finished", "ended", "stale", "updated")
 
 
 def _widget_rate(device: str, now: Optional[float] = None) -> bool:
@@ -272,7 +325,7 @@ def _widget_rate(device: str, now: Optional[float] = None) -> bool:
 
 
 def bot_id_of(token: str) -> Optional[int]:
-    """The bridge bot's numeric user id, so the Harnessgram app can pin the bot by id from an authenticated source.
+    """The bridge bot's numeric user id, so the HarnessGram app can pin the bot by id from an authenticated source.
     Telegram's bot token starts with that id (the `id` getMe returns), so it is read from the token already held in
     memory: no network call on a request, and only the id, never the secret part, ever leaves this function."""
     head, sep, _ = str(token or "").partition(":")
@@ -283,23 +336,39 @@ def bot_id_of(token: str) -> Optional[int]:
 
 def _pick(row: dict, fields: tuple) -> dict:
     out = {k: row.get(k) for k in fields if k in row}
-    out.update({k + "_he": row[k + "_he"] for k in fields if row.get(k + "_he")})
+    out.update({k + "_he": row[k + "_he"] for k in fields if k + "_he" in row})
     return out
 
 
 def widget_view(cfg: Config, state: dict, bot_id: Optional[int] = None) -> dict:
     """The widget's snapshot: the open decisions (with "sensitive"), the working sessions, the progress cards and the
     radio's on/off. A copy of the owner's state, cut to what a home or lock screen shows; no detail, no notes."""
+    from . import waiting
     enabled = radio_player_on(cfg)
     try:
         live = enabled and bool(radio_audio("live.m3u8"))
     except OSError:
         live = False
-    return {"ok": True, "now": state.get("now"), "bot_id": bot_id,
+    return {"ok": True, "now": state.get("now"), "bot_id": bot_id, "waiting_count": waiting.waiting_count(cfg),
+            "appSwitches": state.get("appSwitches") or cockpit_v2.app_switches(),
             "decisions": [_pick(d, WIDGET_DECISION) for d in state.get("decisions") or []],
             "sessions": [_pick(s, WIDGET_SESSION) for s in state.get("sessions") or [] if s.get("state") == "working"],
             "cards": [_pick(c, WIDGET_CARD) for c in state.get("cards") or [] if c.get("kind") == "progress"],
-            "radio_player": {"ok": True, "enabled": enabled, "on": live}}
+            "radio_player": {"ok": True, "enabled": enabled, "on": live},
+            "today": state.get("ownerToday") or _EMPTY_TODAY}
+
+
+_EMPTY_TODAY = {"done_today": 0, "total_today": 0, "waiting": []}
+
+
+def _widget_today(cfg: Config, now: float, rows: list) -> dict:
+    """The widget's "today" block from rows already read; a failure gives an empty block, never a failed state."""
+    try:
+        return owner_requests.today(cfg, now, rows=rows)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        from .inbox import poll_log
+        poll_log(f"widget today failed: {type(exc).__name__}")
+        return dict(_EMPTY_TODAY, waiting=[])
 
 
 def app_csp(host: str = "") -> str:
@@ -428,7 +497,7 @@ def start_param_of(init_data: str) -> str:
 
 
 def waiting_for_owner(topics: TopicMap, now: float, here: Optional[tuple] = None,
-                      states: Optional[dict] = None) -> tuple:
+                      states: Optional[dict] = None, *, reminder_limit: Optional[int] = MAX_REMINDERS) -> tuple:
     """The open decisions and the open pin-board reminders, newest first, with the title of and a link to the
     topic each belongs to; each is marked "here" when it belongs to the topic `here` = (chat, thread). With
     the sessions' `states` ({session: working|idle|ended}), a decision that no longer waits on the owner says
@@ -441,11 +510,12 @@ def waiting_for_owner(topics: TopicMap, now: float, here: Optional[tuple] = None
     asked = [{"id": r["id"], "title": r["title"], "detail": r["detail"], "yes": r["yes"], "no": r["no"],
               "topic": by_session.get(r["session"], ""), "age": _age(now, r["created"]),
               "stale": stale.get(r["id"], ""), "old": panel_view.is_old(now, r["created"]), "url": panel_view.topic_url(r["chat"], r["thread"]),
+              "link": panel_view.waiting_link(r),
               "here": (r["chat"], r["thread"]) == here,
               # a Claude Code permission request: its exact text (shown as is, never translated), Yes only if shown whole
               **({"request": r.get("request", ""), "decline_only": bool(r.get("decline_only", True))}
                  if r.get("perm") else {}),
-              # the Harnessgram app answers a sensitive one only in the app after Face ID, never from a widget
+              # the HarnessGram app answers a sensitive one only in the app after Face ID, never from a widget
               "sensitive": sensitive_buttons.decision_sensitive(r)}
              for r in sorted(records, key=lambda r: (-r["created"], r["id"]))]
     found = board.open_reminders()
@@ -453,7 +523,7 @@ def waiting_for_owner(topics: TopicMap, now: float, here: Optional[tuple] = None
                   "age": _age(now, i["at"]), "url": panel_view.topic_url(chat, thread), "here": (chat, thread) == here,
                   "ref": f"{board.key_hash(board.key_of(chat, thread))}:{i['i']}" if type(i.get("i")) is int else "",
                   "old": reminder_lifecycle.is_old(i, now)}
-                 for chat, thread, i in sorted(found, key=lambda f: -f[2]["at"])[:MAX_REMINDERS]]
+                 for chat, thread, i in sorted(found, key=lambda f: -f[2]["at"])[:reminder_limit]]
     return asked, reminders
 
 
@@ -565,7 +635,7 @@ def _hebrew_cards(tr, rows, waiting: list) -> None:
         return
     for row in rows:
         for field, value in list(row.items()):
-            if field in ("id", "kind", "session", "url", "topic_url", "images") or field.endswith("_he"):
+            if field in ("id", "kind", "session", "url", "topic_url", "link", "images") or field.endswith("_he"):
                 continue
             if isinstance(value, str):
                 _hebrew(tr, [row], (field,), waiting)
@@ -588,6 +658,23 @@ def _hebrew_cards(tr, rows, waiting: list) -> None:
                     row[field + "_he"] = translated
 
 
+def _hebrew_view(tr, value, waiting: list) -> None:
+    """Translate late presentation copy, including work-map lines, never protocol values.
+
+    Presentation is built after the classic lists; its newly derived project
+    names and work-map text need their own pass before pending is counted.
+    """
+    if isinstance(value, list):
+        for item in value:
+            _hebrew_view(tr, item, waiting)
+    elif isinstance(value, dict):
+        fields = ("name", "title", "detail", "summary", "text", "what", "impact", "note", "project_name", "project")
+        _hebrew(tr, [value], tuple(f for f in fields if isinstance(value.get(f), str)), waiting)
+        for key, item in list(value.items()):
+            if not key.endswith("_he") and isinstance(item, (dict, list)):
+                _hebrew_view(tr, item, waiting)
+
+
 def _background(path: Optional[str], state: str, now: Optional[float] = None) -> int:
     """How many background agents and commands a live session is running (0 for an ended one). Read again only
     when the transcript changed, or every ten minutes (a job that never reported ends after hours)."""
@@ -598,6 +685,24 @@ def _background(path: Optional[str], state: str, now: Optional[float] = None) ->
         return auto_progress.cached(path, f"bg{bucket}", lambda p: len(usage.background_of(p)), 0)
     except Exception:
         return 0
+
+
+def _live_activity(session: str, now: float) -> dict:
+    """The already-rendered progress and agent state for a session, without any transcript or network I/O."""
+    from .config import read_map, safe_name
+    progress_state = read_map(state_dir() / "progress" / f"{safe_name(session)}.msg")
+    steps = progress_state.get("activity", [])
+    if not isinstance(steps, list):
+        steps = []
+    agent_state = read_map(state_dir() / "agents-cards" / f"{safe_name(session)}.json")
+    cards_by_id = agent_state.get("cards", {})
+    cards_list = list(cards_by_id.values()) if isinstance(cards_by_id, dict) else []
+    agents = []
+    for card in cards_list[-2:]:
+        if isinstance(card, dict):
+            agents.extend(a for a in card.get("agents", []) if isinstance(a, dict) and not a.get("moved"))
+    return {"steps": [str(x) for x in steps[-20:]], "agents": agents[-12:],
+            "updated": progress_state.get("activity_at"), "ended": bool(progress_state.get("ended"))}
 
 
 def _default_model() -> dict:
@@ -617,28 +722,64 @@ def _compact_at() -> int:
 
 
 def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light: bool = False,
-                tr: Optional["panel_text.Translator"] = None) -> dict:
+                tr: Optional["panel_text.Translator"] = None, full_ids: bool = False) -> dict:
     """Decisions, reminders, sessions and quota, from the same readers the bot's own menus use. With the
     start parameter of a session topic's pinned button, also that topic's own view under "topic".
     `light` skips transcript details and the Mac resource sampler.
     With a translator `tr`, agent-written text gets a Hebrew copy beside it (see _hebrew); "pending" counts
-    the texts still being translated, so the page asks again shortly."""
+    the texts still being translated, so the page asks again shortly.
+    `full_ids` (the MCP server only, never the page) adds each session's, card's and ledger row's full session id as
+    "session_id" / "session", so a caller is matched exactly and never by the short id two sessions may share."""
+    from . import waiting
     now = time.time() if now is None else now
     topics = TopicMap(state_dir() / "topics.json", None, home_chat(cfg), cfg=cfg)
     scope = _topic_of(topics, start)
     entries = collect(topics, now=now)
+    native = {}
+    if cfg.codex_harness_enabled is True:
+        from .codex_bridge import sessions as codex_sessions
+        from .sessions_menu import Entry
+        native = codex_sessions()
+        places = topics.all_places()
+        for key, row in native.items():
+            place = topics.place_of(key)
+            if place and place.chat == home_chat(cfg):
+                state = "working" if row["status"] in ("working", "waiting_for_approval") else "idle"
+                age = max(0, now - (row["updated"] or now))
+                name = places.get(key, {}).get("name") or "Codex"
+                entries.append(Entry(key, name, place.thread, age, state, False))
+        entries.sort(key=lambda e: (e.age is None, e.age or 0))
+    settings = panel_settings.read()
+    # v2 must be able to expand every reminder included in the shared waiting count.
     asked, reminders = waiting_for_owner(topics, now, (scope["chat"], scope["thread"]) if scope else None,
-                                         {e.session: e.state for e in entries})
+                                         {e.session: e.state for e in entries},
+                                         reminder_limit=None if settings.get("ui_v2") in ("preview", "on") else MAX_REMINDERS)
     here = scope["session"] if scope else None
     shown = [e for e in entries if not e.closed or e.session == here]
     if here and not any(e.session == here for e in shown[:MAX_SESSIONS]):
         # the topic's own session always makes the list (review of #136: cut after
         # MAX_SESSIONS first, the topic's panel said its live session was gone)
         shown = shown[:MAX_SESSIONS - 1] + [e for e in shown if e.session == here][:1]
-    usage_snapshot = session_usage.snapshot([(e.session, e.name) for e in entries], now, cfg.usage_prices)
+    usage_snapshot = session_usage.snapshot([(e.session, e.name) for e in entries if e.session not in native],
+                                            now, cfg.usage_prices)
     sessions = []
     paths = {}
     for e in shown[:MAX_SESSIONS]:
+        if e.session in native:
+            from .codex_bridge import total_tokens
+            rec = native[e.session]
+            chat = home_chat(cfg)
+            tokens = total_tokens(rec.get("usage") or {})
+            sessions.append({"id": e.session, "name": e.name, "state": e.state, "harness": "codex",
+                             "native_status": rec["status"], "model": rec["model"], "effort": rec["effort"],
+                             "delivery_unconfirmed": rec["delivery_unconfirmed"],
+                             "age": int(e.age), "codex_tokens": tokens, "bg": 0,
+                             "here": bool(scope) and e.session == scope["session"],
+                             "url": panel_view.topic_url(chat, e.thread),
+                             **{action + "_url": panel_view.waiting_link(
+                                 {"chat": chat, "thread": e.thread, "msg": rec[action]})
+                                 for action in ("stop", "answer") if rec[action]}})
+            continue
         path = None if light else status.transcript_of(e.session)
         paths[e.session] = path
         # every transcript read is cached by the file's size and mtime: a frequent poll reads only what changed
@@ -650,6 +791,7 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
                          "forkable": bool(re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", e.session)),
                          "age": None if e.age is None else int(e.age), "context": ctx, "model": model,
                          "account": _session_account(e.session), "bg": _background(path, e.state, now),
+                         "credit": credit_mode.status_line(e.session, now),
                          "now": panel_view.current_step(e.session) if live and e.state == "working" else "",
                          "summary": auto_progress.cached(path, "summary", panel_view.last_summary, "") if live else "",
                          "url": panel_view.topic_url(home_chat(cfg) if e.chat is None else e.chat, e.thread),
@@ -657,7 +799,10 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
                          "folder": folder, "branch": "" if branch in ("HEAD", "") else branch,
                          "waiting": [] if light or e.state == "ended" else waiting_words(e.session, now),
                          "compact": _session_compact(e.session),  # its own threshold; None = the global one
-                         "left": left_behind(e), "usage": usage_snapshot["sessions"].get(e.session)})
+                         "left": left_behind(e), "usage": usage_snapshot["sessions"].get(e.session),
+                         **({"activity": _live_activity(e.session, now)}
+                            if settings.get("live_activity_cockpit") else {}),
+                         **({"session_id": e.session} if full_ids else {})})
     names = {e.session: e.name for e in entries}
     quota = []
     for name in accounts.names():
@@ -669,30 +814,34 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
                       "weekly": u.get("weekly"), "weekly_resets": u.get("weekly_resets") or None,
                       "banked": usage.banked_resets(u),
                       "at": u.get("at")})
-    out = {"ok": True, "now": int(now), "decisions": asked, "reminders": reminders, "sessions": sessions,
+    ledger_rows = [dict(r, steps=r["steps"][-owner_requests.MAX_NOTES:])
+                   for r in owner_requests.read(now, owner_requests.ledger_dir(cfg), history=True, dormant_after=owner_requests.dormant_seconds(cfg))
+                   if r["status"] != "done" or 0 <= now - r["updated"] <= owner_requests.DONE_DAYS]
+    out = {"ok": True, "now": int(now), "waiting_count": waiting.waiting_count(cfg, now=now, requests=ledger_rows), "decisions": asked, "reminders": reminders, "sessions": sessions,
            "usage_totals": usage_snapshot["totals"], "quota": quota, "compact_at": _compact_at(), "default_model": _default_model(),
-           "settings": panel_settings.read()}
+           "settings": settings, "appSwitches": cockpit_v2.app_switches()}
+    out["tower_pending"] = tower_home.pending(now)
     from . import hook_health
     out["hook_health"] = hook_health.view()
     if not light:
         out["mac"] = mac_resources.snapshot()
     out["bank"] = bank.view()
+    out["ownerToday"] = _widget_today(cfg, now, ledger_rows)  # the widget's "today", inside the cached state
     out["apps"] = cockpit_apps.listing()
     out["tasks"] = open_tasks(topics, now, (scope["chat"], scope["thread"]) if scope else None)
-    ledger_rows = [dict(r, steps=r["steps"][-owner_requests.MAX_NOTES:])
-                   for r in owner_requests.read(now, owner_requests.ledger_dir(cfg), history=True)
-                   if r["status"] != "done" or 0 <= now - r["updated"] <= owner_requests.DONE_DAYS]
     out["requests"] = [dict(r, steps=r["steps"][-owner_requests.MAX_NOTES:]) for r in ledger_rows
                        if r["status"] != "done" or 0 <= now - r["updated"] <= owner_requests.DONE_DAYS]
     ended = {e.session for e in entries if e.state == "ended"}
     states = {e.session: e.state for e in entries}
     if not light:
-        _auto_cards(cfg, entries, paths, {s["id"]: s["bg"] for s in sessions}, now)
+        _auto_cards(cfg, [e for e in entries if e.session not in native], paths,
+                    {s["id"]: s["bg"] for s in sessions}, now)
     # each card's way into its session's own topic: the same t.me link the sessions list carries (no chat ids)
     links = {e.session: panel_view.topic_url(home_chat(cfg) if e.chat is None else e.chat, e.thread) for e in entries}
     backgrounds = {e.session: s["bg"] for e, s in zip(shown[:MAX_SESSIONS], sessions)}  # full ids: short ones can collide
     memo: dict = {}  # per session, for this build: a session's cards share one task list and one activity line
     out["cards"] = [dict(cards.view(r, now), topic=names.get(r["session"], ""), topic_url=links.get(r["session"], ""),
+                         **({"link": panel_view.waiting_link(r)} if r["kind"] in cards.ASKS else {}),
                          **_card_activity(r, paths, backgrounds, states, now, memo),
                          ended=r["session"] in ended and (r["kind"] != "progress" or bool(r.get("auto_closed"))),
                          auto_closed=bool(r.get("auto_closed")),
@@ -701,7 +850,8 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
                                _card_stale(r, states, now, memo),
                          old=panel_view.is_old(now, r.get("updated")) or
                              cards.finished(r) and now - r["updated"] >= cards.PROGRESS_FOLD_AFTER,
-                         here=bool(scope) and r["session"] == scope["session"])
+                         here=bool(scope) and r["session"] == scope["session"],
+                         **({"session_id": r["session"]} if full_ids else {}))
                     for r in cards.reconcile_progress(ended, now)]
     out["deliveries"] = [] if light else delivery_receipts(now=now)
     for receipt in out["deliveries"]:
@@ -721,14 +871,20 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
     _secret_free(ledger_rows)
     # Archived titles must not take the translator's bounded queue ahead of live work.
     owner_requests.translate(sorted(ledger_rows, key=lambda r: r["status"] == "done"), tr, waiting)
+    if scope:
+        out["topic"]["status_cards"] = topic_status.cards(
+            ledger_rows, scope["session"], now, lang=cfg.ui_language)
     # Keep the existing checklist's translated fields and seven-day completion window.
     out["requests"] = [dict(r, steps=r["steps"][-owner_requests.MAX_NOTES:]) for r in ledger_rows
                        if r["status"] != "done" or 0 <= now - r["updated"] <= owner_requests.DONE_DAYS]
-    out["topic_cards"] = topic_cards.build(ledger_rows, now)
+    from . import request_sweep
+    out["topic_cards"] = topic_cards.slim(topic_cards.build(ledger_rows, now, request_sweep.cached_states(cfg)), now)
     try:  # open team items nobody moved (idle_lines.py): after the translation, so their Hebrew titles come along
         out["idle_lines"] = idle_lines.view(cfg, out["requests"], now)
     except Exception:
         out["idle_lines"] = {"count": 0, "items": []}
+    # Only what the list shows goes out; the full text, note and steps come from /api/request-detail on expand.
+    out["requests"] = owner_requests.slim(out["requests"], now, keep_session=full_ids)
     if scope:
         _hebrew(tr, [out["topic"]], ("name",), waiting)
         for kind in ("remind", "check", "link"):
@@ -757,18 +913,41 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
         try:  # today's "Good morning" card (briefing.py): present only when one was made today and not put away
             morning = briefing.card(cfg, now)
             if morning:
+                _secret_free(morning)  # filter before any text can enter the translation queue
+                for section in ("overnight", "waiting"):
+                    _hebrew(tr, morning.get(section, []), ("what", "impact"), waiting)
                 out["morning"] = morning
         except Exception:
             pass
         # Presentation also annotates decisions/cards with project identity.
         # Apply the same boundary filter to those newly derived fields.
         out["addons"] = addons.flags(cfg)  # the page hides what is switched off (cockpit_v2_addons.js)
+        if addons.enabled(cfg, "home_context"):
+            from . import home_context, shabbat_times
+            moment = datetime.fromtimestamp(now, schedule.zone(cfg))
+            try:
+                friday = shabbat_times.friday_on_or_before(moment.date())
+                span = shabbat_times.window(friday, cfg)
+                rest = None if span is None else (span[0] <= moment < span[1] or briefing.rest_day(cfg, now))
+            except Exception:
+                rest = None
+            out["home_context"] = home_context.context(cfg, moment, inputs={
+                "shabbat_times": rest, "decisions": out.get("decisions", ()),
+                "sessions": out.get("sessions", ()), "cards": out.get("cards", ())})
         try:  # old topics the owner may close (topic_cleanup.py); only behind ui_v2 and its add-on switch
             out["topic_cleanup"] = topic_cleanup.view(cfg, topics, now) if out["addons"]["topic_cleanup"] else None
         except Exception:
             out["topic_cleanup"] = None
+        # Late readers may add fresh agent/config copy. Scrub it before any
+        # engine sees it, then scrub returned translations at the boundary too.
+        for key in ("cockpit_v2", "decisions", "cards", "topic_cleanup"):
+            _secret_free(out.get(key))
+        _hebrew(tr, out["decisions"] + out["cards"], ("project_name", "recommendation"), waiting)
+        _hebrew_view(tr, out["cockpit_v2"], waiting)
+        _hebrew_view(tr, out["topic_cleanup"], waiting)
         for key in ("cockpit_v2", "decisions", "cards", "topic_cleanup", "morning"):
             _secret_free(out.get(key))
+    out["pending"] = len(waiting)
     if getattr(cfg, "radio", None):
         from . import radio, radio_room
         out["radio"] = dict(radio.operation(), on=bool(radio.job_pid()), **radio.minutes(cfg), **radio.mode(cfg))
@@ -787,6 +966,11 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
             out["podcast"] = radio_podcast.view(cfg, now)
         except Exception:
             pass
+        try:
+            from . import radio_music
+            out["radio_music"] = {"enabled": radio_music.enabled(), "now": radio_music.playback()}
+        except Exception:
+            out["radio_music"] = {"enabled": False, "now": {}}
     return out
 
 
@@ -846,15 +1030,18 @@ def _auto_cards(cfg: Config, entries: list, paths: dict, bg: dict, now: float) -
         from .i18n import t
         fallback = t("todo_plan", lang=cfg.target_language)
         rows, used = [], [p for p in paths.values() if p]
+        # Only the visible session slice has fresh background counts. Keep the watcher count for
+        # unshown idle sessions until its next authoritative scan; zero would close a running card.
+        known_bg = {c["session"]: c.get("bg", 0) for c in cards.open_cards() if c.get("automatic")}
         for e in entries:
-            row = {"session": e.session, "state": e.state, "bg": bg.get(e.session[:8], 0),
+            row = {"session": e.session, "state": e.state, "bg": bg.get(e.session[:8], known_bg.get(e.session, 0)),
                    "chat": home_chat(cfg) if e.chat is None else e.chat, "thread": e.thread,
                    "title": (e.name or "").strip() or fallback}
             if e.state == "working" or row["bg"]:
                 row["path"] = paths[e.session] if e.session in paths else status.transcript_of(e.session)
                 used.append(row["path"])
             rows.append(row)
-        auto_progress.sync(rows, now)
+        auto_progress.sync(rows, now, cfg)
         auto_progress.forget(p for p in used if p)
     except Exception:
         pass
@@ -870,14 +1057,44 @@ def csp(nonce: str) -> str:
     return panel_page.csp(nonce, FRAME_ANCESTORS)
 
 
+PANEL_ASSET_ROOT = Path(__file__).with_name("assets") / "panel"
+PANEL_ICON_ROUTES = {
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+    "/favicon-32.png": ("favicon-32.png", "image/png"),
+    "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+    "/icons/icon-192.png": ("icon-192.png", "image/png"),
+    "/icons/icon-512.png": ("icon-512.png", "image/png"),
+    "/icons/icon-maskable-512.png": ("icon-maskable-512.png", "image/png"),
+    "/icons/icon-monochrome.svg": ("icon-monochrome.svg", "image/svg+xml"),
+}
+
+
+def web_manifest() -> bytes:
+    return json.dumps({
+        "name": "Cockpit", "short_name": "Cockpit", "start_url": "/", "display": "standalone",
+        "background_color": "#83cee9", "theme_color": "#17365d",
+        "icons": [
+            {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            {"src": "/icons/icon-monochrome.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "monochrome"},
+        ],
+    }, separators=(",", ":")).encode("utf-8")
+
+
 # --- the server --------------------------------------------------------------------------
 
 MIRROR_OFF = {"ok": False, "error": "mirroring is off"}
 
 
 # Routes that change nothing: they need no action-fresh signature and leave the kept state alone.
-READ_ONLY_ROUTES = ("/api/state", "/api/radio-player", "/api/mac-tools-status", "/api/schedule-view", "/api/family-view",
-                    "/api/client-error", "/api/widget-state")
+READ_ONLY_ROUTES = ("/api/state", "/api/packs", "/api/project-art-image", "/api/radio-player", "/api/mac-tools-status", "/api/schedule-view", "/api/family-view",
+                    "/api/client-error", "/api/widget-state", "/api/request-detail", "/api/request-target",
+                    "/api/topic-detail", "/api/my-music")
+# Only start opens a paid call and needs action freshness. Continuation is bound to its random call id
+# AND the full owner login; it never carries typed/panel approval authority. Audio can trigger a voice relay.
+VOICE_CONTINUATION_ROUTES = tuple("/api/voice-copilot/" + action for action in
+                                  ("events", "audio", "heartbeat", "stop"))
 
 
 class PanelHandler(http.server.BaseHTTPRequestHandler):
@@ -905,6 +1122,35 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         except OSError:
             pass
     sys_version = ""
+
+    def _my_music(self) -> None:
+        self._json(200, panel_my_music.load(self.server.cfg))
+
+    def _radio_programs(self) -> None:
+        from . import radio_programs
+        req = self._request()
+        if req is None:
+            self._json(400, {"error": "bad request"})
+            return
+        try:
+            action = req.get("action")
+            if action == "view" and set(req) == {"action"}:
+                result = radio_programs.view()
+            elif action == "preset" and set(req) == {"action", "preset"}:
+                radio_programs.select_preset(req["preset"])
+                result = radio_programs.view()
+            elif action == "save" and set(req) == {"action", "preset", "blocks"}:
+                radio_programs.save(req["blocks"], req["preset"])
+                result = radio_programs.view()
+            elif action == "start" and set(req) <= {"action", "preset", "blocks"}:
+                radio_programs.start(req.get("blocks"), req.get("preset"))
+                result = radio_programs.view()
+            else:
+                raise ValueError("action")
+        except (TypeError, ValueError):
+            self._json(400, {"error": "bad request"})
+            return
+        self._json(200, {"ok": True, "program": result})
 
     def send_error(self, code, message=None, explain=None):
         self.close_connection = True
@@ -957,6 +1203,23 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        path = urlsplit(self.path).path
+        if path in PANEL_ICON_ROUTES or path == "/manifest.webmanifest":
+            if not self._body_ok(0):
+                return
+            if path == "/manifest.webmanifest":
+                self._send(200, web_manifest(), "application/manifest+json",
+                           {"Cache-Control": "public, max-age=3600"})
+                return
+            name, content_type = PANEL_ICON_ROUTES[path]
+            try:
+                body = (PANEL_ASSET_ROOT / name).read_bytes()
+            except OSError:
+                self._json(404, {"error": "not found"})
+                return
+            self._send(200, body, content_type, {"Cache-Control": "public, max-age=31536000, immutable",
+                       "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'"})
+            return
         if self.path.startswith(cockpit_v2.ASSET_PREFIX):
             if not self._body_ok(0):
                 return
@@ -1010,7 +1273,7 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         # Anything but a state read may change what the state shows: the next read builds afresh.
         cache = self._state_cache()
-        mutating = cache is not None and self.path not in READ_ONLY_ROUTES
+        mutating = cache is not None and self.path not in READ_ONLY_ROUTES and self.path not in VOICE_CONTINUATION_ROUTES
         if mutating:
             cache.clear()
         try:
@@ -1031,6 +1294,9 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         if self.path not in ROUTES:
             self._json(404, {"error": "not found"})
             return
+        if self.path == "/api/live-activity-token":
+            self._live_activity_token()
+            return
         if self.path in WIDGET_ROUTES:
             self._widget_post()  # a device token only; initData is never read on these two routes
             return
@@ -1039,7 +1305,7 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             return
         init = self.headers.get(INIT_HEADER, "")
         if not validate_init_data(init, self.server.bot_token, self.server.owner_id,
-                                  max_age=DECIDE_MAX_AGE if decide else MAX_AGE):
+                                  max_age=DECIDE_MAX_AGE if decide and self.path not in VOICE_CONTINUATION_ROUTES else MAX_AGE):
             self._json(403, {"error": "forbidden"})
             return
         if self.path == "/api/radio":
@@ -1070,6 +1336,7 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             return
         self._extend(STATE_DEADLINE)  # the sender is the authenticated owner; the build itself can take seconds
         start = start_param_of(init)
+        began = time.monotonic()
         try:
             # Requests that arrive together share one build, and its answer is reused for a few seconds. An answer
             # still waiting for translations is not kept: the page asks again shortly and must see them arrive.
@@ -1082,7 +1349,9 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             log_failure("state build", exc)
             self._json(500, {"error": "unavailable"})
             return
+        built = time.monotonic()
         data["youtube"] = self.server.youtube_view()
+        extras = time.monotonic()
         data["bot_id"] = bot_id_of(self.server.bot_token)  # the app pins the bridge bot by this id (never the token)
         try:  # Settings lists the paired widget devices (device_tokens.py): labels and dates, never a hash
             data["widget_devices"] = device_tokens.listing()
@@ -1093,7 +1362,10 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         # This flag is emitted only after full owner authentication. A preview
         # cannot be selected by a query parameter or an app-scoped capability.
         data["ui_v2_enabled"] = cockpit_v2.enabled(data.get("settings", {}).get("ui_v2", "off"), owner=True)
-        self._json(200, data)
+        try:
+            self._json(200, data)
+        finally:  # also when the phone already gave up and the write fails (#339)
+            log_slow("state", began, built=built, youtube=extras, sent=time.monotonic(), pending=data.get("pending", 0))
 
     def _radio_get(self) -> None:
         parts = urlsplit(self.path)
@@ -1277,11 +1549,59 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         else:
             self._widget_decide()
 
+    def _live_activity_token(self) -> None:
+        """Accept a paired app bearer or the same fresh owner login used by mutating Cockpit APIs."""
+        if not self._body_ok(ROUTES[self.path]):
+            return
+        headers = self.headers.get_all("Authorization") or []
+        match = BEARER.fullmatch(headers[0]) if len(headers) == 1 else None
+        device = device_tokens.check(match.group(1)) if match else None
+        if device is not None and not _widget_rate(device):
+            log_token("rate", who="device")
+            self._json(429, {"error": "rate", "retry": 60})
+            return
+        if device is None:
+            init = self.headers.get(INIT_HEADER, "")
+            # A token only lets the phone receive the progress cards the same login can already read, so this route
+            # takes a login of read age (the app polls with one), not the shorter answer age.
+            if not validate_init_data(init, self.server.bot_token, self.server.owner_id, max_age=MAX_AGE):
+                log_token("forbidden", bearer=bool(match), init=bool(init))
+                self._json(403, {"error": "forbidden"})
+                return
+            device = "owner"
+        req = self._request()
+        who = "owner" if device == "owner" else "device"
+        if not isinstance(req, dict) or not isinstance(req.get("card_id"), str):
+            log_token("bad", who=who, shape=type(req).__name__)
+            self._json(400, {"error": "bad request"})
+            return
+        if "problem" in req:
+            # The app's one-line diagnosis of why no token came (never stored): an allow-listed code only.
+            code = req.get("problem")
+            if set(req) != {"card_id", "problem"} or not apns.CARD_ID.fullmatch(req["card_id"]) \
+                    or not isinstance(code, str) or not LA_PROBLEM.fullmatch(code):
+                log_token("rejected", who=who, keys="problem")
+                self._json(400, {"error": "bad request"})
+                return
+            log_token("problem", who=who, problem=code)
+            self._json(200, {"ok": True})
+            return
+        ended = req.get("ended", False)
+        valid_keys = {"card_id", "ended"} if ended is True else {"card_id", "token", "env"}
+        if set(req) != valid_keys or not apns.register(device, req["card_id"], req.get("token"), req.get("env"), ended):
+            log_token("rejected", who=who, keys=",".join(sorted(k for k in req if k in ("card_id", "ended", "token", "env")) or "-"),
+                      env=req.get("env") if req.get("env") in ("sandbox", "production") else "?")
+            self._json(400, {"error": "bad request"})
+            return
+        log_token("ok", who=who, ended=ended is True, env=req.get("env") if req.get("env") in ("sandbox", "production") else "-")
+        self._json(200, {"ok": True})
+
     def _widget_state(self) -> None:
         if self._body.strip() not in (b"", b"{}"):
             self._json(400, {"error": "bad request"})
             return
         self._extend(STATE_DEADLINE)  # the sender holds a paired device's token; the build can take seconds
+        began = time.monotonic()
         try:
             def build():
                 return build_state(self.server.cfg, tr=getattr(self.server, "translator", None))
@@ -1294,7 +1614,11 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             log_failure("widget state", exc)
             self._json(500, {"error": "unavailable"})
             return
-        self._json(200, view)
+        built = time.monotonic()
+        try:
+            self._json(200, view)
+        finally:
+            log_slow("widget state", began, built=built, sent=time.monotonic())
 
     def _widget_decide(self) -> None:
         """{"id", "choice"}: a widget's answer. A sensitive decision is refused with "needs-app" (the app answers it
@@ -1316,7 +1640,9 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             if stale_reasons_now(self.server.cfg).get(ident) in ("ended", "replaced"):
                 self._json(409, {"error": "closed", "state": "stale", "choice": ""})
                 return
-            rec = decisions.answer(self.server.cfg, self.server.inbox(), ident, choice, "", check=not_sensitive)
+            # by: the owner this server serves (the device token was paired by the owner), never the request body
+            rec = decisions.answer(self.server.cfg, self.server.inbox(), ident, choice, "", check=not_sensitive,
+                                   by=self.server.owner_id, via="widget")
         except PanelQueueFull:
             self._json(409, {"error": "queue full"})
             return
@@ -1336,7 +1662,7 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             return
         decisions.announce(self.server.cfg, self.server.bot(), self.server.inbox(), rec)
         self._json(200, {"ok": True, "key": rec["delivery_key"],
-                         "delivery": self.server.inbox().delivery_state(rec["session"], rec["delivery_key"])})
+                         "delivery": rec.get("final_state") or self.server.inbox().delivery_state(rec["session"], rec["delivery_key"])})
 
     # --- the YouTube staff radio (panel_youtube.py) ----------------------------------------------------------
 
@@ -1604,7 +1930,9 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     self._json(409, {"error": "closed", "state": "stale", "choice": ""})
                 return
-            rec = decisions.answer(self.server.cfg, self.server.inbox(), ident, choice, note)
+            # by: validate_init_data proved the Telegram user is this server's owner; never the request body
+            rec = decisions.answer(self.server.cfg, self.server.inbox(), ident, choice, note,
+                                   by=self.server.owner_id, via="panel")
         except PanelQueueFull:
             self._json(409, {"error": "queue full"})
             return
@@ -1620,7 +1948,7 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             return
         decisions.announce(self.server.cfg, self.server.bot(), self.server.inbox(), rec)
         self._json(200, {"ok": True, "key": rec["delivery_key"],
-                         "delivery": self.server.inbox().delivery_state(rec["session"], rec["delivery_key"])})
+                         "delivery": rec.get("final_state") or self.server.inbox().delivery_state(rec["session"], rec["delivery_key"])})
 
     def _radio(self) -> None:
         """The owner's radio switch: {"on": true|false}. Answers at once; the switch runs detached."""
@@ -1948,6 +2276,70 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             return
         self._json(200, {"ok": True})
 
+    def _owner_request_detail(self) -> None:
+        """{"project", "id"}: the full text, latest note and steps of one ledger item. Owner only (the same login as
+        /api/state); nothing is written. The text passes the same credential filter as the state."""
+        req = self._request()
+        if not isinstance(req, dict) or set(req) != {"project", "id"}:
+            self._json(400, {"error": "bad request"})
+            return
+        try:
+            item = owner_requests.detail(owner_requests.ledger_dir(self.server.cfg), req["project"], req["id"],
+                                         time.time(), self.server.translator)
+        except Exception:
+            self._json(503, {"error": "unavailable"})
+            return
+        if item is None:
+            self._json(404, {"error": "unknown request"})
+            return
+        _secret_free(item)
+        self._json(200, dict(item, ok=True))
+
+    def _owner_request_target(self) -> None:
+        """{"key": 16 hex}: the {project, id} of the ledger row a widget deep link names. Owner only (the same login
+        as /api/state); nothing is written; an unknown key is a 404."""
+        req = self._request()
+        key = req.get("key") if isinstance(req, dict) and set(req) == {"key"} else None
+        if not isinstance(key, str):
+            self._json(400, {"error": "bad request"})
+            return
+        try:
+            now = time.time()
+            rows = owner_requests.read(now, owner_requests.ledger_dir(self.server.cfg), history=True,
+                                       dormant_after=owner_requests.dormant_seconds(self.server.cfg))
+            found = owner_requests.resolve_key(rows, key)
+        except Exception:
+            self._json(503, {"error": "unavailable"})
+            return
+        if found is None:
+            self._json(404, {"error": "unknown request"})
+            return
+        self._json(200, {"ok": True, "project": found[0], "id": found[1]})
+
+    def _topic_detail(self) -> None:
+        """{"key": [project, "topic"|"item", slug|id]}: the timeline notes of one topic card, newest first. Owner only
+        (the same login as /api/state); nothing is written. The text passes the same credential filter."""
+        req = self._request()
+        key = req.get("key") if isinstance(req, dict) and set(req) == {"key"} else None
+        if not (isinstance(key, list) and len(key) == 3 and isinstance(key[0], str) and key[1] in ("topic", "item")
+                and (isinstance(key[2], str) or type(key[2]) is int)):
+            self._json(400, {"error": "bad request"})
+            return
+        now = time.time()
+        try:
+            rows = [r for r in owner_requests.read(now, owner_requests.ledger_dir(self.server.cfg), history=True)
+                    if r["status"] != "done" or 0 <= now - r["updated"] <= owner_requests.DONE_DAYS]
+            notes = topic_cards.timeline(rows, key, now, self.server.translator)
+        except Exception:
+            self._json(503, {"error": "unavailable"})
+            return
+        if notes is None:
+            self._json(404, {"error": "unknown topic"})
+            return
+        out = {"notes": notes}
+        _secret_free(out)
+        self._json(200, dict(out, ok=True))
+
     def _app_request(self) -> None:
         """{"text": ...}: one App Store link or id for the approval command (app_request.py). Owner only, fresh login;
         the text is checked before anything runs and is never logged."""
@@ -2026,6 +2418,89 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "key": out["key"], "on": out["on"], "previous": out["previous"],
                          "item": addons.item(cfg, addons.BY_KEY[out["key"]])})
 
+    def _packs(self) -> None:
+        """Owner-only pack grouping view."""
+        from . import packs
+        req = self._request()
+        action = req.get("action") if isinstance(req, dict) else None
+        if action not in PACK_KEYS or set(req) != PACK_KEYS[action] | {"action"}:
+            self._json(400, {"error": "bad request"}); return
+        try:
+            self._json(200, packs.view(self.server.cfg))
+        except OSError:
+            self._json(503, {"error": "unavailable"})
+
+    def _project_art(self) -> None:
+        """Set (an uploaded image), pick a scene, or clear the owner's picture of one project."""
+        req = self._request()
+        action = req.get("action") if isinstance(req, dict) else None
+        if not isinstance(action, str) or action not in ART_KEYS or set(req) != ART_KEYS[action] | {"action"}:
+            self._json(400, {"error": "bad request"})
+            return
+        project = req["project"]
+        if not isinstance(project, str) or len(project) > 200 or not project_art.name_for(project):
+            self._json(400, {"error": "bad request"})
+            return
+        try:
+            if action == "clear":
+                project_art.clear(project)
+            else:
+                if action == "set":
+                    data = req["data"]
+                    if not isinstance(data, str) or len(data) > project_art.MAX_BYTES * 4 // 3 + 8:
+                        raise project_art.ArtError("size" if isinstance(data, str) else "bad")
+                    try:
+                        raw = base64.b64decode(data, validate=True)
+                    except ValueError:
+                        raise project_art.ArtError("bad")
+                else:
+                    try:
+                        raw = cockpit_v2.scene_bytes(req["scene"]) if isinstance(req["scene"], str) else b""
+                    except (KeyError, OSError):
+                        self._json(404, {"error": "unknown"})
+                        return
+                project_art.store(project, raw)
+        except project_art.ArtError as exc:
+            self._json(ART_ERRORS.get(exc.code, 400), {"error": exc.code})
+            return
+        except OSError:
+            self._json(503, {"error": "unavailable"})
+            return
+        self._json(200, {"ok": True, "art": project_art.stamp(project)})
+
+    def _project_art_image(self) -> None:
+        req = self._request()
+        name = req.get("name") if isinstance(req, dict) and set(req) == {"name"} else None
+        try:
+            body = project_art.read(name)
+        except OSError:
+            self._json(404, {"error": "not found"})
+            return
+        ctype = {"jpeg": "image/jpeg", "png": "image/png"}.get(project_art.kind_of(body), "image/webp")
+        self._send(200, body, ctype, {"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'"})
+    def _packs_edit(self) -> None:
+        """Owner-confirmed pack mutations; unlike the view this route is not read-only."""
+        from . import knowledge, packs
+        req = self._request(); action = req.get("action") if isinstance(req, dict) else None
+        if not isinstance(action, str) or action not in PACK_WRITE_KEYS or set(req) != PACK_WRITE_KEYS[action] | {"action"}:
+            self._json(400, {"error": "bad request"}); return
+        try:
+            if action == "preview": out = packs.preview(self.server.cfg, req["pack"], req["on"])
+            elif action == "set": out = packs.set_pack(self.server.cfg, req["pack"], req["on"])
+            elif action == "move": out = packs.move(self.server.cfg, req["item"], req["pack"])
+            else: out = packs.export_pack(self.server.cfg, req["pack"], req["dir"])
+            self._json(200, out)
+        except packs.Unknown:
+            self._json(404, {"error": "unknown"})
+        except (packs.PackError, TypeError):
+            self._json(400, {"error": "bad request"})
+        except knowledge.KnowledgeError as exc:
+            self._json(KNOWLEDGE_ERRORS.get(exc.code, 400), {"error": exc.code})
+        except addons.AddonError as exc:
+            self._json(ADDON_ERRORS.get(exc.code, 400), {"error": exc.code})
+        except OSError:
+            self._json(503, {"error": "unavailable"})
+
     def _schedule_off(self) -> bool:
         """The `schedule_card` add-on is off: the schedule routes are not there (404)."""
         if addons.enabled(self.server.cfg, "schedule_card"):
@@ -2038,7 +2513,17 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         if sources:
             self._extend(schedule.fetch_budget(sources) + 5)  # a first calendar fetch
         try:
-            out = {"ok": True, "view": schedule.view(self.server.cfg, source_list=sources)}
+            view = schedule.view(self.server.cfg, source_list=sources)
+            try:
+                saved = json.loads((state_dir() / "day-assistant.json").read_text(encoding="utf-8"))
+                card = saved.get("card") if isinstance(saved, dict) else None
+                if isinstance(card, dict) and card.get("date") == view.get("today") \
+                        and isinstance(card.get("lines"), list):
+                    view["day_card"] = {"title": str(card.get("title", ""))[:100],
+                                        "lines": [str(line)[:500] for line in card["lines"][:8]]}
+            except (OSError, ValueError):
+                pass
+            out = {"ok": True, "view": view}
             if item:
                 out["item"] = {k: item[k] for k in ("id", "title", "date", "time", "done")}
             self._json(200, out)
@@ -2073,6 +2558,16 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
                 row = schedule.add(self.server.cfg, req["text"])
             elif action == "done":
                 row = schedule.set_done(req["id"], req["done"])
+            elif action in ("swap", "extend", "skip"):
+                from . import schedule_hours
+                sources = schedule.sources(self.server.cfg)
+                if sources:
+                    self._extend(schedule.fetch_budget(sources) + 5)
+                refreshed = schedule.view(self.server.cfg, source_list=sources)
+                if not all(v["available"] for v in refreshed["timeline"].values()):
+                    raise schedule.ScheduleError("unavailable")
+                schedule_hours.change(self.server.cfg, req["date"], req["id"], action, req.get("minutes"))
+                row = None
             else:
                 schedule.remove(req["id"])
                 row = None
@@ -2241,6 +2736,81 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         except Exception:
             self._json(500, {"error": "unavailable"})
 
+    def _voice_copilot(self) -> None:
+        """Signed owner-only HTTP streaming; no Google credentials ever cross this boundary."""
+        action = self.path.rsplit("/", 1)[-1]
+        try:
+            voice_copilot.require_enabled()
+            req = self._request()
+            keys = {"start": set(), "audio": {"session", "data"}, "heartbeat": {"session"},
+                    "events": {"session"}, "stop": {"session"}, "confirm": {"id", "digest"}}
+            if not isinstance(req, dict) or set(req) != keys[action]:
+                raise voice_copilot.Refused("bad")
+            manager = self.server.voice_copilot
+            if action == "confirm":
+                try:
+                    result = tower_home.confirm(self.server.cfg, req["id"], req["digest"])
+                except KeyError:
+                    self._json(409, {"ok": False, "error": "expired",
+                                     "message": t("tower_confirm_expired", lang=self.server.cfg.ui_language)})
+                    return
+                self._json(200, {"ok": True, "confirmed": result})
+                return
+            if action == "start":
+                self._json(200, manager.start())
+                return
+            call = manager.get(req["session"])
+            if action == "stop":
+                call.stop()
+                self._json(200, {"ok": True})
+            elif action == "audio":
+                call.audio(req["data"])
+                self._json(200, {"ok": True})
+            elif action == "heartbeat":
+                call.heartbeat()
+                self._json(200, {"ok": True})
+            else:
+                if not call.consumer.acquire(blocking=False):
+                    raise voice_copilot.Refused("busy")
+                try:
+                    self._voice_events(call)
+                finally:
+                    call.consumer.release()
+        except voice_copilot.Refused as exc:
+            self._json({"bad": 400, "cap": 429, "unavailable": 503}.get(exc.code, 409),
+                       {"ok": False, "error": exc.code, "message": voice_copilot.MESSAGES[exc.code]})
+        except Exception:
+            # In particular don't pass transport errors to log_failure: they may carry a token.
+            self._json(503, {"ok": False, "error": "unavailable",
+                             "message": voice_copilot.MESSAGES["unavailable"]})
+
+    def _voice_events(self, call) -> None:
+        self._extend(voice_copilot.HARD_SECONDS + 10)
+        self.close_connection = True
+        self.send_response(200)
+        for name, value in {"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store",
+                            "X-Accel-Buffering": "no", "Connection": "close",
+                            "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}.items():
+            self.send_header(name, value)
+        self.end_headers()
+        try:
+            while True:
+                if not voice_copilot.enabled():
+                    call.stop("disabled")
+                try:
+                    event = call.events.get(timeout=2)
+                except queue.Empty:
+                    event = ({"type": "closed", "reason": "closed", "message": voice_copilot.MESSAGES["closed"]}
+                             if call.stopped.is_set() else {"type": "heartbeat"})
+                self.wfile.write(("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                self.wfile.flush()
+                if event["type"] == "closed":
+                    break
+        except (OSError, ValueError):
+            pass
+        finally:
+            call.stop()  # a detached phone never leaves a billed session running
+
     def _setting(self) -> None:
         """One bridge setting: {"name": ..., "value": ...} (panel_settings.SETTINGS)."""
         req = self._request()
@@ -2248,11 +2818,15 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             self._json(400, {"error": "bad request"})
             return
         try:
-            panel_settings.write(req["name"], req["value"])
+            results = panel_settings.write(req["name"], req["value"])
         except Exception:
             self._json(500, {"error": "unavailable"})
             return
-        self._json(200, {"ok": True, "settings": panel_settings.read()})
+        response = {"ok": True, "settings": panel_settings.read()}
+        if req["name"] == "default_effort" and isinstance(results, list):
+            response["profiles"] = results
+            response["partial"] = any(not result.get("ok") for result in results)
+        self._json(200, response)
 
     def _brief_seen(self) -> None:
         """The Morning Brief's "since you last looked" marker: {"at": <the state's "now" the owner saw>}."""
@@ -2377,6 +2951,23 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             self._json(500, {"error": "unavailable"})
             return
         self._json(200, {"ok": True, "podcast": P.view(cfg)})
+
+    def _radio_music(self) -> None:
+        """Owner-only like/skip controls for the item on the private stream."""
+        from . import radio_music
+        req = self._request()
+        if req is None or set(req) != {"action", "id"} or req.get("action") not in ("like", "skip"):
+            self._json(400, {"error": "bad request"})
+            return
+        try:
+            if req["action"] == "like":
+                radio_music.like(req["id"])
+            else:
+                radio_music.request_skip(req["id"])
+        except ValueError:
+            self._json(404, {"error": "not found"})
+            return
+        self._json(200, {"ok": True})
 
     def _room(self) -> None:
         """The brainstorming room (radio_room.py): {"action": "start", "topic", "minutes", "project"?} | pause |
@@ -2610,6 +3201,42 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+SLOW_SECONDS = 3.0
+
+
+def log_slow(what: str, began: float, **marks) -> None:
+    """One stderr line (the panel's launchd log) when a request took longer than SLOW_SECONDS: the time to each
+    named step since `began`, and plain counts. Never any data. Owner report #339: the iPhone Cockpit tab gave up
+    after 25 s and the panel kept no trace of how long its answer took."""
+    try:
+        total = max(v for v in marks.values() if isinstance(v, float)) - began if marks else 0.0
+        if total < SLOW_SECONDS:
+            return
+        parts = " ".join("%s=%.1fs" % (k, v - began) if isinstance(v, float) else "%s=%s" % (k, v)
+                         for k, v in marks.items())
+        sys.stderr.write("%s panel: slow %s %.1fs: %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), what, total, parts))
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+# Why a Live Activity has no push token, as the app reports it: request-failed:<ActivityAuthorizationError case or
+# NSError domain.code>, no-token-after-grace or push-disabled. Nothing else is accepted or logged.
+LA_PROBLEM = re.compile(r"(?:no-token-after-grace|push-disabled|request-failed(?::[A-Za-z0-9._-]{1,64})?)")
+
+
+def log_token(outcome: str, **facts) -> None:
+    """One stderr line per Live Activity token request: the outcome and plain facts (who: device/owner, ended,
+    env, or the app's allow-listed problem code). Never the token, card id or login. Owner report #361: the phone never registered and the panel kept no
+    trace of whether it tried."""
+    try:
+        parts = " ".join("%s=%s" % (k, v) for k, v in facts.items())
+        sys.stderr.write("%s panel: live-activity token %s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), outcome, parts))
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def log_failure(what: str, exc: BaseException) -> None:
     """One line on stderr (the panel's launchd log): the exception's type and the frame that raised it. Never its
     message or arguments, which can quote the owner's data."""
@@ -2682,6 +3309,7 @@ def screen_of(cfg: Config, short: str, now: Optional[float] = None) -> str:
         body = I.pane_text(pane, lines=SCREEN_ROWS)
     except OSError:
         return ""
+    body = I.relay_screen_text(body)
     rows = [r.rstrip() for r in body.replace("\u200f", "").splitlines()]
     while rows and not rows[-1].strip():
         rows.pop()
@@ -2975,12 +3603,18 @@ class PanelServer(http.server.ThreadingHTTPServer):
         self.lang = cfg.ui_language
         self.translator = panel_text.Translator(cfg)
         self.state_cache = state_cache.StateCache()
+        self.voice_copilot = voice_copilot.Manager(cfg, self.inbox)
         self.youtube_flow = panel_youtube.Flow()
         self.google_flow = google_calendar.Flow()
         # Import now what the state and the actions use later (the routing and settings code is large): a first
         # import inside a request could outlast DEADLINE on a busy machine.
         from . import agents_topic, autopilot, delivery, inbox, progress, voice  # noqa: F401
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def server_close(self):
+        if hasattr(self, "voice_copilot"):
+            self.voice_copilot.close()
+        super().server_close()
 
     # the YouTube staff radio: what tests replace with fakes (the Keychain, Google, the detached CLI)
     app_request_gate = app_request.GATE   # tests replace these two
@@ -3091,10 +3725,43 @@ class PanelServer(http.server.ThreadingHTTPServer):
             self.slots.release()
 
 
+REFRESH_TIMEOUT = 30  # seconds the Studio refresh may take in its own process
+
+
+def refresh_installed_apps(run=None) -> bool:
+    """Rewrite the Studio's app folder from this code when it is installed: its page is a copy, so an update that
+    skipped `harnessgram studio install` left the Cockpit on an old page that never loaded (owner, 16.11).
+
+    The install loads the Studio's adapter, which may hang, so it runs in its own process with a time limit, and
+    serve() starts it on a background thread: the panel never waits for it. Never installs it where it is not,
+    never raises."""
+    import logging
+    import subprocess
+    import sys
+    try:
+        from .cockpit_apps import apps_dir
+        if not (apps_dir() / "studio" / "manifest.json").is_file():
+            return False
+        run = run or subprocess.run
+        # -I: no current folder, user site or PYTHON* variables on the path, so only this install's `ctb` loads.
+        # The working folder stays the panel's own (relative state settings keep their meaning), and the apps
+        # folder goes over as an absolute path.
+        base = os.path.abspath(apps_dir())
+        done = run([sys.executable, "-I", "-c", "import sys; from ctb.studio import install; install.install(sys.argv[1])",
+                    base], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=REFRESH_TIMEOUT, check=False)
+        return done.returncode == 0
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Studio refresh failed (%s)", type(exc).__name__)
+        return False
+
+
 def serve(cfg: Config, port: int = 8765, host: str = "127.0.0.1") -> int:
     from . import buildstamp
     server = PanelServer((host, port), cfg)
     buildstamp.record_running("panel")  # doctor tells when an install left this copy on older code
+    import threading
+    threading.Thread(target=refresh_installed_apps, name="studio-refresh", daemon=True).start()
     try:
         server.serve_forever()
     finally:

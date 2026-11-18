@@ -44,9 +44,9 @@ def test_look_alike_quote_marks_cannot_close_a_quote(mark):
 
 
 def test_the_closing_note_names_panel_messages_too():
-    assert "answer or message in the Harnessgram control panel counts the same way" in framing.OWNER_YES
+    assert "answer or message in the HarnessGram control panel counts the same way" in framing.OWNER_YES
     assert "control-panel taps" not in framing.OWNER_YES  # the owner decided the Cockpit counts as approval
-    assert "wrote in the Harnessgram control panel" in framing.PANEL_HEADER
+    assert "wrote in the HarnessGram control panel" in framing.PANEL_HEADER
 
 
 @pytest.mark.parametrize("name,module,load", [

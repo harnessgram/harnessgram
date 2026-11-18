@@ -38,6 +38,9 @@ change live progress, receipts or the footer.
 - **User-facing text goes through `src/ctb/i18n.py`**, in English and Hebrew. Keep Hebrew lines free of long
   English runs: put code, links and long English on their own line.
 - **One topic per pull request**, with a test that fails without the change. Run the full suite before you push.
+  If you cannot run all of it, at least run the contract tests your change can break: a new panel route or Cockpit
+  string needs `tests/test_panel_docs.py` and `tests/test_panel_hebrew.py`; any new host, id or name needs
+  `tests/test_public_hygiene.py`.
 - Write commit messages and pull requests in plain English: what changed and why.
 
 ## Licence
