@@ -244,7 +244,7 @@ def test_neighbouring_unplaced_projects_get_different_scenes_in_any_order():
 
 def test_strings_match_by_screen_and_styles_are_logical():
     strings = panel_page.V2_STRINGS
-    assert strings["he"].keys() == strings["en"].keys() == {"shell", "requests", "now", "settings", "projects", "tools", "knowledge", "cleanup", "schedule", "addons", "family", "workmap", "voiceCopilot", "packs", "art"}
+    assert strings["he"].keys() == strings["en"].keys() == {"shell", "requests", "now", "settings", "projects", "tools", "knowledge", "cleanup", "schedule", "addons", "family", "workmap", "voiceCopilot", "packs", "art", "native"}
     for screen in strings["he"]:
         assert strings["he"][screen].keys() == strings["en"][screen].keys()
         assert all(strings[lang][screen][k].strip() for lang in strings for k in strings[lang][screen])

@@ -181,7 +181,7 @@ def test_fallback_skips_accounts_that_are_spent_or_just_ran_out(home, bot):
     make_profile("work")
     make_profile("spare")
     write("claude-usage-spare.json", {"five_hour": 0, "weekly": 0})
-    now = time.time()
+    now = time.time() + 5  # readings are stamped to the whole second at write time; a stamp after `now` looks dated in the future
     write("claude-usage-work.json", {"five_hour": 40, "weekly": 100, "weekly_resets": now + 3600})
     plan = accounts.fallback_plan(SID, now)
     assert plan["fresh"] == ["spare"] and plan["others"] == ["spare", "work"]
@@ -452,9 +452,11 @@ def test_delivery_buttons_switch_a_queued_message_and_stop_interrupts(home, bot,
     write("tmux-panes.json", {SID: "%5"})
     keys = []
     monkeypatch.setattr(I, "_tmux", lambda *a: keys.append(a) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(I, "stop_pane", lambda _session: "%5")
+    monkeypatch.setattr(I, "stop_turn", lambda pane, session: ("stopped", ""))
+    monkeypatch.setattr(I, "_terminal_background", lambda session, action: action() or True)
     q["data"] = "dl:stop:5"
     assert I.handle_button(q, cfg(), bot, topics, box) == "delivery"
-    assert ("send-keys", "-t", "%5", "Escape") in keys
     assert bot.methods("editMessageText")[-1]["reply_markup"] == {"inline_keyboard": []}
     box.take(SID)
     assert I.handle_button(q, cfg(), bot, topics, box) == "ignored"            # already delivered
@@ -556,7 +558,7 @@ def test_a_refused_correction_in_a_session_topic_keeps_the_edit(home, bot):
     assert "the owner corrected its transcript" in item["text"] and item.get("voice") and not item.get("typed")
     assert voice.load() == {}
 
-def test_voice_goes_straight_in_for_car_mode_dispatch_and_when_disabled(home, bot):
+def test_voice_goes_straight_in_when_disabled_driving_or_car_mode_set_to_send(home, bot):
     topics, box, thread = rig(bot)
     c = cfg(target_language="he")
     voice.set_confirm(False)
@@ -564,13 +566,63 @@ def test_voice_goes_straight_in_for_car_mode_dispatch_and_when_disabled(home, bo
     voice.set_confirm(True)
     box.take(SID)
     I.set_car_mode(True)
+    voice.set_car_choice("send")
     assert I.handle(voice_update(thread, 12), c, bot, topics, box, VoiceMedia(), 0) == "queued"
+    assert voice.load() == {}
+    I.set_car_mode(False)
+    voice.set_driving(True)
+    assert I.handle(voice_update(thread, 14), c, bot, topics, box, VoiceMedia(), 0) == "queued"
     assert voice.load() == {}
 
 
-def test_voice_is_never_lost_when_the_preview_cannot_be_sent(home, bot):
+def test_car_mode_alone_keeps_the_preview(home, bot):
+    """Car mode stays on until switched off: by default (voice_confirm_driving "preview") it no longer hides the
+    preview, which made recordings go straight in days after the drive."""
     topics, box, thread = rig(bot)
-    bot.fail["sendMessage"] = "boom"
+    I.set_car_mode(True)
+    assert voice.car_choice() == "preview"
+    assert I.handle(voice_update(thread, 12), cfg(target_language="he"), bot, topics, box, VoiceMedia(), 0) == "voice"
+    assert not box.pending(SID) and "12" in voice.load()
+
+
+class Flaky429(FakeBot):
+    """Telegram's flood limit on the preview for `times` tries."""
+    def __init__(self, times):
+        super().__init__()
+        self.times = times
+
+    def call(self, method, params=None, timeout=15):
+        if method == "sendMessage" and "vd:send" in json.dumps(params or {}) and self.times > 0:
+            self.times -= 1
+            self.calls.append((method, params or {}))
+            raise TelegramError("Too Many Requests", 429, 12)
+        return super().call(method, params, timeout)
+
+
+def test_a_preview_refused_for_a_while_is_retried_not_skipped():
+    """A 429 on the preview used to hand the recording to the session at once, without its preview."""
+    bot = Flaky429(2)
+    topics, box, thread = rig(bot)
+    assert I.handle(voice_update(thread, 13), cfg(target_language="he"), bot, topics, box, VoiceMedia(), 0) == "voice"
+    previews = [p for p in bot.methods("sendMessage") if "vd:send:13" in json.dumps(p)]
+    assert len(previews) == 3 and not box.pending(SID)
+    assert "preview" not in voice.load()["13"]                        # marked shown
+
+
+def test_voice_is_never_lost_when_the_preview_can_never_be_sent():
+    bot = Flaky429(99)
+    topics, box, thread = rig(bot)
+    assert I.handle(voice_update(thread, 13), cfg(target_language="he"), bot, topics, box, VoiceMedia(), 0) == "voice"
+    [item] = box.take(SID)
+    assert item["id"] == 13 and item.get("voice") and not item.get("typed") and voice.load() == {}
+    assert voice.outcome("13") == "direct"
+    echo = bot.methods("sendMessage")[-1]
+    assert "התצוגה המקדימה לא הצליחה להופיע" in echo["text"] and "reply_markup" not in echo
+
+
+def test_a_closed_topic_gives_up_at_once_and_delivers(home, bot):
+    topics, box, thread = rig(bot)
+    bot.fail["sendMessage"] = TelegramError("Bad Request: message thread not found", 400)
     assert I.handle(voice_update(thread, 13), cfg(target_language="he"), bot, topics, box, VoiceMedia(), 0) == "voice"
     assert [i["id"] for i in box.take(SID)] == [13] and voice.load() == {}
 

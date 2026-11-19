@@ -28,7 +28,7 @@ KINDS = ("menu", "offer")               # the move menu and the one-time late-ti
 OFFERED_FILE = "move-offered.json"      # sessions that were offered a move or moved, so a late offer comes once
 PENDING_KEEP = 50
 OFFERED_KEEP = 500
-CALLBACK = re.compile(r"mv:([0-9a-f]{16}):([0-9]|x)")
+CALLBACK = re.compile(r"mv:([0-9a-f]{16}):(0|[1-9][0-9]?|x)")
 
 
 def topic_link(chat: int, thread) -> str:

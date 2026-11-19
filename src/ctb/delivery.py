@@ -154,6 +154,11 @@ def has_ack(mid: int | str, chat: Optional[int] = None) -> bool:
     return thread_key(mid, chat) in _acks()
 
 
+def remember_ack(mid: int | str, message_id: int, chat: Optional[int] = None) -> None:
+    """Track a replacement receipt so normal delivery cleanup removes it."""
+    _update_acks(lambda acks: acks.__setitem__(thread_key(mid, chat), message_id))
+
+
 def send_waiting(bot, cfg: Config, mid: int, chat: Optional[int] = None, closed: bool = False) -> bool:
     """A short visible notice under a message the session has not received a minute after it was sent
     (the sweeper keeps delivering it). Kept with the receipts, so the 👌 of the real delivery deletes it.

@@ -93,6 +93,7 @@ def screen(world, monkeypatch):
     tm = Tmux()
     monkeypatch.setattr(I, "_tmux", tm)
     monkeypatch.setattr(I, "pane_runs_session", lambda *a, **k: True)  # the fake pane hosts the session
+    monkeypatch.setattr(I, "pane_session_process", lambda *a, **k: (7, "Wed Nov 18 13:00:00 2026"))
     # the session takes what is typed; no other prompt reached the transcript (an empty needle asks for any)
     monkeypatch.setattr(usage, "prompt_since", lambda session, since, needle="": bool(needle))
     return tm

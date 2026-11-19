@@ -51,6 +51,11 @@ def _room_set(on: bool) -> None:
     set_enabled(on)
 
 
+def _voice():
+    from . import voice
+    return voice
+
+
 def _voice_get() -> bool:
     from . import voice
     return voice.confirm_on()
@@ -123,6 +128,9 @@ SETTINGS: Dict[str, Tuple[Callable[[], Any], Callable[[Any], None], tuple]] = {
     "voice_digest": (lambda: _config_get("voice_digest"), lambda v: _config_set("voice_digest", v),
                      ("off", "important", "hourly", "every_3_hours")),
     "voice_confirm": (_voice_get, _voice_set, (False, True)),
+    # the 🚗 driving window (closes by itself after voice.DRIVING_SECONDS) and what car mode does to a voice note
+    "voice_driving": (lambda: _voice().driving_on(), lambda on: _voice().set_driving(on), (False, True)),
+    "voice_confirm_driving": (lambda: _voice().car_choice(), lambda v: _voice().set_car_choice(v), ("preview", "send")),
     "voice_copilot": (voice_copilot.enabled, voice_copilot.set_enabled, (False, True)),
     "day_briefing": (day_assistant.briefing_enabled, day_assistant.set_briefing_enabled, (False, True)),
     "day_nudges": (day_assistant.nudges_enabled, day_assistant.set_nudges_enabled, (False, True)),

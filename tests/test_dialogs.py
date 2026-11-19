@@ -25,6 +25,7 @@ from ctb.telegram import TelegramError
 from ctb.topics import TopicMap
 
 ORIG_TMUX, ORIG_PANE_TEXT = I._tmux, I.pane_text
+REAL_SLEEP = time.sleep  # the rig makes time.sleep a no-op; a real pane still needs real time to redraw
 OWNER = 7
 FIX = Path(__file__).parent / "fixtures" / "cli2.1.314"
 HINT = "Enter to select · ↑/↓ to navigate · Esc to cancel"
@@ -413,13 +414,15 @@ def test_secret_paths_make_the_card_red(path):
 
 # --- the real tmux ------------------------------------------------------------------------------------------------
 
+# Raw mode first, then the screen: setraw flushes pending input, so a key sent as soon as the screen shows
+# would otherwise be thrown away.
 KEYLOG = """\
 import sys, termios, tty
 screen, log = sys.argv[1], sys.argv[2]
-sys.stdout.write(open(screen).read().replace("\\n", "\\r\\n") + "\\r\\n")
-sys.stdout.flush()
 fd = sys.stdin.fileno()
 tty.setraw(fd)
+sys.stdout.write(open(screen).read().replace("\\n", "\\r\\n") + "\\r\\n")
+sys.stdout.flush()
 while True:
     ch = sys.stdin.buffer.read(1)
     if not ch:
@@ -450,10 +453,10 @@ class RealTmux:
         cmd = command.format(log=log) if command else f"{sys.executable} -I {self.root / 'keylog.py'} {screen} {log}"
         r = self.run("new-session", "-d", "-s", f"t{n}", "-x", "110", "-y", "90", cmd)
         assert r.returncode == 0, r.stderr
-        for _ in range(60):
+        for _ in range(100):
             if self.run("capture-pane", "-p", "-t", f"t{n}").stdout.strip():
                 break
-            time.sleep(0.1)
+            REAL_SLEEP(0.1)
         pane = self.run("display", "-p", "-t", f"t{n}", "#{pane_id}").stdout.strip()
         return pane, log
 
@@ -477,9 +480,15 @@ def use_real_pane(monkeypatch, server, pane):
     monkeypatch.setattr(I, "_tmux", lambda *a: server.run(*a))
     monkeypatch.setattr(I, "pane_text", ORIG_PANE_TEXT)
     monkeypatch.setattr(I, "pane_for_session", lambda s: pane)
+    monkeypatch.setattr(D.time, "sleep", lambda s: REAL_SLEEP(min(s, 0.1)))  # short, but real: the pane redraws
 
 
-def keys_of(log: Path) -> list:
+def keys_of(log: Path, wait: float = 10.0) -> list:
+    """Keys the pane received. Polls until some arrive (a loaded CI host can be slow), then lets the rest settle;
+    a check that expects no keys passes a short ``wait``."""
+    end = time.time() + wait
+    while time.time() < end and not (log.exists() and log.read_text().strip()):
+        time.sleep(0.1)
     time.sleep(0.4)
     return log.read_text().split() if log.exists() else []
 
@@ -497,7 +506,7 @@ def test_replayed_attacks_send_no_key_on_a_real_tmux(rig, real_tmux, monkeypatch
     assert D.send_card(rig.cfg, rig.bot, "s", rig.thread)
     assert only_utility_buttons(last_card(rig))
     forge_all(rig, D.parse(I.pane_text(pane)).stamp)
-    assert keys_of(log) == []
+    assert keys_of(log, wait=0.4) == []
 
 
 @pytest.mark.parametrize("name", ["plan", "webfetch", "review", "trust", "perm", "small", "preview", "single", "multiq"])
@@ -512,7 +521,7 @@ def test_blocker1_no_key_button_on_any_screen_with_option_rows(rig, real_tmux, m
     assert not any(k == "k" for k in kinds(last_card(rig)))
     stamp = D.parse(body).stamp if D.parse(body) else D.stamp_of(body)
     forge_all(rig, stamp)
-    assert keys_of(log) == []
+    assert keys_of(log, wait=0.4) == []
 
 
 def test_key_buttons_only_for_a_screen_with_no_option_rows_and_they_reach_the_pane(rig, real_tmux, monkeypatch):
@@ -555,7 +564,7 @@ def test_blocker2_a_long_command_whose_header_scrolled_off_is_refused_with_a_mes
     assert "cut off" in last_card(rig)["text"] or "top not visible" in last_card(rig)["text"]
     assert say(rig, "1") == "dialog-cut"
     assert "cut off" in rig.bot.methods("sendMessage")[-1]["text"] and "Full screen" in rig.bot.methods("sendMessage")[-1]["text"]
-    assert keys_of(log) == []
+    assert keys_of(log, wait=0.4) == []
 
 
 def test_blocker2_the_same_options_under_another_command_are_another_dialog(rig):
@@ -599,11 +608,11 @@ def test_blocker2_a_complete_permission_prompt_can_be_answered_by_typing(rig, re
 SIM = f"{sys.executable} -I {Path(__file__).parent / 'multisim.py'} {{log}}"
 
 
-def start_sim(real_tmux, ticks="0000"):
-    return real_tmux.start(command=SIM + " " + ticks)
+def start_sim(real_tmux, ticks="0000", lag=0.0):
+    return real_tmux.start(command=SIM + " " + ticks + (f" {lag}" if lag else ""))
 
 
-def sim_result(log: Path, wait=3.0):
+def sim_result(log: Path, wait=10.0):
     end = time.time() + wait
     while time.time() < end:
         if log.exists() and log.read_text().strip():
@@ -627,6 +636,82 @@ def test_blocker3_a_preticked_option_the_owner_did_not_name_is_unticked(rig, rea
     D.send_card(rig.cfg, rig.bot, "s", rig.thread)
     assert say(rig, "1, 3") == "dialog-typed"
     assert sim_result(log) == ["Cheese", "Mushrooms"]
+
+
+@pytest.mark.parametrize("ticks", ["0000", "0100"])
+def test_blocker3_a_terminal_that_redraws_late_still_gets_exactly_the_named_ticks(rig, real_tmux, monkeypatch, ticks):
+    """A loaded host draws each key later than one pause after it: the walk waits for the redraw instead of
+    reading the old screen as a mismatch."""
+    pane, log = start_sim(real_tmux, ticks, lag=0.4)
+    use_real_pane(monkeypatch, real_tmux, pane)
+    assert D.send_card(rig.cfg, rig.bot, "s", rig.thread)
+    assert say(rig, "1, 3") == "dialog-typed"
+    assert sim_result(log, wait=20.0) == ["Cheese", "Mushrooms"]
+
+
+def test_round7_a_preview_question_that_redraws_late_is_still_answered(rig, real_tmux, monkeypatch):
+    pane, log = real_tmux.start(command=SIM + " preview 0.4")
+    use_real_pane(monkeypatch, real_tmux, pane)
+    assert D.send_card(rig.cfg, rig.bot, "s", rig.thread)
+    assert say(rig, "2") == "dialog-typed"
+    assert sim_result(log, wait=20.0) == "Roomy"
+
+
+class _Late:
+    """A screen that still shows the state before the last key for `lag` reads, then the new one."""
+
+    def __init__(self, sim, lag):
+        self.sim, self.lag, self.stale, self.left, self.reads = sim, lag, None, 0, 0
+
+    def render(self):
+        self.reads += 1
+        if self.left:
+            self.left -= 1
+            return self.stale
+        return self.sim.render()
+
+    def press(self, key):
+        self.stale, self.left = self.sim.render(), self.lag
+        self.sim.press(key)
+
+
+def test_blocker3_the_walk_waits_for_a_late_redraw_and_presses_enter_only_on_submit(rig):
+    from multisim import Sim
+    sim = Sim([False, True, False, False])
+    rig.scr.sim = _Late(sim, lag=D.SETTLE_READS - 2)
+    D.send_card(rig.cfg, rig.bot, "s", rig.thread)
+    assert say(rig, "1, 3") == "dialog-typed"
+    assert sim.done == ["Cheese", "Mushrooms"]
+    assert rig.scr.sent.count("Enter") == 1 and rig.scr.sent[-1] == "Enter"
+
+
+def test_blocker3_a_redraw_that_never_comes_stops_the_walk_without_enter(rig):
+    from multisim import Sim
+    sim = Sim()
+    rig.scr.sim = late = _Late(sim, lag=10 ** 6)
+    D.send_card(rig.cfg, rig.bot, "s", rig.thread)
+    late.reads = 0
+    say(rig, "3")
+    assert rig.scr.sent == ["Down"] and sim.done is None  # no second key while the first is not seen on screen
+    assert late.reads <= D.SETTLE_READS + 1
+    assert "Could not send" in rig.bot.methods("sendMessage")[-1]["text"]
+
+
+def test_blocker3_a_selector_that_lands_on_another_row_stops_at_once(rig):
+    from multisim import Sim
+
+    class Jumpy(Sim):
+        def press(self, key):  # one Down moves two rows: the screen is neither the old one nor the expected one
+            super().press(key)
+            if key == "Down":
+                super().press(key)
+    sim = Jumpy()
+    rig.scr.sim = late = _Late(sim, lag=0)
+    D.send_card(rig.cfg, rig.bot, "s", rig.thread)
+    late.reads = 0
+    say(rig, "3")
+    assert rig.scr.sent == ["Down"] and sim.done is None and not any(sim.ticks)
+    assert late.reads <= 2  # stopped on the first wrong screen, not after waiting out the reads
 
 
 def test_blocker3_enter_is_never_pressed_off_the_submit_row(rig):
@@ -711,7 +796,7 @@ def test_blocker5_webfetch_stays_answerable_and_the_watcher_keeps_its_record(rig
     D.remind(rig.cfg, rig.bot, rig.topics, now=1030.0)
     assert D.rec_get("s")["typed"]  # the record is still there after the watcher ran
     assert say(rig, "enter") == "queued"  # not a number or option: goes to Claude, with the options listed
-    assert keys_of(log) == []
+    assert keys_of(log, wait=0.4) == []
     assert say(rig, "1") == "dialog-typed"
     assert keys_of(log) == ["b'1'"]
 
@@ -1007,6 +1092,7 @@ def test_autopilot_types_after_double_dash(monkeypatch):
     monkeypatch.setattr(I, "dismiss_tip", lambda pane: True)
     monkeypatch.setattr(I, "input_box", lambda pane: next(boxes))
     monkeypatch.setattr(I, "pane_runs_session", lambda pane, session: True)
+    monkeypatch.setattr(I, "pane_session_process", lambda *a, **k: (7, "Wed Nov 18 13:00:00 2026"))
     monkeypatch.setattr(I, "submitted", lambda *args: True)
     monkeypatch.setattr(I, "_tmux", lambda *a: seen.append(a) or SimpleNamespace(returncode=0, stdout=""))
     autopilot.type_into("%1", "-R please;", "session")

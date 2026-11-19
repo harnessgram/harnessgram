@@ -159,9 +159,9 @@ CATALOGUE: Tuple[Addon, ...] = (
        "במצב רכב, הסיכום נשלח גם כהודעה קולית.",
        "In car mode the summary is also sent as a voice message.", ("config", "voice")),
     _a("voice_echo", "voice", "הד לתמלול כשאין תצוגה מקדימה", "Echo when sent without a preview",
-       "הקלטה שנשלחת לסוכן בלי אישור התמלול (מצב רכב או תקלה) מקבלת תגובה שקטה עם מה ששמעתי.",
-       "A recording that goes to the agent without the transcript preview (car mode or a failed preview) gets a "
-       "quiet reply with what was heard.", ("store",)),
+       "הקלטה שנשלחת לסוכן בלי אישור התמלול (נהיגה, מצב רכב שנקבע לשליחה ישירה, או תקלה) מקבלת תגובה שקטה עם מה ששמעתי ולמה.",
+       "A recording that goes to the agent without the transcript preview (the driving window, car mode set to send "
+       "directly, or a preview Telegram never showed) gets a quiet reply with what was heard and why.", ("store",)),
     _a("listen_link", "voice", "האזנה בספארי", "Listen in Safari",
        "כפתור ברדיו פותח קישור פרטי לדף האזנה בספארי, שממשיך לנגן ברקע ובמסך הנעילה.",
        "A radio button opens a private link to a listening page in Safari, which keeps playing in the background "

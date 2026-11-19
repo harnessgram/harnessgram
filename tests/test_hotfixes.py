@@ -482,7 +482,7 @@ def test_review_3_cleanup_preserves_replacement_socket(short_relay_state):
 
 def test_review_4_idle_connections_expire_and_cap_workers(short_relay_state, monkeypatch):
     monkeypatch.setattr(I, "RELAY_CONNECTION_LIMIT", 2)
-    monkeypatch.setattr(I, "RELAY_IO_TIMEOUT", 0.25)
+    monkeypatch.setattr(I, "RELAY_IO_TIMEOUT", 3.0)  # wide enough that a loaded host still holds both idle slots
     acquired = threading.Event()
     real_semaphore = threading.BoundedSemaphore
     class ObservedSemaphore:
@@ -504,17 +504,25 @@ def test_review_4_idle_connections_expire_and_cap_workers(short_relay_state, mon
         with running_relay() as path:
             for _ in range(2):
                 c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                c.settimeout(2)
+                c.settimeout(30)
                 c.connect(str(path))
                 connections.append(c)
-            assert acquired.wait(1)
+            assert acquired.wait(15)
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as excess:
-                excess.settimeout(1)
+                excess.settimeout(30)
                 excess.connect(str(path))
                 assert excess.recv(1) == b""  # refused without a third worker
             for c in connections:
                 assert json.loads(c.recv(1024))["error"] == "relay_timeout"
-            assert C.relay_call({"method": "sendMessage", "params": {"chat_id": OWNER}})
+            # Slots are released just after the timeout reply, so poll until a worker is free again.
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    assert C.relay_call({"method": "sendMessage", "params": {"chat_id": OWNER}})
+                    break
+                except I.TelegramError:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
     finally:
         for c in connections:
             c.close()

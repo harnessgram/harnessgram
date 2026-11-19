@@ -188,7 +188,7 @@ def button(q, cfg, bot, topics, session):
     scope = f"topic:{m['chat']['id']}:{m.get('message_thread_id')}:{m['message_id']}"
     data = q["data"]
     edit = {"chat_id": m["chat"]["id"], "message_id": m["message_id"]}
-    inbox._answer_button(bot, q, "")
+    inbox._answer_button(bot, q, t("toast_action_received", lang=cfg.ui_language))
     try:
         if data == "fork:ask":
             token = arm(cfg, topics, session, scope)

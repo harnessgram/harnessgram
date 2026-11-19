@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fcntl
 import contextlib
+import copy
 import hashlib
 import json
 import math
@@ -30,6 +31,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from threading import RLock, Timer
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import accounts, alerts, compact, delivery, dialogs, flood, framing, identity, listen, members, notices, pins, progress, radio_agent, replay, sessions_menu, voice
@@ -349,6 +351,19 @@ class Inbox:
             return found
         finally:
             fh.close()
+
+    def delivery_choice(self, session: str, message_id) -> Optional[bool]:
+        """The hold choice of a queued or unsettled leased message, or None when it is absent."""
+        wanted = str(message_id)
+        for item in self.peek(session):
+            if str(item.get("id")) == wanted:
+                return bool(item.get("hold"))
+        for lease in self.leases(session):
+            if not lease.get("requeued_at"):
+                for item in lease.get("items") or []:
+                    if isinstance(item, dict) and str(item.get("id")) == wanted:
+                        return bool(item.get("hold"))
+        return None
 
     def take(self, session: str, midturn: bool = False, only=None, lease: Optional[dict] = None,
              until: Optional[float] = None) -> List[dict]:
@@ -1060,6 +1075,18 @@ def log_delivery(session: str, at: Optional[float] = None) -> None:
         pass
 
 
+def log_delivery_tap(session: str, mode: str, outcome: str) -> None:
+    """Audit a delivery-card tap without owner text, message ids, or callback tokens."""
+    try:
+        log_path = private_dir(state_dir()) / "delivery.log"
+        line = f"{time.strftime('%H:%M:%S')} {safe_name(session)[:8]} dl:{mode} {outcome}\n"
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 def _refuse(bot, chat_id: int, m: dict, cfg: Config) -> None:
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     react(bot, chat_id, m, "\U0001F648", optional=True)
@@ -1448,7 +1475,7 @@ def default_model_button(cfg, bot, q: dict, m: dict, choice: str) -> str:
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     where = {"chat_id": _reply_chat(cfg, m), "message_id": m.get("message_id")}
     if choice == "menu":
-        _answer_button(bot, q, "")
+        _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
         current = _models.default_model()
         rows = [[{"text": ("✓ " if current == MODEL_IDS[k] else "") + "⭐ " + MODEL_LABELS[k],
                   "callback_data": "mdef:" + k} for k in MODEL_CHOICES[i:i + 2]] for i in (0, 2)]
@@ -1576,22 +1603,34 @@ def pane_for_session(session: str) -> Optional[str]:
     return _pane_from_process(session)
 
 
-def pane_runs_session(pane: str, session: str, known_pid: Optional[int] = None) -> bool:
-    """True only when this tmux pane still hosts this session. A saved %N id outlives a tmux restart and
-    is then reused by another window, so keys (Escape) are sent only after this check: the pane's
-    foreground process tree contains the session's Claude process.  Tmux names are
-    not identity: a window can be renamed or a stale pane id reused. ``known_pid``
-    is the session process read earlier, for when its record vanished during exit."""
+def pane_session_process(pane: str, session: str, known_pid: Optional[int] = None) -> Optional[Tuple[int, str]]:
+    """(pid, start time) of the live Claude process that runs ``session`` and leads the foreground process
+    group of this pane's terminal, or None. The identity comes from the process table (`ps`: the program,
+    its full command line, its start time) matched to the pid in the session's own record, never from
+    tmux metadata such as a window name or a saved %N id, which outlive the process and get reused. The
+    start time tells one process from a later one that was handed the same pid, so a caller that must act
+    on the same process twice (type, then Enter) keeps this value and compares it again. ``known_pid`` is
+    the session process read earlier, for when its record vanished during exit."""
     if not re.fullmatch(r"%[0-9]+", pane or "") or not session:
-        return False
+        return None
     try:
         pid = session_pid(session) or known_pid
         if not pid:
-            return False
-        return any(target_pid == pid for target_pid, _ in _pane_claude_targets(pane))
+            return None
+        for target_pid, begun in _pane_claude_targets(pane):
+            if target_pid == pid and begun:
+                return target_pid, begun
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
-    return False
+    return None
+
+
+def pane_runs_session(pane: str, session: str, known_pid: Optional[int] = None) -> bool:
+    """True only when this tmux pane still hosts this session. A saved %N id outlives a tmux restart and
+    is then reused by another window, so keys (Escape) are sent only after this check: the pane's
+    foreground process group is led by the session's own live Claude process (see pane_session_process).
+    ``known_pid`` is the session process read earlier, for when its record vanished during exit."""
+    return pane_session_process(pane, session, known_pid) is not None
 
 
 def stop_pane(session: Optional[str]) -> Optional[str]:
@@ -2118,7 +2157,7 @@ def general_offer_button(q: dict, cfg, bot, topics: TopicMap, inbox: Inbox, medi
         dispatcher_session = None
 
     if action == "b":
-        _answer_button(bot, q, "")
+        _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
         try:
             bot.call("editMessageText", dict(edit, text=_offer_message(offer, ui_lang),
                                              reply_markup=_offer_keyboard(token, ui_lang, bool(dispatcher_session))))
@@ -2131,7 +2170,7 @@ def general_offer_button(q: dict, cfg, bot, topics: TopicMap, inbox: Inbox, medi
         if not choices:
             _answer_button(bot, q, t("general_offer_no_topics", lang=ui_lang))
             return "ignored"
-        _answer_button(bot, q, "")
+        _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
         _offers_locked(lambda offers, now: offers[token].__setitem__("choices", [sid for sid, _ in choices])
                        if token in offers else None)
         rows = [[{"text": label, "callback_data": f"g:{token}:s{i}"}] for i, (_, label) in enumerate(choices)]
@@ -2335,7 +2374,7 @@ def skills_menu(cfg, bot, m, query="", page=0):
 def skill_button(q, cfg, bot):
     ui_lang = getattr(cfg, "ui_language", "en")
     m, data = q.get("message") or {}, q.get("data") or ""
-    _answer_button(bot, q, "")
+    _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
     if data == "sk:search":
         _skill_pending(m.get("message_thread_id"), {"kind": "search"}, chat=_chat_arg(cfg, m))
         _terminal_say(bot, cfg, m, t("skills_search_prompt", lang=ui_lang))
@@ -2594,7 +2633,7 @@ def history_open(cfg, bot, m, topics, item):
 def history_button(q, cfg, bot, topics):
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     m, value = q.get("message") or {}, q.get("data") or ""
-    _answer_button(bot, q, "")
+    _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
     item = None
     with _history_state() as data:
         job = data.get(_history_key(m))
@@ -2668,6 +2707,8 @@ def history_consume_search(cfg, bot, m, text):
 
 
 TAP_GRACE = 4.0  # seconds a background step gets to answer a tap before the spinner is closed for it
+BUTTON_ANSWER_DELAY = 0.4
+BUTTON_MARK_DELAY = 1.0
 
 
 class _TapWatch:
@@ -2686,6 +2727,165 @@ class _TapWatch:
         return getattr(self._bot, name)
 
 
+class _ButtonFeedback:
+    """Give one deferred answer and mark only a genuinely slow, otherwise untouched button."""
+
+    def __init__(self, bot, q: dict):
+        self._bot = bot
+        self._q = q
+        self._button_feedback = True
+        self._lock = RLock()
+        self._answered = False
+        self._finished = False
+        self._background = 0
+        self._touched = False
+        self._marked = False
+        self._mark_timer = Timer(BUTTON_MARK_DELAY, self._mark_while_running)
+        self._mark_timer.daemon = True
+        self._mark_timer.start()
+
+    def _answer(self, key: str):
+        with self._lock:
+            if self._answered:
+                return
+            self._answered = True
+        try:
+            self._bot.call("answerCallbackQuery", {"callback_query_id": self._q.get("id") or "",
+                                                    "text": t(key, lang=self._lang())})
+        except TelegramError:
+            pass
+
+    def _lang(self):
+        return self._q.get("_ui_language") or get_lang()
+
+    def _answer_while_running(self):
+        # A provisional answer would consume Telegram's one callback answer and
+        # suppress the handler's useful success or error. Slow work is shown by
+        # the button mark instead.
+        return None
+
+    def _marked_markup(self):
+        message = self._q.get("message") or {}
+        chat_id, message_id = (message.get("chat") or {}).get("id"), message.get("message_id")
+        if chat_id is None or message_id is None:
+            return None
+        markup = copy.deepcopy(message.get("reply_markup") or {})
+        rows = markup.get("inline_keyboard") if isinstance(markup, dict) else None
+        if not isinstance(rows, list):
+            return None
+        data = self._q.get("data") or ""
+        for row in rows:
+            for button in row if isinstance(row, list) else ():
+                if isinstance(button, dict) and button.get("callback_data") == data:
+                    button["text"] = "⏳ " + str(button.get("text") or "")
+                    return chat_id, message_id, rows
+        return None
+
+    def _mark_while_running(self):
+        with self._lock:
+            marked = None if self._finished or self._touched else self._marked_markup()
+            if not marked:
+                return
+            chat_id, message_id, rows = marked
+        try:
+            self._bot.call("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id,
+                                                       "reply_markup": {"inline_keyboard": rows}})
+            with self._lock:
+                if not self._finished and not self._touched:
+                    self._marked = True
+        except TelegramError:
+            pass
+
+    def defer(self, action):
+        """Keep feedback open until a dispatched action has supplied its answer."""
+        with self._lock:
+            self._background += 1
+        complete_lock = RLock()
+        complete = False
+
+        def finish():
+            nonlocal complete
+            with complete_lock:
+                if complete:
+                    return
+                complete = True
+            answer = False
+            with self._lock:
+                self._background -= 1
+                answer = self._finished and not self._background and not self._answered
+            if answer:
+                self._answer("toast_action_done")
+
+        def run():
+            try:
+                return action()
+            finally:
+                finish()
+
+        run.cancel = finish
+        return run
+
+    def _restore(self):
+        message = self._q.get("message") or {}
+        markup = message.get("reply_markup")
+        if not isinstance(markup, dict) or not isinstance(markup.get("inline_keyboard"), list):
+            return
+        try:
+            self._bot.call("editMessageReplyMarkup", {
+                "chat_id": (message.get("chat") or {}).get("id"), "message_id": message.get("message_id"),
+                "reply_markup": copy.deepcopy(markup)})
+        except TelegramError:
+            pass
+
+    def done(self):
+        with self._lock:
+            self._finished = True
+            self._mark_timer.cancel()
+            answer = not self._answered and not self._background
+            restore = self._marked and not self._touched
+        if answer:
+            self._answer("toast_action_done")
+        if restore:
+            self._restore()
+
+    def call(self, method, *args, **kwargs):
+        params = args[0] if args and isinstance(args[0], dict) else kwargs.get("params", kwargs)
+        with self._lock:
+            if method == "answerCallbackQuery":
+                if self._answered:
+                    return {}
+                if not params.get("text"):
+                    return {}
+                self._answered = True
+            if method in {"editMessageText", "editMessageReplyMarkup", "editMessageCaption", "editMessageMedia",
+                          "deleteMessage"} and self._same_message(args, kwargs):
+                self._touched = True
+        return self._bot.call(method, *args, **kwargs)
+
+    def _same_message(self, args, kwargs):
+        params = args[0] if args and isinstance(args[0], dict) else kwargs.get("params", kwargs)
+        message = self._q.get("message") or {}
+        return (params.get("chat_id") == (message.get("chat") or {}).get("id")
+                and params.get("message_id") == message.get("message_id"))
+
+    def __getattr__(self, name):
+        return getattr(self._bot, name)
+
+
+def _unknown_tap(bot, q: dict, ui_lang: str) -> str:
+    """A tap no handler knows (a button of an older version, or a new button nobody routed): answered as
+    outdated, and named in the log. tests/test_button_qa.py fails when a button the bridge builds ends here."""
+    poll_log("unknown button tap")
+    _answer_button(bot, q, t("toast_button_outdated", lang=ui_lang))
+    return "ignored"
+
+
+def _feedback_action(bot, action):
+    """Return an action whose callback feedback remains owned by its worker."""
+    defer = getattr(bot, "defer", None)
+    return defer(action) if defer else action
+
+
 def _guarded_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media=None) -> str:
     """Every tap gets an answer: a failure says so, and a handler that forgot never leaves the spinner."""
     watch = _TapWatch(bot)
@@ -2696,10 +2896,11 @@ def _guarded_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, m
             watch.answered = True
             _answer_button(bot, q, t("toast_tap_failed", lang=getattr(cfg, "ui_language", None) or get_lang()))
         raise
-    if not watch.answered and TAP_GRACE is not None:
+    if not watch.answered and TAP_GRACE is not None and not getattr(bot, "_button_feedback", False):
         def close():
             if not watch.answered:
-                _answer_button(bot, q, "")
+                _answer_button(bot, q, t("toast_action_received",
+                                         lang=getattr(cfg, "ui_language", None) or get_lang()))
         timer = threading.Timer(TAP_GRACE, close)
         timer.daemon = True
         timer.start()
@@ -2707,6 +2908,18 @@ def _guarded_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, m
 
 
 def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media=None) -> str:
+    """Dispatch a button with immediate toast and visible, best-effort progress."""
+    if getattr(bot, "_button_feedback", False):
+        return _handle_button(q, cfg, bot, topics, inbox, media)
+    q["_ui_language"] = getattr(cfg, "ui_language", None) or get_lang()
+    feedback = _ButtonFeedback(bot, q)
+    try:
+        return _handle_button(q, cfg, feedback, topics, inbox, media)
+    finally:
+        feedback.done()
+
+
+def _handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media=None) -> str:
     """A permission-mode or quick say button."""
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     m = q.get("message") or {}
@@ -2724,6 +2937,7 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         from . import decisions
         match = re.fullmatch(r"cr:([0-9a-f]{16}):(yes|no)", data)
         if not mine or not session or not match or "forward_origin" in m:
+            _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
         def credit_only(rec):
             if (rec.get("action") != "emergency_credit" or rec["session"] != session
@@ -2743,6 +2957,7 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
     if data.startswith("cold:"):
         token = data[5:]
         if not mine or not session or not re.fullmatch(r"[0-9a-f]{16}", token):
+            _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
         cancelled = compact.cold_transition(session, token, "cancelled")
         _answer_button(bot, q, t("compact_cold_cancelled" if cancelled else "compact_cold_late", lang=ui_lang))
@@ -2762,7 +2977,7 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         if not mine:
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
-        _answer_button(bot, q, "")
+        _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
         try:
             bot.call("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": m["message_id"],
                                                 "reply_markup": {"inline_keyboard": []}})
@@ -2916,7 +3131,12 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         if data.startswith("cw:end:"):
             command_when(q, cfg, bot, m, session)
         else:
-            threading.Thread(target=lambda: command_when(q, cfg, bot, m, session), daemon=True).start()
+            action = _feedback_action(bot, lambda: command_when(q, cfg, bot, m, session))
+            try:
+                threading.Thread(target=action, daemon=True).start()
+            except BaseException:
+                getattr(action, "cancel", lambda: None)()
+                raise
         return "held"
 
     if radio_agent.CALLBACK.fullmatch(data):
@@ -2926,7 +3146,7 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         return listen.press(q, cfg, bot, session, mine)
 
     if data == "noop":
-        _answer_button(bot, q, "")
+        _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
         return "ignored"
 
     if data.startswith("agr:"):  # Full result under the agents card: owner only, this topic's own session
@@ -2950,8 +3170,10 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         if not mine or not session or not re.fullmatch(r"dg:(?:s|[ebdz]:[0-9a-f]{12}|[oxt]:\d{1,2}:[0-9a-f]{12}|k:(?:up|down|enter):[0-9a-f]{12})", data):
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
-        if _terminal_background(session, lambda: dialogs.button(q, cfg, bot, m, session)):
+        action = _feedback_action(bot, lambda: dialogs.button(q, cfg, bot, m, session))
+        if _terminal_background(session, action):
             return "dialog"
+        getattr(action, "cancel", lambda: None)()
         _answer_button(bot, q, t("toast_busy", lang=ui_lang))
         return "busy"
 
@@ -2959,8 +3181,10 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         if not mine or not session or not re.fullmatch(r"nt:\d:[0-9a-f]{12}", data):
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
-        if _terminal_background(session, lambda: notices.button(q, cfg, bot, m, session)):
+        action = _feedback_action(bot, lambda: notices.button(q, cfg, bot, m, session))
+        if _terminal_background(session, action):
             return "notice"
+        getattr(action, "cancel", lambda: None)()
         _answer_button(bot, q, t("toast_busy", lang=ui_lang))
         return "busy"
 
@@ -2968,8 +3192,10 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         if not mine or not session or data != "rs:" + session[:8]:
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
-        if _terminal_background(session, lambda: resume_button_press(q, cfg, bot, m, session)):
+        action = _feedback_action(bot, lambda: resume_button_press(q, cfg, bot, m, session))
+        if _terminal_background(session, action):
             return "resume"
+        getattr(action, "cancel", lambda: None)()
         _answer_button(bot, q, t("toast_busy", lang=ui_lang))
         return "busy"
 
@@ -2977,8 +3203,10 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         if not mine or not session or not re.fullmatch(r"ib:[sc]:[0-9a-f]{16}", data):
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
-        if _terminal_background(session, lambda: draft_button(q, cfg, bot, session)):
+        action = _feedback_action(bot, lambda: draft_button(q, cfg, bot, session))
+        if _terminal_background(session, action):
             return "input-box"
+        getattr(action, "cancel", lambda: None)()
         _answer_button(bot, q, t("toast_busy", lang=ui_lang))
         return "busy"
 
@@ -2986,8 +3214,10 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
         if not mine or not session:
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
-        if _terminal_background(session, lambda: keypad_press(q, cfg, bot, m, session)):
+        action = _feedback_action(bot, lambda: keypad_press(q, cfg, bot, m, session))
+        if _terminal_background(session, action):
             return "cli"
+        getattr(action, "cancel", lambda: None)()
         _answer_button(bot, q, t("toast_busy", lang=ui_lang))
         return "busy"
 
@@ -3050,7 +3280,9 @@ def handle_button(q: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, med
             return "queued"
         return "ignored"
 
-    mode = data.partition("mode:")[2] if data.startswith("mode:") else ""
+    if not data.startswith("mode:"):
+        return _unknown_tap(bot, q, ui_lang)
+    mode = data[len("mode:"):]
     ok = bool(mine and session is not None and mode in MODE_RANK)
     try:  # every press is answered, accepted or not
         bot.call("answerCallbackQuery", {"callback_query_id": q.get("id") or "",
@@ -3292,6 +3524,15 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
     ignored | unsupported | refused | queued | status | mode | edited | pin-notice.
     `off_until`: the second mirroring was last switched on (0 when it never was off); an edit made at or
     before it is not delivered."""
+    q0 = update.get("callback_query") if isinstance(update, dict) else None
+    if isinstance(q0, dict) and not getattr(bot, "_button_feedback", False):
+        q0["_ui_language"] = getattr(cfg, "ui_language", None) or get_lang()
+        feedback = _ButtonFeedback(bot, q0)
+        try:
+            return handle(update, cfg, feedback, topics, inbox, media, started, team_topics, off_until,
+                          codex_bridge)
+        finally:
+            feedback.done()
     from .harness import SessionRef, legacy_topic_supported
     update = _unmarked(update)
     if update.get("widget_query"):
@@ -3321,6 +3562,8 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
             if (not isinstance(actor, dict) or actor.get("id") != cfg.owner_chat_id
                     or actor.get("is_bot") or chat_id not in owner_chats(cfg)
                     or (incoming.get("chat") or {}).get("type") != _chat_type(cfg, chat_id)):
+                if q:
+                    _answer_button(bot, q, t("toast_not_available", lang=cfg.ui_language))
                 return "ignored"
             try:
                 ref = SessionRef.parse(session)
@@ -3346,8 +3589,9 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
                     _answer_button(bot, q, t("toast_question_closed", lang=cfg.ui_language))
                     return "stale-codex"
                 if accepted:
-                    _answer_button(bot, q, "")
+                    _answer_button(bot, q, t("toast_action_received", lang=cfg.ui_language))
                     return "codex-action"
+                _answer_button(bot, q, t("toast_not_available", lang=cfg.ui_language))
                 return "ignored"
             if app_server and update.get("message") and text == "/compact" and from_owner(incoming, cfg, started):
                 from .codex_app_server import ProtocolError
@@ -3708,8 +3952,9 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
         if task and _voice_needs_approval(m):  # the owner's own recording: its transcript first, then the task
             voice_draft(cfg, bot, inbox, m, None, task, (m.get("caption") or "").strip(), "", start="picker")
             return "voice"
-        if car_mode_active():
-            _voice_echo(cfg, bot, m, task)
+        if _preview_skip():
+            _voice_echo(cfg, bot, m, task, _preview_skip())
+            _skip_log(m)
         return project_picker(cfg, bot, m, task)
     if not session and in_home:
         from . import dispatcher
@@ -3746,8 +3991,9 @@ def handle(update: dict, cfg: Config, bot, topics: TopicMap, inbox: Inbox, media
         if has_media and _voice_needs_approval(m):  # e.g. a project group's General: approve the transcript first
             voice_draft(cfg, bot, inbox, m, None, task, (m.get("caption") or "").strip(), "", start="general")
             return "voice"
-        if has_media and car_mode_active():
-            _voice_echo(cfg, bot, m, task)
+        if has_media and _preview_skip():
+            _voice_echo(cfg, bot, m, task, _preview_skip())
+            _skip_log(m)
         return general_start(cfg, bot, m, task, name=_task_topic_name(
             task, (m.get("text") or m.get("caption") or "").strip(), getattr(cfg, "ui_language", "en")) if has_media else None)
     return _queue_topic_input(cfg, bot, inbox, m, session, media, topic_session=topic_session,
@@ -3794,14 +4040,16 @@ def _queue_topic_input(cfg, bot, inbox, m, session, media, *, topic_session=None
         return "refused"
     user_text = (m.get("text") or m.get("caption") or "").strip()
     context_prefix = f"{reply_prefix} {media_prefix}".strip() if (reply_prefix and media_prefix) else (reply_prefix or media_prefix)
-    if not dispatch and _voice_needs_approval(m):
-        voice_draft(cfg, bot, inbox, m, session, text, user_text, context_prefix)
+    if _voice_needs_approval(m):
+        # The dispatcher too: a recording sent to it from General used to skip its preview without a word.
+        voice_draft(cfg, bot, inbox, m, session, text, user_text, context_prefix, dispatch=dispatch)
         return "voice"
     if corrected_voice:  # accepted: the edit draft is taken now (a refused correction above left it waiting)
         voice.take_editing(m.get("message_thread_id"), _chat_arg(cfg, m))
         m = dict(m, _voice=True)  # still a recording's words, as in General: never typed
-    elif car_mode_active():  # no buttons while driving: the transcript is echoed once, quietly
-        _voice_echo(cfg, bot, m, text)
+    elif _preview_skip():  # no buttons while driving: the transcript is echoed once, quietly, with the reason
+        _voice_echo(cfg, bot, m, text, _preview_skip())
+        _skip_log(m)
     _away_welcome_back(cfg, bot, m.get("message_thread_id"), _chat_arg(cfg, m))
     # A forward is someone else's content: it travels beside the owner's words, never as them.
     text, forwarded_text = ("", text) if m.get("_forwarded") else (text, "")
@@ -5084,11 +5332,12 @@ def stop_turn(pane: str, session: str) -> Tuple[str, str]:
     waited = False  # an Escape reached the background-agents wait itself
 
     def press() -> bool:
-        # The pane is checked again before every Escape: between presses the session can end and tmux
-        # can hand its %N id to another window (review of #138).
-        return pane_runs_session(pane, session) and _send_keys(pane, ["esc"])
+        # Ownership is checked at the top of the loop immediately before screen inspection and this send.
+        return _send_keys(pane, ["esc"])
 
     while True:
+        if not pane_runs_session(pane, session):
+            return ("unknown", "") if pressed else ("failed", "")
         try:
             raw = pane_raw(_display_target(pane), 40)
         except (OSError, subprocess.SubprocessError):
@@ -5263,7 +5512,7 @@ def forget_replay(session: str) -> None:
         poll_log(f"forget replay {session[:8]}: {type(exc).__name__}: {str(exc)[:120]}")
 
 
-def _interrupted_idle(cfg: Config, bot, session: str) -> None:
+def _interrupted_idle(cfg: Config, bot, session: str, box: Optional[Inbox] = None) -> None:
     """After Escape the Stop hook may not run, which leaves the topic "busy" with queued messages that
     nothing delivers. The prompt is visible again: mark the topic done and hand the queue over."""
     forget_replay(session)
@@ -5276,9 +5525,9 @@ def _interrupted_idle(cfg: Config, bot, session: str) -> None:
         if session_busy(session):
             from .topics import set_state
             set_state(cfg, session, "done", bot=bot)
-        box = default_inbox()
-        if box.pending(session):
-            threading.Thread(target=_reopen_or_nudge, args=(box, session), daemon=True).start()
+        active_box = box or default_inbox()
+        if active_box.pending(session):
+            threading.Thread(target=_reopen_or_nudge, args=(active_box, session), daemon=True).start()
     except Exception as exc:
         poll_log(f"after-stop cleanup {session[:8]}: {type(exc).__name__}: {str(exc)[:120]}")
 
@@ -5368,6 +5617,13 @@ def _queue_owner(cfg: Config, bot, inbox: Inbox, m: dict, session: str, text: st
             if typed and not codex and not spoken and not m.get("_button"):
                 item["typed"] = True  # the only positive evidence framing accepts for the typed-yes rule
             sender.send(session, item)
+            if item.get("typed"):
+                try:
+                    from . import helper_jobs
+                    helper_jobs.capture_later(cfg, session, _reply_chat(cfg, m), m.get("message_thread_id") or 0,
+                                              user_text or text)
+                except Exception:
+                    pass  # an optional proposal never touches delivery
         if forwarded_text:  # no user_text: an edit can never rewrite it as the owner's words
             sender.send(session, dict(base, text=forwarded_text, forwarded=True))
     except Exception:
@@ -5379,20 +5635,25 @@ def _queue_owner(cfg: Config, bot, inbox: Inbox, m: dict, session: str, text: st
     if codex:
         react(bot, _reply_chat(cfg, m), m, "\U0001F440")
         return
-    if limit_notice(bot, _reply_chat(cfg, m), m, session, cfg):
-        return  # the move owns resuming/delivering; an ordinary nudge would race it
-    react(bot, _reply_chat(cfg, m), m, "\U0001F440")
-    try:  # a message behind an open dialog says so (not "between steps") and shows the dialog again
-        held_by_dialog = dialogs.held_notice(cfg, bot, m, session)
-    except Exception:
-        held_by_dialog = False
-    if held_by_dialog:  # the nudge below checks for an idle, empty prompt itself, so it always runs
-        threading.Thread(target=_reopen_or_nudge, args=(inbox, session), daemon=True).start()
-        return
-    if main_working(session):
-        delivery.send_ack(bot, cfg, m.get("message_thread_id"), m["message_id"], hold, chat=_chat_arg(cfg, m))
-    else:  # the turn is over, so "end" delivery has nothing left to wait for
-        threading.Thread(target=_reopen_or_nudge, args=(inbox, session), daemon=True).start()
+    try:
+        if limit_notice(bot, _reply_chat(cfg, m), m, session, cfg):
+            return  # the move owns resuming/delivering; an ordinary nudge would race it
+        react(bot, _reply_chat(cfg, m), m, "\U0001F440")
+        try:  # a message behind an open dialog says so (not "between steps") and shows the dialog again
+            held_by_dialog = dialogs.held_notice(cfg, bot, m, session)
+        except Exception:
+            held_by_dialog = False
+        if held_by_dialog:  # the nudge below checks for an idle, empty prompt itself, so it always runs
+            threading.Thread(target=_reopen_or_nudge, args=(inbox, session), daemon=True).start()
+            return
+        if main_working(session):
+            delivery.send_ack(bot, cfg, m.get("message_thread_id"), m["message_id"], hold, chat=_chat_arg(cfg, m))
+        else:  # the turn is over, so "end" delivery has nothing left to wait for
+            threading.Thread(target=_reopen_or_nudge, args=(inbox, session), daemon=True).start()
+    except Exception as exc:
+        # The message is queued: a receipt that fails must never look like a failed delivery (a voice preview's
+        # Send would put its draft back and deliver it twice; a re-polled update would queue it again).
+        poll_log(f"queued for {session[:8]}, but its receipt failed: {type(exc).__name__}")
 
 
 def _deliver_button_word(inbox: Inbox, session: str, cfg: Optional[Config] = None, bot=None,
@@ -5982,56 +6243,142 @@ def sweep_nudge(inbox: Inbox, session: str, force: bool = False) -> bool:
     return False
 
 
+def _delivery_stop_status(cfg: Config, bot, m: dict, mid: str, text: str, *, retry: bool = False) -> None:
+    """Finish a Stop receipt visibly; a rate-limited edit falls back to a tracked fresh message."""
+    target = _reply_chat(cfg, m)
+    markup = (delivery.markup(int(mid), bool(m.get("_delivery_hold")), getattr(cfg, "ui_language", None))
+              if retry else {"inline_keyboard": []})
+    message_id = m.get("message_id")
+    try:
+        if not isinstance(message_id, int):
+            raise TelegramError("receipt has no message id")
+        bot.call("editMessageText", {"chat_id": target, "message_id": message_id, "text": text,
+                                     "reply_markup": markup})
+    except TelegramError:
+        params = {"chat_id": target, "text": text, "disable_notification": True, "reply_markup": markup}
+        if m.get("message_thread_id"):
+            params["message_thread_id"] = m["message_thread_id"]
+        try:
+            sent = bot.call("sendMessage", params)
+            if isinstance(sent.get("message_id"), int):
+                delivery.remember_ack(mid, sent["message_id"], _chat_arg(cfg, m))
+        except (TelegramError, OSError, AttributeError):
+            pass
+
+
+def _delivery_stop_worker(cfg: Config, bot, m: dict, session: str, inbox: Inbox) -> None:
+    """Interrupt off the Telegram callback path, then let the durable queue wake at the idle prompt."""
+    ui_lang = getattr(cfg, "ui_language", None) or get_lang()
+    mid = str(m.get("_delivery_mid") or "")
+    try:
+        from . import policy
+        pane = stop_pane(session) if policy.on() else None
+    except Exception:
+        pane = None
+    if not pane:
+        log_delivery_tap(session, "stop", "session-not-running")
+        _delivery_stop_status(cfg, bot, m, mid, t("delivery_stop_not_running", lang=ui_lang), retry=True)
+        return
+    try:
+        outcome, _detail = stop_turn(pane, session)
+    except Exception:
+        outcome = "unknown"
+    if outcome in ("stopped", "idle"):
+        inbox.set_hold(session, mid, False)
+        forget_replay(session)
+        _interrupted_idle(cfg, bot, session, inbox)
+        log_delivery_tap(session, "stop", "stopped" if outcome == "stopped" else "already-idle")
+        _delivery_stop_status(cfg, bot, m, mid, t("delivery_stop_sending", lang=ui_lang))
+        return
+    result = "still-running" if outcome == "running" else (
+        "interrupt-failed" if outcome == "failed" else "interrupt-unconfirmed")
+    log_delivery_tap(session, "stop", result)
+    _delivery_stop_status(cfg, bot, m, mid, t("delivery_stop_try_again", lang=ui_lang), retry=True)
+
+
 def delivery_button(q: dict, cfg: Config, bot, m: dict, session: str, inbox: Inbox) -> str:
     """dl:<now|hold|stop>:<message id> under a delivery receipt."""
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     parts = (q.get("data") or "").split(":", 2)
     mode, mid = (parts + ["", ""])[1:3]
     if mode not in delivery.NOTES or not mid.isdigit():
+        log_delivery_tap(session, mode or "invalid", "invalid")
         _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
         return "ignored"
     if mode == "cancel":  # taken back while it waits: the session never reads it
         found = bool(inbox.filter(session, lambda item: str(item.get("id")) != mid))
+    elif mode == "stop":
+        # Do not expose a held item to a hook while the interrupt is still settling.
+        stop_hold = inbox.delivery_choice(session, mid)
+        found = stop_hold is not None
     else:
         found = inbox.set_hold(session, mid, mode == "hold")
+    # Close Telegram's spinner before terminal inspection, settling, or any network edit. Stop can
+    # legitimately spend several seconds pressing Escape more than once.
     _answer_button(bot, q, t(f"delivery_note_{mode}", lang=ui_lang) if found else t("delivery_toast_delivered", lang=ui_lang))
     if not found:
+        log_delivery_tap(session, mode, "already-delivered")
         _retire_buttons(bot, cfg, m)
         return "ignored"
     if mode == "cancel":
         delivery.forget_ack(mid, _chat_arg(cfg, m))
     if mode == "stop":
-        forget_replay(session)
-        pane = pane_for_session(session)
-        if pane:  # the wake hook delivers to the idle prompt
-            _tmux("send-keys", "-t", pane, "Escape")
+        log_delivery_tap(session, mode, "accepted")
+        work_message = dict(m, _delivery_mid=mid, _delivery_hold=stop_hold)
+        try:
+            mark = "\u200f" if ui_lang == "he" else ""
+            if not isinstance(m.get("message_id"), int):
+                raise TelegramError("receipt has no message id")
+            bot.call("editMessageText", {"chat_id": _reply_chat(cfg, m), "message_id": m["message_id"],
+                                         "text": mark + t("delivery_note_stop", lang=ui_lang),
+                                         "reply_markup": delivery.markup(int(mid), bool(stop_hold), ui_lang)})
+        except TelegramError:
+            pass
+        if not _terminal_background(session, lambda: _delivery_stop_worker(
+                cfg, bot, work_message, session, inbox)):
+            log_delivery_tap(session, mode, "busy")
+            _delivery_stop_status(cfg, bot, work_message, mid,
+                                  t("delivery_stop_try_again", lang=ui_lang), retry=True)
+        return "delivery"
+    log_delivery_tap(session, mode, "accepted")
     try:
         mark = "\u200f" if ui_lang == "he" else ""
         bot.call("editMessageText", {"chat_id": _reply_chat(cfg, m), "message_id": m["message_id"],
                                      "text": mark + t(f"delivery_note_{mode}", lang=ui_lang),
-                                     "reply_markup": ({"inline_keyboard": []} if mode in ("stop", "cancel")
+                                     "reply_markup": ({"inline_keyboard": []} if mode == "cancel"
                                                       else delivery.markup(int(mid), mode == "hold", lang=ui_lang))})
     except TelegramError:
         pass
     return "delivery"
 
 
+def _preview_skip() -> str:
+    """Why the owner's recordings go in without their preview right now: "driving" (the driving window),
+    "car" (car mode set to send directly), or "" (the preview is shown). voice.skip_reason."""
+    return voice.skip_reason(car_mode_active())
+
+
 def _voice_needs_approval(m: dict) -> bool:
     """The owner's own recording, with transcript approval on: shown for approval before it reaches a
-    session or starts a task. A forward is someone else's words (framed as such, never approved as the
-    owner's); driving there are no buttons to tap, so it goes straight in."""
+    session or starts a task, also when it goes to the dispatcher. A forward is someone else's words (framed as
+    such, never approved as the owner's). Only the driving window, or car mode set to "send", skips it
+    (_preview_skip), and the recording then gets a quiet note that it went in without a preview."""
     return (bool(m.get("voice") or m.get("audio") or m.get("video_note")) and voice.confirm_on()
-            and not m.get("_forwarded") and not car_mode_active())
+            and not m.get("_forwarded") and not _preview_skip())
 
 
-def _voice_echo(cfg: Config, bot, m: dict, text: str) -> None:
-    """One quiet reply with the transcript of an owner recording that went in without a preview (car mode, or a
-    preview that could not be sent), so the owner still sees what was heard. Never for a forward, and never
-    when the voice_echo add-on is off; no buttons, no sound."""
+VOICE_ECHO_TEXT = {"driving": "voice_sent_driving", "car": "voice_sent_heard", "failed": "voice_sent_no_preview"}
+
+
+def _voice_echo(cfg: Config, bot, m: dict, text: str, reason: str = "car") -> None:
+    """One quiet reply with the transcript of an owner recording that went in without a preview, saying why:
+    `reason` "driving" (the driving window), "car" (car mode set to send directly) or "failed" (the preview could
+    not be shown), so the owner still sees what was heard. Never for a forward, and never when the voice_echo
+    add-on is off; no buttons, no sound."""
     import html
     from . import addons
     try:
-        if (not (m.get("voice") or m.get("audio") or m.get("video_note")) or m.get("_forwarded")
+        if (not (m.get("voice") or m.get("audio") or m.get("video_note") or m.get("_voice")) or m.get("_forwarded")
                 or not voice.confirm_on() or not addons.enabled(cfg, "voice_echo")):
             return
         ui_lang = getattr(cfg, "ui_language", None) or get_lang()
@@ -6041,7 +6388,7 @@ def _voice_echo(cfg: Config, bot, m: dict, text: str) -> None:
             return
         params = {"chat_id": _reply_chat(cfg, m), "disable_notification": True, "parse_mode": "HTML",
                   "reply_parameters": {"message_id": m["message_id"], "allow_sending_without_reply": True},
-                  "text": t("voice_sent_heard", lang=ui_lang, text=html.escape(heard[:3500]))}
+                  "text": t(VOICE_ECHO_TEXT.get(reason, "voice_sent_heard"), lang=ui_lang, text=html.escape(heard[:3500]))}
         if m.get("message_thread_id"):
             params["message_thread_id"] = m["message_thread_id"]
         bot.call("sendMessage", params)
@@ -6092,21 +6439,190 @@ def _corrected_voice_task(cfg: Config, bot, m: dict, start: str) -> str:
     return _start_voice_task(cfg, bot, original, start, CORRECTED_VOICE + words, words, shown=words)
 
 
+PREVIEW_RETRY = (2.0, 5.0, 10.0, 20.0, 30.0)  # seconds before each new try of a preview Telegram refused (~1 min)
+PREVIEW_WAIT_CAP = 30.0  # a longer flood wait (429 retry_after) is waited at most this long per try
+UNSHOWN_ATTEMPTS = 3  # tries to hand over a recording whose preview never showed, before the owner is told (and
+# the draft dropped only once that notice was sent)
+UNSHOWN_RETRY_WAIT = 60.0  # seconds between those tries
+SWEEP_WINDOW = 300.0  # a draft this young whose process still runs is that process's own retry, not an orphan
+_voice_sleep = time.sleep
+
+
+def _voice_later(fn, *args) -> None:
+    """Run `fn` off the poll loop: retrying a preview must never hold up the owner's other messages."""
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def _skip_log(m: dict) -> None:
+    """A content-free line for an owner recording that went in without its preview, with the reason."""
+    if (m.get("voice") or m.get("audio") or m.get("video_note")) and not m.get("_forwarded") and voice.confirm_on():
+        poll_log(f"voice {m.get('message_id')}: sent without preview ({_preview_skip() or 'off'})")
+
+
+def _preview_retryable(exc: TelegramError) -> bool:
+    """A refusal that may pass by itself (a flood limit, a timeout or network error, Telegram's own trouble), unlike a
+    bad request or a closed topic, which a retry cannot change."""
+    code = exc.code
+    return code == 429 or code is None or (isinstance(code, int) and code >= 500)
+
+
+def _wait_before_retry(chat, delay: float) -> None:
+    try:
+        flood_wait = flood.remaining(chat)
+    except Exception:
+        flood_wait = 0.0
+    _voice_sleep(min(max(delay, flood_wait), PREVIEW_WAIT_CAP))
+
+
+def _show_preview(cfg: Config, bot, m: dict, key: str, params: dict) -> str:
+    """One try to show a transcript's preview: "shown", "retry" (Telegram may take it later) or "failed"."""
+    try:
+        bot.call("sendMessage", params)
+    except TelegramError as exc:
+        retry = _preview_retryable(exc)
+        poll_log(f"voice {m.get('message_id')}: preview not shown (code {exc.code}), "
+                 + ("will try again" if retry else "giving up"))
+        return "retry" if retry else "failed"
+    voice.mark_shown(key)
+    react(bot, _reply_chat(cfg, m), m, "✍", optional=True)
+    poll_log(f"voice {m.get('message_id')}: preview shown")
+    return "shown"
+
+
+def _retry_preview(cfg: Config, bot, inbox: Inbox, m: dict, key: str, params: dict) -> None:
+    """The preview Telegram refused, tried again for about a minute (longer under a flood limit). Only when it never
+    shows is the recording handed over without it, with a note; a draft handled meanwhile is left alone."""
+    for delay in PREVIEW_RETRY:
+        _wait_before_retry(params.get("chat_id"), delay)
+        if key not in voice.load():
+            return
+        result = _show_preview(cfg, bot, m, key, params)
+        if result == "shown":
+            return
+        if result == "failed":
+            break
+    _deliver_unshown(cfg, bot, inbox, key)
+
+
+def _draft_mid(key: str, draft: dict) -> int:
+    mid = draft.get("message")
+    return mid if type(mid) is int else int(str(key).rsplit(":", 1)[-1])
+
+
+def _draft_origin(cfg: Config, mid: int, draft: dict, chat: Optional[dict] = None) -> dict:
+    """The recording a draft came from, as a delivery needs it: still a voice note (`_voice`), never typed words."""
+    origin = chat or draft.get("origin_chat") or {"id": home_chat(cfg) if draft.get("chat") is None else draft["chat"]}
+    return {"message_id": mid, "message_thread_id": draft.get("thread"), "date": draft.get("date"),
+            "chat": origin, "_voice": True}
+
+
+def _deliver_voice_draft(cfg: Config, bot, inbox: Inbox, mid: int, draft: dict, chat: Optional[dict] = None) -> dict:
+    """Hand an approved (or never shown) transcript on, exactly as the recording itself would have gone: to its
+    session, to the dispatcher as a new task, or opening its task when it had no session. Raises when nothing
+    was queued, so the caller can put the draft back."""
+    original = _draft_origin(cfg, mid, draft, chat)
+    _away_welcome_back(cfg, bot, draft.get("thread"), draft.get("chat"))
+    if draft.get("start") in ("picker", "general", "offer"):  # no session yet: the transcript opens the task
+        _start_voice_task(cfg, bot, original, draft["start"], draft["text"], draft.get("user_text", ""))
+        return original
+    text = _dispatch_task(draft.get("thread"), draft["text"]) if draft.get("dispatch") else draft["text"]
+    _queue_owner(cfg, bot, inbox, original, draft["session"], text, draft.get("user_text", ""),
+                 draft.get("context_prefix", ""))
+    return original
+
+
+def _deliver_unshown(cfg: Config, bot, inbox: Inbox, key: str) -> None:
+    """A preview that never reached Telegram: the recording is never lost, it goes in with a note saying so. The
+    draft is claimed across processes first, so it is handed over once. A hand-over that fails leaves the draft
+    waiting ("pending", with its attempt count) for another try here, or for the next start's sweep; after
+    UNSHOWN_ATTEMPTS the owner is told, with the words, and the draft is dropped."""
+    state, draft = voice.claim(key)
+    if state != "ok":
+        return
+    token = draft["claim"]["token"]
+    mid = _draft_mid(key, draft)
+    try:
+        original = _deliver_voice_draft(cfg, bot, inbox, mid, draft)
+    except Exception as exc:
+        attempts = int(draft.get("attempts") or 0) + 1
+        poll_log(f"voice {mid}: could not be delivered without its preview, try {attempts} ({type(exc).__name__})")
+        if attempts >= UNSHOWN_ATTEMPTS:
+            # Dropped only once the owner has the words: a notice that fails keeps the draft for the next sweep.
+            if _voice_not_delivered(cfg, bot, mid, draft):
+                if voice.finish(key, token):
+                    voice.note_outcome(key, "dropped")
+            else:
+                voice.release(key, token, attempts=attempts, preview="pending")
+            return
+        if voice.release(key, token, attempts=attempts, preview="pending"):
+            _voice_later(_retry_unshown, cfg, bot, inbox, key)
+        return
+    voice.finish(key, token)
+    voice.note_outcome(key, "direct")
+    poll_log(f"voice {mid}: delivered without preview (the preview could not be shown)")
+    _voice_echo(cfg, bot, original, draft["text"], "failed")
+
+
+def _retry_unshown(cfg: Config, bot, inbox: Inbox, key: str) -> None:
+    _voice_sleep(UNSHOWN_RETRY_WAIT)
+    _deliver_unshown(cfg, bot, inbox, key)
+
+
+def _voice_not_delivered(cfg: Config, bot, mid: int, draft: dict) -> bool:
+    """The last word on a recording that could be neither previewed nor handed over: the owner gets what was heard,
+    so the words are never lost silently. True once Telegram took the notice."""
+    import html
+    ui_lang = getattr(cfg, "ui_language", None) or get_lang()
+    label = f"\U0001F3A4 {L.strings(cfg.target_language)['voice']} "
+    origin = _draft_origin(cfg, mid, draft)
+    params = {"chat_id": _reply_chat(cfg, origin), "parse_mode": "HTML",
+              "reply_parameters": {"message_id": mid, "allow_sending_without_reply": True},
+              "text": t("voice_not_delivered", lang=ui_lang, text=html.escape(voice.shown(draft["text"], label)[:3500]))}
+    if draft.get("thread"):
+        params["message_thread_id"] = draft["thread"]
+    try:
+        bot.call("sendMessage", params)
+    except TelegramError:
+        poll_log(f"voice {mid}: not delivered, and the note about it could not be sent; kept for the next sweep")
+        return False
+    return True
+
+
+def voice_preview_sweep(cfg: Config, bot, inbox: Inbox, passes: int = 2) -> None:
+    """At the listener's start, and once more SWEEP_WINDOW later: a recording whose preview never showed and whose
+    retries ended with a process (a restart, or failed hand-overs) is handed over the way its retry would have, so
+    none waits forever. A young draft whose process still runs is left to that process; the claim in
+    _deliver_unshown keeps two processes from both delivering one draft."""
+    for n in range(passes):
+        if n:
+            _voice_sleep(SWEEP_WINDOW)
+        now = time.time()
+        for key, draft in voice.unshown(0, now=now):
+            if voice.pid_alive(draft.get("pid")) and now - float(draft.get("at") or 0) < SWEEP_WINDOW:
+                continue
+            _deliver_unshown(cfg, bot, inbox, key)
+
+
 def voice_draft(cfg: Config, bot, inbox: Inbox, m: dict, session: Optional[str], text: str, user_text: str,
-                context_prefix: str, start: str = "") -> None:
+                context_prefix: str, start: str = "", dispatch: bool = False) -> None:
     """A voice note's transcript shown for approval before it reaches the session: send, edit or cancel.
     With no session, `start` ("picker" in a topic, "general" in a General topic) says how the approved
     transcript opens its task (review of #137: a project group's General started the task
-    from an unapproved transcript)."""
+    from an unapproved transcript). `dispatch`: it goes to the dispatcher as a new task once approved.
+    A preview Telegram refuses for a while is tried again off the poll loop (_retry_preview)."""
     import html
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     mid = m["message_id"]
     chat = _chat_arg(cfg, m)
+    key = thread_key(mid, chat)
     label = f"\U0001F3A4 {L.strings(cfg.target_language)['voice']} "
-    voice.add(thread_key(mid, chat), {"session": session, "text": text, "thread": m.get("message_thread_id"),
-                                      "chat": chat, "date": m.get("date"),
-                                      "user_text": user_text, "context_prefix": context_prefix,
-                                      **({"start": start} if start else {})})
+    sent_from = m.get("chat") or {}
+    voice.add(key, {"session": session, "text": text, "thread": m.get("message_thread_id"),
+                    "chat": chat, "date": m.get("date"), "message": mid,
+                    "origin_chat": {"id": _reply_chat(cfg, m), **({"type": sent_from["type"]} if sent_from.get("type") else {})},
+                    "user_text": user_text, "context_prefix": context_prefix,
+                    "preview": "pending", "pid": os.getpid(),
+                    **({"start": start} if start else {}), **({"dispatch": True} if dispatch else {})})
     params = {"chat_id": _reply_chat(cfg, m), "disable_notification": True, "parse_mode": "HTML",
               "reply_parameters": {"message_id": mid, "allow_sending_without_reply": True},
               "text": t("voice_draft_heard", lang=ui_lang, text=html.escape(voice.shown(text, label)[:3500])),
@@ -6116,20 +6632,65 @@ def voice_draft(cfg: Config, bot, inbox: Inbox, m: dict, session: Optional[str],
                   {"text": t("voice_btn_cancel", lang=ui_lang), "callback_data": f"vd:cancel:{mid}"}]]}}
     if m.get("message_thread_id"):
         params["message_thread_id"] = m["message_thread_id"]
+    result = _show_preview(cfg, bot, m, key, params)
+    if result == "retry":
+        _voice_later(_retry_preview, cfg, bot, inbox, m, key, params)
+    elif result == "failed":  # no preview possible: the message is never lost
+        _deliver_unshown(cfg, bot, inbox, key)
+
+
+def _edit_preview(bot, params: dict) -> Optional[bool]:
+    """True when the preview now shows what the tap did, None when Telegram may take it later, False never."""
     try:
-        bot.call("sendMessage", params)
-        react(bot, _reply_chat(cfg, m), m, "✍", optional=True)
-    except TelegramError:  # no preview possible: the message is never lost
-        voice.pop(thread_key(mid, chat))
-        if start:
-            _start_voice_task(cfg, bot, m, start, text, user_text)
-        else:
-            _queue_owner(cfg, bot, inbox, m, session, text, user_text, context_prefix)
-        _voice_echo(cfg, bot, m, text)
+        bot.call("editMessageText", params)
+        return True
+    except TelegramError as exc:
+        if "not modified" in (exc.description or "").lower():
+            return True
+        return None if _preview_retryable(exc) else False
+
+
+def _drop_preview_buttons(bot, params: dict) -> None:
+    try:
+        bot.call("editMessageReplyMarkup", {"chat_id": params["chat_id"], "message_id": params["message_id"],
+                                            "reply_markup": {"inline_keyboard": []}})
+    except TelegramError:
+        pass
+
+
+def _settle_preview_later(bot, params: dict) -> None:
+    for delay in PREVIEW_RETRY:
+        _wait_before_retry(params.get("chat_id"), delay)
+        result = _edit_preview(bot, params)
+        if result:
+            return
+        if result is False:
+            break
+    _drop_preview_buttons(bot, params)
+
+
+def _settle_preview(bot, params: dict) -> None:
+    """Show on the preview what the tap did. A flood limit or a network error is retried off the poll loop; when the
+    text can never be changed, at least its buttons go, so a handled preview never looks untouched."""
+    result = _edit_preview(bot, params)
+    if result is None:
+        _voice_later(_settle_preview_later, bot, params)
+    elif result is False:
+        _drop_preview_buttons(bot, params)
+
+
+def _voice_gone_note(key: str, lang: str) -> str:
+    """What a tap on a preview with nothing waiting is told: what already happened to that recording."""
+    done = voice.outcome(key)
+    return t({"sent": "voice_note_already_sent", "cancelled": "voice_note_already_cancelled",
+              "direct": "voice_note_already_direct", "dropped": "voice_note_already_dropped"}.get(done, "voice_note_already"),
+             lang=lang)
 
 
 def voice_button(q: dict, cfg: Config, bot, m: dict, inbox: Inbox) -> str:
-    """vd:<send|edit|cancel>:<voice message id> under a transcript."""
+    """vd:<send|edit|cancel>:<voice message id> under a transcript. Send delivers exactly once: the draft is claimed
+    first, so a second or late tap finds it gone and is told what already happened; a delivery that queued nothing
+    puts the draft back and says so, so the next tap tries again. The toast answers only after the delivery."""
     import html
     ui_lang = getattr(cfg, "ui_language", None) or get_lang()
     parts = (q.get("data") or "").split(":", 2)
@@ -6138,45 +6699,50 @@ def voice_button(q: dict, cfg: Config, bot, m: dict, inbox: Inbox) -> str:
         _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
         return "ignored"
     chat = _chat_arg(cfg, m)  # the draft's key: message ids repeat from one group to the next
-    draft = voice.mark_editing(thread_key(mid, chat)) if mode == "edit" else voice.pop(thread_key(mid, chat))
-    note_map = {
-        "send": t("voice_note_sent", lang=ui_lang),
-        "edit": t("voice_note_edit", lang=ui_lang),
-        "cancel": t("voice_note_cancelled", lang=ui_lang),
-    }
-    note = note_map[mode] if draft else t("voice_note_already", lang=ui_lang)
-    _answer_button(bot, q, note)
+    key = thread_key(mid, chat)
+    if mode == "edit":
+        draft, token = voice.mark_editing(key), ""
+    else:  # claimed across processes: two listeners overlapping in a restart never both deliver it
+        state, draft = voice.claim(key)
+        if state == "busy":
+            _answer_button(bot, q, t("voice_note_sending", lang=ui_lang))
+            return "ignored"
+        token = draft["claim"]["token"] if draft else ""
     if not draft:
+        _answer_button(bot, q, _voice_gone_note(key, ui_lang))
         _retire_buttons(bot, cfg, m)
+        poll_log(f"voice {mid}: {mode} tap with nothing waiting ({voice.outcome(key) or 'unknown'})")
         return "ignored"
     edit = {"chat_id": _reply_chat(cfg, m), "message_id": m["message_id"]}
     label = f"\U0001F3A4 {L.strings(cfg.target_language)['voice']} "
-    try:
-        if mode == "send":
-            if away_active():
-                try:
-                    set_away(False)
-                    bot.call("sendMessage", {"chat_id": _reply_chat(cfg, m), "message_thread_id": draft.get("thread"),
-                                             "text": t("autopilot_welcome_back", lang=ui_lang),
-                                             "disable_notification": True})
-                except Exception:
-                    pass
-            original = {"message_id": int(mid), "message_thread_id": draft.get("thread"), "date": draft.get("date"),
-                        "chat": m.get("chat"), "_voice": True}  # an approved transcript is still a voice note
-            if draft.get("start") in ("picker", "general", "offer"):  # no session yet: the approved transcript opens the task
-                _start_voice_task(cfg, bot, original, draft["start"], draft["text"], draft.get("user_text", ""))
-            else:
-                _queue_owner(cfg, bot, inbox, original, draft["session"], draft["text"], draft.get("user_text", ""),
-                             draft.get("context_prefix", ""))
-            body = (m.get("text") or "").split("\n", 1)[-1]
-            bot.call("editMessageText", dict(edit, text=t("voice_sent_body", lang=ui_lang, body=body[:3900])))
-        elif mode == "cancel":
-            bot.call("editMessageText", dict(edit, text=t("voice_cancelled_body", lang=ui_lang)))
-        else:
-            shown_text = html.escape(voice.shown(draft["text"], label)[:3500])
-            bot.call("editMessageText", dict(edit, parse_mode="HTML", text=t("voice_edit_instructions", lang=ui_lang, text=shown_text)))
-    except TelegramError:
-        pass
+    body = (m.get("text") or "").split("\n", 1)[-1]
+    if mode == "send":
+        try:
+            _deliver_voice_draft(cfg, bot, inbox, int(mid), draft, m.get("chat"))
+        except Exception as exc:
+            poll_log(f"voice {mid}: send tap failed ({type(exc).__name__})")
+            if draft.get("start"):  # a task may have half opened: never opened twice, the words stay on screen
+                voice.finish(key, token)
+                _answer_button(bot, q, t("voice_note_start_failed", lang=ui_lang))
+                _settle_preview(bot, dict(edit, text=t("voice_start_failed_body", lang=ui_lang, body=body[:3800])))
+            else:  # nothing was queued: the same button tries again
+                voice.release(key, token)
+                _answer_button(bot, q, t("voice_note_send_failed", lang=ui_lang))
+            return "voice-failed"
+        voice.finish(key, token)
+        voice.note_outcome(key, "sent")
+        _answer_button(bot, q, t("voice_note_sent", lang=ui_lang))
+        poll_log(f"voice {mid}: sent from its preview")
+        _settle_preview(bot, dict(edit, text=t("voice_sent_body", lang=ui_lang, body=body[:3900])))
+    elif mode == "cancel":
+        voice.finish(key, token)
+        voice.note_outcome(key, "cancelled")
+        _answer_button(bot, q, t("voice_note_cancelled", lang=ui_lang))
+        _settle_preview(bot, dict(edit, text=t("voice_cancelled_body", lang=ui_lang)))
+    else:
+        _answer_button(bot, q, t("voice_note_edit", lang=ui_lang))
+        shown_text = html.escape(voice.shown(draft["text"], label)[:3500])
+        _settle_preview(bot, dict(edit, parse_mode="HTML", text=t("voice_edit_instructions", lang=ui_lang, text=shown_text)))
     return "voice"
 
 
@@ -6366,6 +6932,9 @@ def global_markup(lang: Optional[str] = None, cfg: Optional[Config] = None) -> d
     end = delivery.default_mode() == "end"
     away_str = t("state_active", lang=lang) if away_active() else t("state_off", lang=lang)
     voice_str = t("state_on", lang=lang) if voice.confirm_on() else t("state_off", lang=lang)
+    driving_until = voice.driving_until()
+    driving_str = (t("driving_until", lang=lang, until=time.strftime("%H:%M", time.localtime(driving_until)))
+                   if driving_until else t("state_off", lang=lang))
     delivery_str = t("delivery_end_turn", lang=lang) if end else t("delivery_mid_step", lang=lang)
     repost_str = t("status_repost_new" if setting_on(STATUS_REPOST) else "status_repost_inplace", lang=lang)
     notices_str = t("agent_notices_loud" if setting_on(AGENT_NOTICES) else "agent_notices_quiet", lang=lang)
@@ -6375,7 +6944,8 @@ def global_markup(lang: Optional[str] = None, cfg: Optional[Config] = None) -> d
         [{"text": t("global_btn_usage", lang=lang), "callback_data": "more:/usage"}],
         [{"text": t("global_btn_account", lang=lang), "callback_data": "more:/account default"}],
         [{"text": t("global_btn_voice_confirm", lang=lang, state=voice_str),
-          "callback_data": "more:voiceconfirm"}],
+          "callback_data": "more:voiceconfirm"},
+         {"text": t("global_btn_driving", lang=lang, state=driving_str), "callback_data": "more:driving"}],
         [{"text": t("global_btn_delivery", lang=lang, state=delivery_str),
           "callback_data": "more:delivery"}],
         [{"text": t("global_btn_auto_compact", lang=lang, limit=limit_str),
@@ -6445,7 +7015,7 @@ def plugins_page(session: Optional[str], note: str = "", cfg: Optional[Config] =
 
 def _dismiss(bot, q: dict, edit: dict, ui_lang) -> str:
     """The way out of every menu (menus.CLOSE): the message is deleted."""
-    _answer_button(bot, q, "")
+    _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
     try:
         bot.call("deleteMessage", edit)
     except TelegramError:  # older than 48 hours: Telegram refuses the delete, so shrink it to a note
@@ -6468,7 +7038,7 @@ def _task_mute(bot, cfg: Config, q: dict, m: dict, edit: dict, topics: TopicMap,
         _answer_button(bot, q, t("toast_button_outdated", lang=ui_lang))
         return "ignored"
     scheduled.set_muted(task, op == "tmute")
-    _answer_button(bot, q, "")
+    _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
     note = t("task_muted_note" if op == "tmute" else "task_unmuted_note", lang=ui_lang, name=task)
     try:
         bot.call("editMessageText", dict(edit, text=note + "\n\n" + t("more_text", lang=ui_lang),
@@ -6494,10 +7064,17 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
     edit = {"chat_id": _reply_chat(cfg, m), "message_id": m.get("message_id")}  # the group, not the owner's DM
 
     if data in ("more:actionexpand", "more:actioncollapse"):
-        ok = bool(session and progress.toggle_card_details(cfg, bot, session, m.get("message_id"),
-                                                           data.endswith("expand")))
+        # The card is found by this message in this chat and topic: a card of an earlier run in the same topic
+        # still opens, any other tap gets a clear answer instead of silence.
+        try:
+            ok = bool(session and progress.toggle_card_details(
+                cfg, bot, session, m.get("message_id"), data.endswith("expand"),
+                chat=cid, thread=m.get("message_thread_id")))
+        except progress.CardBusy:
+            _answer_button(bot, q, t("toast_card_busy", lang=ui_lang))
+            return "action-details-busy"
         _answer_button(bot, q, "" if ok else t("toast_button_outdated", lang=ui_lang))
-        return "action-details" if ok else "ignored"
+        return "action-details" if ok else "action-details-outdated"
 
     if data == "more:compactactions" and session:
         on = not progress.compact_actions_on(cfg, session)
@@ -6514,7 +7091,7 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
     if data.startswith("close:"):
         action = data[6:]
         if action == "ask":
-            _answer_button(bot, q, "")
+            _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
             try:
                 bot.call("editMessageText", dict(edit,
                     text=t("close_ask_text", lang=ui_lang),
@@ -6524,7 +7101,7 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
                 pass
             return "close"
         if action == "restart":
-            _answer_button(bot, q, "")
+            _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
             try:
                 bot.call("editMessageText", dict(edit,
                     text=t("restart_ask_text", lang=ui_lang),
@@ -6627,8 +7204,15 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
         return _task_mute(bot, cfg, q, m, edit, topics, ui_lang)
 
     if data in ("more:voiceconfirm", "more:delivery", "more:autocompact", "more:away", "more:compactactionsglobal",
-                "more:statusrepost", "more:agentnotices", "more:agentstopic", "more:generaloffer", "more:activity"):
-        _answer_button(bot, q, "")
+                "more:statusrepost", "more:agentnotices", "more:agentstopic", "more:generaloffer", "more:activity",
+                "more:driving"):
+        if data == "more:driving":  # one tap: recordings skip their preview for the next three hours
+            voice.set_driving(not voice.driving_on())
+            until = voice.driving_until()
+            _answer_button(bot, q, t("driving_toast_on", lang=ui_lang, until=time.strftime("%H:%M", time.localtime(until)))
+                           if until else t("driving_toast_off", lang=ui_lang))
+        else:
+            _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
         if data == "more:compactactionsglobal":
             from .config import save_changes
             new_value = not getattr(cfg, "compact_actions", False)
@@ -6650,7 +7234,7 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
         elif data == "more:delivery":
             end = delivery.default_mode() != "end"
             delivery.set_default_mode("end" if end else "now")
-        else:
+        elif data == "more:autocompact":
             nxt = next_auto_compact_limit()
             set_auto_compact_limit(nxt)
         try:
@@ -6660,7 +7244,7 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
         return "settings"
 
     if data == "more:plugins" or data.startswith("more:pl:"):
-        _answer_button(bot, q, "")
+        _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
 
         def plugins_work():  # `claude plugin` can take seconds: never on the poll loop
             try:
@@ -6695,11 +7279,11 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
         if not session or not moves.show_menu(cfg, bot, m, session):
             _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
             return "ignored"
-        _answer_button(bot, q, "")
+        _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
         return "menu"
 
     if data in ("more:global", "more:back"):
-        _answer_button(bot, q, "")
+        _answer_button(bot, q, t("toast_action_received", lang=ui_lang))
         text, markup = (t("global_text", lang=ui_lang), global_markup(lang=ui_lang, cfg=cfg)) if data == "more:global" else (t("more_text", lang=ui_lang), more_markup(lang=ui_lang, move=bool(cfg.projects), session=session, cfg=cfg))
         try:
             bot.call("editMessageText", dict(edit, text=text, reply_markup=markup))
@@ -6707,21 +7291,26 @@ def more_button(q: dict, cfg: Config, bot, m: dict, topics: TopicMap, inbox: Inb
             pass
         return "menu"
 
+    cmd = arg.split(" ", 1)[0]
+    if not ((arg == "mode" and session) or arg == "history" or cmd in MORE_COMMANDS or cmd in ACCOUNT_COMMANDS):
+        # Nothing here acts on this tap (a session's own setting outside its topic, a button of an older version):
+        # it says so instead of a "⏳" that never turns into anything.
+        if arg not in ("mode", "compactactions"):  # these two act on the topic's session only
+            return _unknown_tap(bot, q, ui_lang)
+        _answer_button(bot, q, t("toast_not_available", lang=ui_lang))
+        return "ignored"
     label = _pressed_label(m, data)
     _answer_button(bot, q, ("⏳ " + label)[:190] if label else "")
 
-    if arg == "mode" and session:
+    if arg == "mode":
         send_mode_menu(bot, cfg, m, session)
         return "mode"
     if arg == "history":
         history_start(cfg, bot, m)
         return "history"
-    cmd = arg.split(" ", 1)[0]
-    if cmd in MORE_COMMANDS or cmd in ACCOUNT_COMMANDS:
-        # Choices made in a sub-menu answer in that same menu message; the main menu stays as it is.
-        menu = not (m.get("text") or "").lstrip("\u200f").startswith("⚙️")
-        return cli_command(cfg, bot, m, session, arg, menu=menu, topics=topics)
-    return "ignored"
+    # Choices made in a sub-menu answer in that same menu message; the main menu stays as it is.
+    menu = not (m.get("text") or "").lstrip("\u200f").startswith("⚙️")
+    return cli_command(cfg, bot, m, session, arg, menu=menu, topics=topics)
 
 
 # --- several Claude accounts ---------------------------------------------------
@@ -8341,6 +8930,7 @@ def serve(cfg: Config) -> int:
                                       daemon=True)
     sweeper_thread.start()
     start_turn_command_sweep(cfg, bot)
+    _voice_later(voice_preview_sweep, cfg, bot, inbox)  # previews whose retries ended with the previous process
     from . import buildstamp
     buildstamp.record_running("listener")  # doctor tells when an install left this copy on older code
     try:  # the home radio comes back by itself when the Mac went down while it was on (never the YouTube one)

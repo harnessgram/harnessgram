@@ -93,6 +93,7 @@ def pane(monkeypatch):
     monkeypatch.setattr(I, "_tmux", p)
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "pane_runs_session", lambda pane, session: True)
+    monkeypatch.setattr(I, "pane_session_process", lambda *a, **k: (7, "Wed Nov 18 13:00:00 2026"))
     return p
 
 

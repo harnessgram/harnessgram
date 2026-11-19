@@ -772,7 +772,7 @@ def test_type_into_failure_records_no_nudge_and_sends_no_note(monkeypatch, bot):
 def test_type_into_raises_when_enter_fails(monkeypatch):
     boxes = iter([("", True), ("hello", True), ("hello", True)])
     monkeypatch.setattr(inbox, "input_box", lambda pane: next(boxes))
-    monkeypatch.setattr(inbox, "pane_runs_session", lambda pane, session: True)
+    monkeypatch.setattr(inbox, "pane_session_process", lambda pane, session, known_pid=None: (7, "Wed Nov 18 13:00:00 2026"))
     monkeypatch.setattr(inbox, "_tmux", lambda *a: subprocess.CompletedProcess(
         a, 1 if a[-1] == "Enter" else 0, stdout=""))  # the text goes in, Enter fails
     with pytest.raises(OSError):
@@ -782,7 +782,7 @@ def test_type_into_raises_when_enter_fails(monkeypatch):
 def test_type_into_rechecks_exact_box_and_process_before_enter(monkeypatch):
     boxes = iter([("", True), ("hello plus owner text", True)])
     monkeypatch.setattr(inbox, "input_box", lambda pane: next(boxes))
-    monkeypatch.setattr(inbox, "pane_runs_session", lambda pane, session: True)
+    monkeypatch.setattr(inbox, "pane_session_process", lambda pane, session, known_pid=None: (7, "Wed Nov 18 13:00:00 2026"))
     monkeypatch.setattr(inbox, "dismiss_tip", lambda pane: True)
     sent = []
     monkeypatch.setattr(inbox, "_tmux", lambda *args: sent.append(args) or subprocess.CompletedProcess(args, 0))
@@ -794,9 +794,9 @@ def test_type_into_rechecks_exact_box_and_process_before_enter(monkeypatch):
 
 def test_type_into_removes_exact_own_text_when_process_changes(monkeypatch):
     boxes = iter([("", True), ("hello", True), ("hello", True)])
-    ownership = iter([True, False])
+    identities = iter([(7, "Wed Nov 18 13:00:00 2026"), (8, "Wed Nov 18 13:05:00 2026")])  # another process holds the pane at Enter
     monkeypatch.setattr(inbox, "input_box", lambda pane: next(boxes))
-    monkeypatch.setattr(inbox, "pane_runs_session", lambda pane, session: next(ownership))
+    monkeypatch.setattr(inbox, "pane_session_process", lambda pane, session, known_pid=None: next(identities))
     monkeypatch.setattr(inbox, "dismiss_tip", lambda pane: True)
     sent = []
     monkeypatch.setattr(inbox, "_tmux", lambda *args: sent.append(args) or subprocess.CompletedProcess(args, 0))

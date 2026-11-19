@@ -25,6 +25,7 @@ from . import agent_task, flood, menus
 from . import lang as L
 from .config import home_chat, live_activity_in_cockpit, private_dir, state_dir, write_private
 from .creds import redact
+from .i18n import t
 from .telegram import TelegramError
 from .topics import chat_of, latest_reply
 
@@ -648,7 +649,9 @@ def press(cfg, bot, q: dict, session: str) -> str:
             idx = int(found.group(2))
             full = str(agents[idx].get("full") or "") if idx < len(agents) else ""
     try:
-        bot.call("answerCallbackQuery", {"callback_query_id": q.get("id") or "", "text": "" if full else s["agents_card_none"]})
+        bot.call("answerCallbackQuery", {"callback_query_id": q.get("id") or "",
+                                         "text": t("toast_agent_details_sent", lang=cfg.ui_language)
+                                         if full else s["agents_card_none"]})
     except TelegramError:
         pass
     if not full:
@@ -681,11 +684,21 @@ def dismiss(cfg, bot, q: dict, session: str) -> str:
         if (not card or card.get("message_id") != msg.get("message_id")
                 or _chat(cfg, card) != (msg.get("chat") or {}).get("id")
                 or card.get("thread") != msg.get("message_thread_id")):
-            return "ignored"
-        card.update(dismissed=True, dirty=False)
-        _save(path, st)
+            stale = True
+        else:
+            stale = False
+            card.update(dismissed=True, dirty=False)
+            _save(path, st)
+    if stale:
+        try:  # a card the bridge no longer keeps: the tap still gets an answer, never a spinner
+            bot.call("answerCallbackQuery", {"callback_query_id": q.get("id") or "",
+                                             "text": t("toast_button_outdated", lang=getattr(cfg, "ui_language", None))})
+        except TelegramError:
+            pass
+        return "ignored"
     try:
-        bot.call("answerCallbackQuery", {"callback_query_id": q.get("id") or "", "text": ""})
+        bot.call("answerCallbackQuery", {"callback_query_id": q.get("id") or "",
+                                         "text": t("toast_agent_card_closed", lang=cfg.ui_language)})
         bot.call("editMessageReplyMarkup", {"chat_id": _chat(cfg, card), "message_id": card["message_id"],
                                              "reply_markup": {"inline_keyboard": []}})
     except TelegramError:

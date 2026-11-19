@@ -184,7 +184,7 @@ function vkSheet(page,i,set){var shown=vkShown(i);var shade=el("div","vk-shade")
  // Every switch reaches the agents through the overlay they read when a conversation starts.
  if(!i.locked){var ns=el("div","vk-next");ns.setAttribute("data-vk-next","");ns.appendChild(icon("clock"));ns.appendChild(el("span",null,vkT("nextSession")));sh.appendChild(ns);
   sh.appendChild(el("h3","vk-suggest-title",vkT("suggestTitle")));var ta=el("textarea","vk-suggest");ta.rows=2;ta.maxLength=1000;ta.placeholder=vkT("suggestPh");ta.setAttribute("aria-label",vkT("suggestTitle"));
-  ta.value=vkDraft[i.id]||"";tune(ta,true);sh.appendChild(ta);var send=el("button","vk-send",vkT("suggestSend"));send.type="button";send.setAttribute("data-vk-suggest",i.id);send.disabled=!ta.value.trim();
+  ta.value=vkDraft[i.id]||"";tune(ta,true);sh.appendChild(ta);var send=el("button","vk-send",vkT("suggestSend"));send.type="button";send.setAttribute("data-vk-suggest",i.id);send.setAttribute("data-native-main","");send.disabled=!ta.value.trim();
   ta.addEventListener("input",function(){vkDraft[i.id]=ta.value;send.disabled=!ta.value.trim();});
   send.addEventListener("click",function(){var text=ta.value.trim();if(!text)return;send.disabled=true;haptic("tap");
    post("/api/knowledge",{action:"suggest",id:i.id,text:text}).then(function(r){if(!r.ok)throw r.status;return r.json();})
@@ -200,7 +200,7 @@ function vkPage(d){
   vkNav={open:false,kind:"",vault:false,history:false,item:""};vkRerender();window.scrollTo(0,0);});
  if(!vkData){var box=el("div","vk-loading");box.setAttribute("data-vk-loading","");
   page.appendChild(vkHead("k-brain",vkT("title"),vkT("subtitle"),setHome,"vk-home-head"));
-  if(vkError&&!vkLoading){box.appendChild(el("p",null,vkT("loadFailed")));var r=el("button","vk-send",vkT("retry"));r.type="button";r.addEventListener("click",function(){vkLoad(false);vkRerender();});box.appendChild(r);}
+  if(vkError&&!vkLoading){box.appendChild(el("p",null,vkT("loadFailed")));var r=el("button","vk-send",vkT("retry"));r.type="button";r.setAttribute("data-native-main","");r.addEventListener("click",function(){vkLoad(false);vkRerender();});box.appendChild(r);}
   else{box.appendChild(el("span","dotpulse"));box.appendChild(el("span",null,vkT("loading")));if(!vkLoading)vkLoad(false);}
   page.appendChild(box);return;}
  var sub=vkNav.kind?"kind":vkNav.vault?"vault":vkNav.history?"history":"";

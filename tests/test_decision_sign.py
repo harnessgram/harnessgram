@@ -143,7 +143,7 @@ def test_the_signature_survives_a_save_and_a_malformed_one_is_dropped(rig, serve
     assert stored()[first["id"]]["answer_sig"] == sig
     data = stored()
     bad = [dict(sig, signature=sig["signature"][:-4]), dict(sig, key="not base64!"), dict(sig, extra="x"),
-           {k: v for k, v in sig.items() if k != "payload"}, dict(sig, payload="A" * 20000), "text", None]
+           {k: v for k, v in sig.items() if k != "payload"}, dict(sig, payload="A" * (decision_sign.MAX_PAYLOAD_B64 + 4)), "text", None]
     for value in bad:
         data[first["id"]]["answer_sig"] = value
         assert "answer_sig" not in decisions._record(first["id"], data[first["id"]]), value

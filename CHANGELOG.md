@@ -6,6 +6,96 @@ change a setting or a command, and the change is listed here under "Changed" or 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-19
+
+### Added
+- Driving mode for voice notes: a one-tap **🚗 Driving** button beside "Confirm voice transcripts" in the global
+  settings menu (and the Cockpit switch `voice_driving`) sends recordings straight in, each with a quiet
+  "sent without the preview (driving)" note, and turns itself off after three hours. The new Cockpit setting
+  `voice_confirm_driving` (`preview` or `send`, default `preview`) decides whether car mode also skips the preview.
+
+### Changed
+- Car mode no longer hides the transcript preview on its own: car mode stays on until it is switched off, so
+  recordings went straight in days after a drive. Set `voice_confirm_driving` to `send` for the old behaviour.
+
+### Fixed
+- Button callback feedback now preserves the handler's specific result for slow and background actions, sends one
+  answer per tap, avoids holding its state lock during Telegram calls, and answers rejected Codex taps explicitly.
+- The transcript preview's **Send** button: the toast answers only after the message is queued; a delivery
+  that queued nothing keeps the draft and says "Not sent. Tap Send again."; a failing receipt after queueing no
+  longer re-delivers on the next tap; a second or late tap says what already happened (sent, cancelled, sent
+  without the preview); and the preview's "Sent" text is retried through a Telegram flood limit, or at least
+  its buttons are removed, so a handled preview never looks untouched.
+- A voice note no longer skips its preview without a word: a recording sent from General to the dispatcher
+  now gets the preview too, and a preview Telegram refuses for a while (a flood limit, a network error) is
+  retried for about a minute off the poll loop before the recording is handed over with a note saying the
+  preview could not be shown. A retry cut short by a restart is completed at the next start.
+- A transcript draft is claimed for delivery under a lock that holds across processes, so two listeners
+  overlapping during a restart never both deliver it; a claim is taken over only once its process has ended,
+  never by time. A hand-over that fails stays waiting and is tried again (and by the next start's sweep); after
+  three failed tries the owner gets the transcript with a note, and the draft is removed only once that note
+  was sent.
+- Optional `auto_decision_cards` mirrors owner-directed questions into routine Cockpit cards and gives Claude
+  sessions a one-shot Stop-hook reminder to post an explicit decision before continuing work.
+- `cockpit_native` (off by default): the Cockpit uses Telegram's own Mini App controls through one wrapper:
+  page colours follow the Telegram theme (the brand art and accents stay), a screen's primary action moves to
+  Telegram's bottom button with its disabled and progress states, phones open full screen with safe-area padding,
+  Telegram's BackButton replaces the page's own back
+  arrows, every tap answers with one haptic, and the last tab and opened blocks follow the user through Telegram
+  CloudStorage. Off, or in a plain browser, the page is unchanged. docs/cockpit-v2.md lists every Mini App feature
+  and where the Cockpit uses it.
+- Default-off `rich_decisions_enabled` gates the complete rich-decision rollout; disabled installations retain the
+  previous limits, API contract, media access, CLI help, and Cockpit controls.
+- Decisions carry the whole context: `ctb decide ask` takes `--image` (repeat, up to 6; PNG/JPEG/WebP, private
+  metadata-free copies served only behind the owner's login), `--link label=https://...` (repeat, up to 6, https
+  only) and a `--detail` of up to 4000 characters in markdown-lite (paragraphs, `- ` bullets, `**bold**`, shown as
+  text only). The Cockpit shows the detail, the pictures (tap to enlarge), the links and both buttons, and
+  `/api/state` exposes `images`, `links` and `replies` for the app.
+- A comment with the answer (up to 1000 characters) or alone: `POST /api/decide` with `"choice": "reply"` delivers
+  the owner's own words to the session, clearly marked as not an answer and not an approval; the decision stays
+  open. Sensitive decisions keep the same fresh-login and Face ID flow.
+- Helper agents (`helper_agents` setting, all off by default): small Haiku jobs that look after the bridge, each
+  behind its own switch. `card_titles` writes Hebrew titles and step names for live progress cards (offline NLLB
+  titles remain the fallback); `patrol` scans every 10 minutes, with no model, for stale progress cards, stuck
+  sessions and failed deliveries, and only then asks for one short Hebrew Cockpit note per finding; its only
+  actions are closing a card stale for hours and re-queuing failed reply parts; `ledger_capture` proposes a
+  ledger item as a Cockpit card with Add and Dismiss and never writes before the tap. Jobs run headless on the
+  subscription first; the Anthropic API is an opt-in fallback with a daily USD cap, an `api_until` date, and a
+  clean stop on a missing key, a refused key or exhausted credit. See `docs/helper-agents.md`.
+- Live action details now put a short plain-Hebrew explanation before technical tool text and fold the raw
+  command underneath. The local explanation is instant; an optional routine-tier model improvement is redacted,
+  cached, and appears only on a later card refresh.
+- Every owner-facing Cockpit screen now supports light and dark appearance, follows Telegram or the system by
+  default, and offers a remembered Auto, Light, or Dark choice in Settings.
+- **Stop and send** now validates the live tmux pane before reading or interrupting it, serializes terminal
+  actions per session, preserves held and replay state until a stop succeeds, keeps retry controls after a
+  failed stop, and recognizes messages that are still owned by a delivery lease.
+- Inline-button feedback now defers its localized fallback toast so a handler's meaningful answer wins, and only
+  marks a tapped button after a slow second. Fast taps add no edits; slow untouched buttons are restored, while
+  handler edits and deletions are never overwritten.
+- **Stop and send** now acknowledges the Telegram tap immediately, reliably interrupts multi-Escape and
+  background-agent waits before waking the durable queued message, reports stale, closed, and failed-interrupt
+  outcomes without losing or duplicating it, and records every delivery-card tap and outcome without content.
+- **Show details** under a session's live action card now opens every step in place, the folded "earlier
+  steps" included; a card too long for one message folds its oldest steps back instead of failing, a card of an
+  earlier session in the same topic still opens, and a tap while the card is being sent says to try again in a
+  moment instead of holding the inbox.
+- Every inline button answers its tap: the move menu's buttons from the 11th group on, Permissions and the
+  compact-actions switch outside a session's topic, a stale agents card's close, rejected credit and
+  cold-compaction taps, taps in a command topic, and buttons no handler knows (now "This button is outdated.")
+  no longer leave a spinner or a "⏳" that does nothing. A new button test (`tests/test_button_qa.py`) checks
+  every button the bridge builds.
+- Multi-select and preview questions answered by typing a number no longer stop with "Could not send" on a
+  slow terminal: after each arrow or Space key the bridge waits up to about 2 s for the screen to show it, and
+  still stops at once on any screen other than the one before or the one expected.
+- The heartbeat service uses far less CPU: each round lists the Claude projects folder once for all of its
+  transcript lookups instead of globbing every project folder per lookup (several hundred globs a round with
+  about a hundred topics), and the auto-cards scan does the same in its own thread.
+- Automatic decision cards now fail open after reply delivery, preserve long questions in their detail, mark
+  only non-sensitive questions routine, and share a bounded per-turn dedupe with the Stop-hook reminder.
+  about a hundred topics), the auto-cards scan does the same in its own thread, and unchanged transcripts'
+  derived context and background-work values are reused instead of rereading multi-megabyte tails.
+
 ## [0.5.0] - 2026-11-19
 
 ### Added

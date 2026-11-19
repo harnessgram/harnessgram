@@ -2,7 +2,8 @@
 
 This module deliberately owns no readers.  The panel adapter supplies the
 calendar, terminal, family-board and work snapshots so callers and tests can
-use a fixed clock and plain data.
+use a fixed clock and plain data.  The adapters that build those snapshots from the bridge's own state live in
+home_inputs.py.
 """
 from __future__ import annotations
 

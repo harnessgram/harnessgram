@@ -1,4 +1,4 @@
-"""Private choice-card images. Source names never cross the publishing boundary.
+"""Private choice-card and decision images. Source names never cross the publishing boundary.
 
 No required dependencies: prefer Pillow when installed, then macOS sips. The
 bounded fallback keeps the original raster container, stripping its metadata.
@@ -30,6 +30,9 @@ MAX_SIDE = 1600
 MAX_PIXELS = 40_000_000
 GRACE = 10 * 60
 TYPES = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
+CARD_DIR = "card-media"  # choice-card pictures (cards.py)
+DECISION_DIR = "decision-media"  # pictures attached to a decision (decisions.py); swept by that store, never by cards
+STORES = (CARD_DIR, DECISION_DIR)
 
 
 class MediaError(ValueError):
@@ -37,8 +40,10 @@ class MediaError(ValueError):
 
 
 @contextlib.contextmanager
-def directory(create=False):
-    root = state_dir() / "card-media"
+def directory(create=False, name=CARD_DIR):
+    if name not in STORES:
+        raise MediaError("private image storage is unavailable")
+    root = state_dir() / name
     if create:
         # Do not chmod/follow an existing symlink through private_dir.
         if root.is_symlink():
@@ -249,10 +254,10 @@ def prepare(source):
         raise MediaError("image could not be read or converted") from None
 
 
-def store_many(paths):
+def store_many(paths, name=CARD_DIR):
     ids = []
     try:
-        with directory(create=True) as root:
+        with directory(create=True, name=name) as root:
             for path in paths:
                 data = prepare(path)
                 ident = secrets.token_hex(16)
@@ -262,15 +267,15 @@ def store_many(paths):
                     f.write(data)
         return ids
     except BaseException:
-        discard(ids)
+        discard(ids, name)
         raise
 
 
-def discard(ids):
+def discard(ids, name=CARD_DIR):
     if not ids:
         return
     try:
-        with directory() as root:
+        with directory(name=name) as root:
             for ident in ids:
                 if isinstance(ident, str) and ID.fullmatch(ident):
                     with contextlib.suppress(FileNotFoundError):
@@ -279,11 +284,11 @@ def discard(ids):
         pass
 
 
-def read(ident):
+def read(ident, name=CARD_DIR):
     if not isinstance(ident, str) or not ID.fullmatch(ident):
         return None
     try:
-        with directory() as root:
+        with directory(name=name) as root:
             fd = os.open(ident, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
             with os.fdopen(fd, "rb") as f:
                 st = os.fstat(f.fileno())
@@ -298,7 +303,7 @@ def read(ident):
         return None
 
 
-def cleanup(records, now=None):
+def cleanup(records, now=None, name=CARD_DIR):
     """Called under the cards lock; protect live cards and recently closed copies.
 
     Unknown files get an orphan grace too (a publisher may be preparing copies
@@ -313,12 +318,12 @@ def cleanup(records, now=None):
         else:
             expired.update(ids)
     try:
-        with directory() as root:
-            for name in os.listdir(root):
-                if not ID.fullmatch(name) or name in keep:
+        with directory(name=name) as root:
+            for entry in os.listdir(root):
+                if not ID.fullmatch(entry) or entry in keep:
                     continue
-                st = os.stat(name, dir_fd=root, follow_symlinks=False)
-                if name in expired or now - st.st_mtime >= GRACE:
-                    os.unlink(name, dir_fd=root)
+                st = os.stat(entry, dir_fd=root, follow_symlinks=False)
+                if entry in expired or now - st.st_mtime >= GRACE:
+                    os.unlink(entry, dir_fd=root)
     except OSError:
         pass

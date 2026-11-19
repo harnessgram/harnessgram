@@ -2741,7 +2741,8 @@ def last_reply_failure() -> Optional[BaseException]:
 
 
 def run_reply(cfg: Config, title: str, session: str, text: str, translate: bool, transcript: str = "",
-              answer_to: Optional[dict] = None, on_accept: Optional[Callable[[], None]] = None) -> int:
+              answer_to: Optional[dict] = None, on_accept: Optional[Callable[[], None]] = None,
+              source_transcript: str = "", source_lines: Optional[list[str]] = None) -> int:
     """Entry for `ctb mirror`: slow, high-quality offline models are allowed here (fast=False).
     A short reply gets the one-line footer. On failure the reason is remembered (last_reply_failure)
     for the Stop worker's alert. `on_accept` runs once, when the first part was accepted or queued."""
@@ -2776,6 +2777,28 @@ def run_reply(cfg: Config, title: str, session: str, text: str, translate: bool,
     except Exception:
         log("card refresh after the reply failed")
     if not m.dropped:
+        if cfg.auto_decision_cards and m.first_reply_id is not None:
+            try:
+                from . import cards, owner_questions, pins, sensitive_buttons
+                q = owner_questions.question(text)
+                source = source_transcript or transcript
+                lines = (source_lines if source_lines is not None else
+                         (Path(source).read_text(encoding="utf-8").splitlines() if source else []))
+                key = owner_questions.turn_key(session, lines, q or "")
+                if (q and not owner_questions.claimed(session, key, "stop")
+                        and not owner_questions.references_card(text)
+                        and not owner_questions.turn_used_explicit_card(lines)
+                        and owner_questions.claim_once(session, key, "card")):
+                    found = m.topics.place_of(session)
+                    if found is not None:
+                        url = pins.link(m._chat(session), found.thread, m.first_reply_id)
+                        detail = f"{q}\n\nFrom the mirrored reply: {url}" if len(q) > cards.TITLE_CHARS \
+                            else f"From the mirrored reply: {url}"
+                        cards.publish(session, found.chat, found.thread, "ask", q[:cards.TITLE_CHARS],
+                                      detail, routine=not sensitive_buttons.text_sensitive(q),
+                                      automatic_question=True)
+            except Exception:
+                log("automatic owner-question card could not be created")
         # Durable acceptance also settles the turn. Quota recovery must continue while
         # Telegram is unavailable; queued replies follow the session's current topic.
         try:

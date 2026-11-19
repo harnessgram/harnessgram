@@ -58,7 +58,8 @@ from .topics import TopicMap
 from .panel_page import PAGE, STRINGS  # noqa: F401  (the page and its strings table)
 
 MAX_BODY = 64  # the page posts "{}"; a larger body only holds a thread
-MAX_DECIDE_BODY = 1280  # {"id", "choice", "note"}: a 300-character note takes up to 1200 bytes
+MAX_DECIDE_BODY = 4400  # {"id", "choice", "note"}: a 1000-character note takes up to 4000 bytes
+MAX_CARD_BODY = 1280  # an answer to a card: {"id", "pick"|"text"}
 MAX_CONNECTIONS = 16
 MAX_INIT_DATA = 4096
 MAX_AGE = 3600  # seconds an auth_date stays valid for reading the state
@@ -86,7 +87,7 @@ SHORT_ID = re.compile(r"[0-9a-f-]{8}")  # the session id as the page knows it: i
 WRITTEN_IN_PANEL = decisions.PANEL_APPROVES
 # route: largest body it takes ("{}" for the state; an id list for dismiss; 600 characters to say)
 ROUTES = {"/api/state": MAX_BODY, "/api/decide": MAX_DECIDE_BODY, "/api/radio": MAX_BODY, "/api/model": MAX_BODY,
-          "/api/setting": MAX_BODY, "/api/dismiss": 1280, "/api/radio-say": 2600, "/api/card": MAX_DECIDE_BODY, "/api/say": 2600, "/api/bank": MAX_BODY,
+          "/api/setting": MAX_BODY, "/api/dismiss": 1280, "/api/radio-say": 2600, "/api/card": MAX_CARD_BODY, "/api/say": 2600, "/api/bank": MAX_BODY,
           "/api/unsay": MAX_BODY, "/api/close": 1280, "/api/remind": 2600, "/api/screen": MAX_BODY,
           "/api/compact": MAX_BODY, "/api/room": 2600, "/api/podcast": 1280, "/api/radio-music": 256,
           "/api/brief-seen": MAX_BODY, "/api/block-mute": MAX_BODY, "/api/fork": 256,
@@ -516,7 +517,9 @@ def waiting_for_owner(topics: TopicMap, now: float, here: Optional[tuple] = None
               **({"request": r.get("request", ""), "decline_only": bool(r.get("decline_only", True))}
                  if r.get("perm") else {}),
               # the HarnessGram app answers a sensitive one only in the app after Face ID, never from a widget
-              "sensitive": sensitive_buttons.decision_sensitive(r)}
+              "sensitive": sensitive_buttons.decision_sensitive(r),
+              **({"rich_decision": True} if getattr(topics.cfg, "rich_decisions_enabled", False) else {}),
+              **(_decision_extras(r, now) if getattr(topics.cfg, "rich_decisions_enabled", False) else {})}
              for r in sorted(records, key=lambda r: (-r["created"], r["id"]))]
     found = board.open_reminders()
     reminders = [{"text": i["s"], "due": i.get("d", ""), "topic": by_place.get((chat, thread), ""),
@@ -525,6 +528,21 @@ def waiting_for_owner(topics: TopicMap, now: float, here: Optional[tuple] = None
                   "old": reminder_lifecycle.is_old(i, now)}
                  for chat, thread, i in sorted(found, key=lambda f: -f[2]["at"])[:reminder_limit]]
     return asked, reminders
+
+
+def _decision_extras(r: dict, now: float) -> dict:
+    """What a decision carries beyond its text, each key only when present (an older record has none): "images"
+    (opaque picture ids; the bytes only through /api/card-media-token and /card-media/<id>, behind the owner's
+    login), "links" ([{"label", "url"}], https only, checked again on load) and "replies" (the owner's own comments
+    sent without deciding, newest last, as [{"text", "age"}])."""
+    out: dict = {}
+    if r.get("images"):
+        out["images"] = list(r["images"])
+    if r.get("links"):
+        out["links"] = [{"label": link["label"], "url": link["url"]} for link in r["links"]]
+    if r.get("replies"):
+        out["replies"] = [{"text": x["text"], "age": _age(now, x["at"])} for x in r["replies"][-decisions.REPLIES_SHOWN:]]
+    return out
 
 
 def open_tasks(topics: TopicMap, now: float, here: Optional[tuple] = None) -> list:
@@ -713,6 +731,16 @@ def _default_model() -> dict:
             "choices": [{"key": key, "id": ident, "label": name} for key, ident, name in models.MODELS]}
 
 
+def quota_labels(names) -> dict:
+    """One distinct label per account: the short e-mail label, plus the account's own name when two accounts
+    would otherwise show the same label (a stale cached e-mail must not make two quota rows look identical)."""
+    base = {n: accounts.label(n) for n in names}
+    seen: dict = {}
+    for label in base.values():
+        seen[label] = seen.get(label, 0) + 1
+    return {n: (f"{label} ({n})" if seen[label] > 1 and label != n else label) for n, label in base.items()}
+
+
 def _compact_at() -> int:
     try:
         from .compact import auto_compact_limit
@@ -805,11 +833,12 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
                          **({"session_id": e.session} if full_ids else {})})
     names = {e.session: e.name for e in entries}
     quota = []
+    labels = quota_labels(accounts.names())
     for name in accounts.names():
         u = accounts._read(accounts.usage_path(name), {})
         if not u:
             continue
-        quota.append({"account": name, "label": accounts.label(name),
+        quota.append({"account": name, "label": labels[name],
                       # weekly only, with its reset and the banked resets when known (no 5-hour window)
                       "weekly": u.get("weekly"), "weekly_resets": u.get("weekly_resets") or None,
                       "banked": usage.banked_resets(u),
@@ -923,17 +952,16 @@ def build_state(cfg: Config, now: Optional[float] = None, start: str = "", light
         # Apply the same boundary filter to those newly derived fields.
         out["addons"] = addons.flags(cfg)  # the page hides what is switched off (cockpit_v2_addons.js)
         if addons.enabled(cfg, "home_context"):
-            from . import home_context, shabbat_times
+            from . import autopilot, home_context, home_inputs
             moment = datetime.fromtimestamp(now, schedule.zone(cfg))
             try:
-                friday = shabbat_times.friday_on_or_before(moment.date())
-                span = shabbat_times.window(friday, cfg)
-                rest = None if span is None else (span[0] <= moment < span[1] or briefing.rest_day(cfg, now))
+                away = autopilot.away_active()
             except Exception:
-                rest = None
+                away = False
             out["home_context"] = home_context.context(cfg, moment, inputs={
-                "shabbat_times": rest, "decisions": out.get("decisions", ()),
-                "sessions": out.get("sessions", ()), "cards": out.get("cards", ())})
+                "shabbat_times": home_inputs.rest_state(cfg, moment), "decisions": out.get("decisions", ()),
+                "sessions": out.get("sessions", ()), "cards": out.get("cards", ()),
+                **home_inputs.at_mac_inputs(out.get("sessions", ()), now, away)})
         try:  # old topics the owner may close (topic_cleanup.py); only behind ui_v2 and its add-on switch
             out["topic_cleanup"] = topic_cleanup.view(cfg, topics, now) if out["addons"]["topic_cleanup"] else None
         except Exception:
@@ -1049,8 +1077,8 @@ def _auto_cards(cfg: Config, entries: list, paths: dict, bg: dict, now: float) -
 
 # --- the page ----------------------------------------------------------------------------
 
-def render_page(lang: str, nonce: str) -> bytes:
-    return panel_page.render_page(lang, nonce)
+def render_page(lang: str, nonce: str, native: bool = False) -> bytes:
+    return panel_page.render_page(lang, nonce, native=native)
 
 
 def csp(nonce: str) -> str:
@@ -1264,7 +1292,8 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
         nonce = secrets.token_urlsafe(16)
-        self._send(200, render_page(self.server.lang, nonce), "text/html; charset=utf-8",
+        native = getattr(getattr(self.server, "cfg", None), "cockpit_native", False) is True
+        self._send(200, render_page(self.server.lang, nonce, native=native), "text/html; charset=utf-8",
                    {"Content-Security-Policy": csp(nonce)})
 
     def _state_cache(self):
@@ -1901,7 +1930,9 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         self._json(202, {"ok": True})
 
     def _decide(self) -> None:
-        """The owner's tap on one decision: {"id", "choice": "yes"|"no", "note"}. Answered once."""
+        """The owner's tap on one decision: {"id", "choice": "yes"|"no", "note"}. Answered once. With
+        {"id", "choice": "reply", "note"} the note (required) is sent alone as the owner's comment: it answers
+        nothing, approves nothing and the decision stays open (decisions.reply)."""
         try:
             req = json.loads(self._body.decode("utf-8"))
         except ValueError:
@@ -1910,8 +1941,11 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             self._json(400, {"error": "bad request"})
             return
         ident, choice, note = req.get("id"), req.get("choice"), req.get("note", "")
-        if not (isinstance(ident, str) and decisions.ID_RE.fullmatch(ident) and choice in ("yes", "no")
-                and isinstance(note, str) and len(note) <= decisions.NOTE_CHARS):
+        rich = self.server.cfg.rich_decisions_enabled is True
+        choices = ("yes", "no", "reply") if rich else ("yes", "no")
+        note_limit = decisions.NOTE_CHARS if rich else decisions.LEGACY_NOTE_CHARS
+        if not (isinstance(ident, str) and decisions.ID_RE.fullmatch(ident) and choice in choices
+                and isinstance(note, str) and len(note) <= note_limit and (choice != "reply" or note.strip())):
             self._json(400, {"error": "bad request"})
             return
         try:
@@ -1920,6 +1954,9 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             # age alone ("old") stays answerable. Same refusal as a decision that was closed meanwhile.
             if stale_reasons_now(self.server.cfg).get(ident) in ("ended", "replaced"):
                 self._json(409, {"error": "closed", "state": "stale", "choice": ""})
+                return
+            if choice == "reply":
+                self._decide_reply(ident, note)
                 return
             if any(r["id"] == ident and r.get("perm") for r in decisions.open_decisions()):
                 # A Claude Code permission request: the answer goes to its waiting hook (permission_request.py).
@@ -1949,6 +1986,14 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         decisions.announce(self.server.cfg, self.server.bot(), self.server.inbox(), rec)
         self._json(200, {"ok": True, "key": rec["delivery_key"],
                          "delivery": rec.get("final_state") or self.server.inbox().delivery_state(rec["session"], rec["delivery_key"])})
+
+    def _decide_reply(self, ident: str, note: str) -> None:
+        """A comment without an answer: queued as the owner's own words, marked as approving nothing. The decision
+        stays open; its topic notice is not touched. Errors propagate to _decide's handlers."""
+        rec = decisions.reply(self.server.cfg, self.server.inbox(), ident, note)
+        decisions.announce_reply(self.server.inbox(), rec)
+        self._json(200, {"ok": True, "reply": True, "key": rec["reply_key"],
+                         "delivery": self.server.inbox().delivery_state(rec["session"], rec["reply_key"])})
 
     def _radio(self) -> None:
         """The owner's radio switch: {"on": true|false}. Answers at once; the switch runs detached."""
@@ -2022,6 +2067,13 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             self._json(400, {"error": "bad request"})
             return
         try:
+            from . import helper_jobs
+            tapped = helper_jobs.resolve_card(self.server.cfg, ident, pick)
+            if tapped is not None:  # a card a helper agent made: the tap is handled here, never queued to a session
+                code = tapped["status"]
+                self._json(code, {"ok": True, "key": "", "delivery": "delivered"} if tapped["ok"] else
+                           {"error": {400: "bad request", 409: "closed", 503: "busy"}.get(code, "unavailable")})
+                return
             asking = next((r["session"] for r in cards.open_cards() if r["id"] == ident), None)
             if asking is not None and asking in _ended_sessions(self.server.cfg):
                 self._json(409, {"error": "closed"})  # a stale page: an ended session is never woken by an answer
@@ -3023,7 +3075,8 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
                 or not card_media.ID.fullmatch(req["id"])):
             self._json(400, {"error": "bad request"})
             return
-        if not cards.image_available(req["id"]):
+        decision_image = self.server.cfg.rich_decisions_enabled is True and decisions.image_available(req["id"])
+        if not cards.image_available(req["id"]) and not decision_image:
             self._json(404, {"error": "not found"})
             return
         expires = min(int(time.time()) + APP_TOKEN_TTL, int(dict(parse_qsl(init))["auth_date"]) + DECIDE_MAX_AGE)
@@ -3043,6 +3096,8 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             self._json(403, {"error": "forbidden"})
             return
         found = cards.image(match[1])
+        if found is None and self.server.cfg.rich_decisions_enabled is True:
+            found = decisions.image(match[1])
         if found is None:
             self._json(404, {"error": "not found"})
             return

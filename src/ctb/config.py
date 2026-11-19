@@ -370,6 +370,8 @@ class Config:
     api_files_dir: str = ""
     owner_chat_id: int = 0
     widgets_enabled: bool = False
+    # Rich decision context, attachments, and owner comments are an explicit rollout opt-in.
+    rich_decisions_enabled: bool = False
     youtube: dict = field(default_factory=dict)
     # APNs Live Activities. The signing key itself remains in the macOS Keychain.
     apns_key_id: str = ""
@@ -393,6 +395,8 @@ class Config:
     translate: bool = False
     # Mirror every reply to the session's Telegram topic.
     mirror: bool = True
+    # Put conservatively detected owner questions in the Cockpit. Explicit opt-in.
+    auto_decision_cards: bool = False
     # Suppress replies to background-only transcript notifications.
     quiet_background_turns: bool = True
     # Minutes before a foreground Bash tool is offered remote rescue controls.
@@ -470,6 +474,10 @@ class Config:
     # What the system knows (knowledge.py, docs/knowledge.md): where the agents' rules, memories, skills, tools
     # and docs live, the overlay file for switched-off items and extra locked safety rules. Every key is optional.
     knowledge: dict = field(default_factory=dict)
+    # Helper agents (helper_agents.py, docs/helper-agents.md): small Haiku jobs, each behind its own switch, all off.
+    # {"card_titles": false, "patrol": false, "ledger_capture": false, "route": "subscription",
+    #  "api_fallback": false, "daily_usd_cap": 0.5, "api_until": ""}
+    helper_agents: dict = field(default_factory=dict)
     # Personal-assistant sessions (assistant.py, docs/panel.md): {"sessions": ["<session id or 8+ char prefix>"]}.
     # They launch without sending tools: they prepare drafts and cards, the owner sends.
     assistant: dict = field(default_factory=dict)
@@ -498,6 +506,8 @@ class Config:
     panel_button: Optional[bool] = None
     panel_funnel_port: Optional[int] = None  # opt in to public Funnel repair
     panel_port: int = 8765  # local Cockpit listener port
+    # Telegram's own Mini App controls in the Cockpit (docs/cockpit-v2.md). Off by default; only true turns it on.
+    cockpit_native: bool = False
     # The bridge names each session topic itself, "project: task" in the target language, and keeps it current
     # (topic_names.py). A name set by hand (in Telegram or with `ctb topic-rename`) always wins.
     auto_topic_names: bool = False
@@ -541,6 +551,9 @@ class Config:
     # Live progress: edit one message with recent tool calls while working, delete when done.
     progress: bool = False
     progress_details: bool = False
+    # Put a plain Hebrew explanation before technical tool details. The local explanation is instant;
+    # an enabled translation model may improve it on a later card refresh.
+    plain_step_text: bool = False  # off until model input is redacted (review of #589)
     # Short action cards hide commands and output until the owner expands that individual card.
     compact_actions: bool = False
     # Forum group only: one pinned index message per session topic, edited after each reply with
@@ -695,6 +708,8 @@ def from_dict(raw: dict) -> Config:
             if not isinstance(value, list) or len(value) > 16 or not all(
                     isinstance(part, str) and part and len(part) <= 1024 and "\x00" not in part for part in value):
                 raise ConfigError("tts_command must be a list of program arguments (no shell string)")
+        elif key == "cockpit_native":
+            value = value is True  # a preview switch: anything but true reads as off, never a startup error
         elif key == "tts_voice":
             if not isinstance(value, str) or (value and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value)):
                 raise ConfigError("tts_voice must be a short voice name (letters, digits, '.', '_' or '-')")
@@ -796,6 +811,10 @@ def from_dict(raw: dict) -> Config:
             from .knowledge import valid_section as valid_knowledge
             if not valid_knowledge(value):
                 raise ConfigError("knowledge must be an object (see docs/knowledge.md)")
+        elif key == "helper_agents":
+            from .helper_agents import valid_section as valid_helper_agents
+            if not valid_helper_agents(value):
+                raise ConfigError("helper_agents must be an object of known keys (see docs/helper-agents.md)")
         elif key == "mac_tools":
             from .mac_tools import valid_section as valid_mac_tools
             if not valid_mac_tools(value):

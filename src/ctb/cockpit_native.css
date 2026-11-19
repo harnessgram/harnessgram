@@ -1,0 +1,14 @@
+/* cockpit_native: Telegram's own controls replace the page's equivalents. Every rule that changes the page needs a class that only
+   cockpit_native.js sets inside Telegram, so a plain browser and the switch's off state never match. */
+:root{--nat-top:calc(var(--tg-safe-area-inset-top,0px) + var(--tg-content-safe-area-inset-top,0px))}
+/* the screen's primary action now lives in Telegram's bottom bar */
+:root.tg-bottom .nat-bottom{display:none!important}
+/* Telegram's BackButton (and its close button) replace the page's back arrows and exit button */
+:root.tg-back [data-v2-back],:root.tg-back [data-vk-back],:root.tg-back .v2-exit{display:none!important}
+/* fullscreen: content starts below the status bar and Telegram's own top controls */
+:root.tg-full body{padding-block-start:var(--nat-top)}
+:root.tg-full.cockpit-v2 body{padding-block-start:0}
+:root.tg-full.cockpit-v2 .top{padding-block-start:calc(14px + var(--nat-top));block-size:calc(128px + var(--nat-top))}
+:root.tg-full body.focus .appframe{block-size:calc(var(--tg-viewport-stable-height,100vh) - var(--nat-top))}
+:root.tg-full .topic-sheet{max-block-size:calc(100dvh - var(--nat-top) - 12px)}
+:root.tg-full.cockpit-v2 .vk-sheet{max-block-size:calc(100dvh - var(--nat-top) - 12px)}

@@ -195,6 +195,10 @@ STRINGS = {
         "bridge": "הגדרות הגשר", "saved": "נשמר", "partlySaved": "נשמר רק בחלק מהחשבונות", "on": "פועל", "off": "כבוי",
         "set_away": "מצב היעדרות", "hint_away": "סשן שעבד בשש השעות האחרונות ממשיך לבד לפי ההמלצה שלו, עד שתחזור. סשנים ישנים לא מתעוררים.",
         "set_voice_confirm": "אישור הקלטות", "hint_voice_confirm": "הקלטה קולית מתומללת ומחכה לאישור שלך לפני שליחה.",
+        "set_voice_driving": "🚗 נהיגה", "hint_voice_driving": "הקלטות נשלחות ישר, בלי תצוגה מקדימה. נכבה לבד אחרי שלוש שעות.",
+        "set_voice_confirm_driving": "הקלטות במצב רכב",
+        "hint_voice_confirm_driving": "מצב רכב נשאר פעיל עד שמכבים אותו, ולכן כברירת מחדל הוא לא מדלג על התצוגה המקדימה.",
+        "carvoice_preview": "תצוגה מקדימה", "carvoice_send": "שליחה ישירה",
         "set_delivery_end": "הודעות בסוף תשובה", "hint_delivery_end": "הודעה שנשלחת בזמן עבודה נמסרת לסשן רק כשהוא מסיים. כבוי: בין צעדים.",
         "set_status_repost": "כרטיס מצב חדש", "hint_status_repost": "כרטיס מצב חדש אחרי כל תשובה. כבוי: אותו כרטיס מתעדכן.",
         "set_agent_notices": "הודעה על כל סוכן", "hint_agent_notices": "הודעה בנושא על כל סוכן ברקע שסיים.",
@@ -408,6 +412,10 @@ STRINGS = {
         "bridge": "Bridge settings", "saved": "Saved", "partlySaved": "Saved for only some accounts", "on": "On", "off": "Off",
         "set_away": "Away mode", "hint_away": "A session that worked in the last six hours carries on with its own recommendation until you are back. Older sessions are not woken.",
         "set_voice_confirm": "Confirm voice notes", "hint_voice_confirm": "A voice note is transcribed and waits for your OK before it is sent.",
+        "set_voice_driving": "🚗 Driving", "hint_voice_driving": "Voice notes go straight in, without the preview. Turns itself off after three hours.",
+        "set_voice_confirm_driving": "Voice notes in car mode",
+        "hint_voice_confirm_driving": "Car mode stays on until you switch it off, so by default it keeps the preview.",
+        "carvoice_preview": "Preview", "carvoice_send": "Send directly",
         "set_delivery_end": "Deliver at the end of a reply", "hint_delivery_end": "A message sent while a session works reaches it when it finishes. Off: between steps.",
         "set_status_repost": "New status card", "hint_status_repost": "A new status card after every reply. Off: the same card updates.",
         "set_agent_notices": "Notice per agent", "hint_agent_notices": "A notice in the topic for each background agent that finished.",
@@ -510,6 +518,8 @@ STRINGS["en"].update({"topicsTitle": "Topics", "topicsEmpty": "Ledger topics app
     "topicStage_integration": "Integration", "topicStage_active": "Active"})
 STRINGS["he"].update({"topicStatusHeading": "התקדמות"})
 STRINGS["en"].update({"topicStatusHeading": "Progress"})
+STRINGS["he"].update({"themeTitle":"מראה", "themeHint":"אוטומטי מתאים את המראה לטלגרם או למכשיר", "themeAuto":"אוטומטי", "themeLight":"בהיר", "themeDark":"כהה"})
+STRINGS["en"].update({"themeTitle":"Appearance", "themeHint":"Auto follows Telegram or this device", "themeAuto":"Auto", "themeLight":"Light", "themeDark":"Dark"})
 
 PAGE = r"""<!doctype html>
 <html lang="__LANG__" dir="__DIR__">
@@ -525,10 +535,8 @@ PAGE = r"""<!doctype html>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style nonce="__NONCE__">
 :root{
---bg:#eef3fb;--card:#ffffff;--edge:rgba(20,50,110,.07);--field:var(--tg-theme-bg-color,#f6f8fc);
---text:var(--tg-theme-text-color,#0f1729);--hint:var(--tg-theme-hint-color,#6b7a90);
---accent:var(--tg-theme-button-color,#2f7cf6);--on-accent:var(--tg-theme-button-text-color,#ffffff);
---link:var(--tg-theme-link-color,var(--accent));--danger:var(--tg-theme-destructive-text-color,#e5484d);
+--bg:#eef3fb;--card:#ffffff;--edge:rgba(20,50,110,.07);--field:#f6f8fc;
+--text:#0f1729;--hint:#596a82;--accent:#1769d2;--on-accent:#ffffff;--link:#075fc8;--danger:#c92d36;
 --ok:#16a34a;--ok-soft:rgba(22,163,74,.12);--warn:#f59e0b;--warn-ink:#c27400;--warm:rgba(245,158,11,.12);
 --idle:#a0a8b3;--off:#c3c8cf;--line:rgba(20,50,110,.09);--soft:rgba(100,116,139,.10);--blue-soft:rgba(47,124,246,.10);
 --yes:var(--accent);--on-yes:var(--on-accent);--go:var(--blue-soft);--on-go:var(--link);
@@ -537,11 +545,12 @@ PAGE = r"""<!doctype html>
 --shadow-lg:0 2px 4px rgba(15,35,75,.05),0 16px 36px rgba(15,35,75,.12);
 --hero-hot:linear-gradient(var(--hero-a,250deg),#fff1db 0%,#fff8ee 45%,#ffffff 100%);
 --hero-calm:linear-gradient(var(--hero-a,250deg),#e3f6ea 0%,#f4fbf6 45%,#ffffff 100%);
+--telegram-bg-reference:var(--tg-theme-bg-color);--telegram-button-reference:var(--tg-theme-button-color);
 --glass:none;--r:20px;--fx:1}
 :root[dir="rtl"]{--fx:-1;--hero-a:110deg}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
 --bg:#0a1120;--card:rgba(24,36,64,.74);--edge:rgba(130,170,255,.15);--field:rgba(255,255,255,.05);
---text:var(--tg-theme-text-color,#eaf0ff);--hint:var(--tg-theme-hint-color,#8b9bbb);
+--text:#eaf0ff;--hint:#aebbd5;--accent:#6ca6ff;--on-accent:#07162e;--link:#82b5ff;--danger:#ff7c82;--idle:#8b9bbb;
 --ok:#34d399;--ok-soft:rgba(52,211,153,.14);--warn:#fbbf24;--warn-ink:#fbbf24;--warm:rgba(251,191,36,.13);
 --off:#3e4a62;--line:rgba(150,180,255,.12);--soft:rgba(150,170,210,.11);--blue-soft:rgba(80,140,255,.16);
 --yes:linear-gradient(180deg,#fcc23c,#f59e0b);--on-yes:#231600;--go:linear-gradient(180deg,#3ee08f,#16b56a);--on-go:#03210f;
@@ -553,7 +562,7 @@ PAGE = r"""<!doctype html>
 --glass:blur(14px)}}
 :root[data-theme="dark"]{
 --bg:#0a1120;--card:rgba(24,36,64,.74);--edge:rgba(130,170,255,.15);--field:rgba(255,255,255,.05);
---text:var(--tg-theme-text-color,#eaf0ff);--hint:var(--tg-theme-hint-color,#8b9bbb);
+--text:#eaf0ff;--hint:#aebbd5;--accent:#6ca6ff;--on-accent:#07162e;--link:#82b5ff;--danger:#ff7c82;--idle:#8b9bbb;
 --ok:#34d399;--ok-soft:rgba(52,211,153,.14);--warn:#fbbf24;--warn-ink:#fbbf24;--warm:rgba(251,191,36,.13);
 --off:#3e4a62;--line:rgba(150,180,255,.12);--soft:rgba(150,170,210,.11);--blue-soft:rgba(80,140,255,.16);
 --yes:linear-gradient(180deg,#fcc23c,#f59e0b);--on-yes:#231600;--go:linear-gradient(180deg,#3ee08f,#16b56a);--on-go:#03210f;
@@ -563,6 +572,7 @@ PAGE = r"""<!doctype html>
 --hero-hot:linear-gradient(var(--hero-a,250deg),rgba(251,191,36,.20),rgba(24,36,64,.80) 70%);
 --hero-calm:linear-gradient(var(--hero-a,250deg),rgba(52,211,153,.18),rgba(24,36,64,.80) 70%);
 --glass:blur(14px)}
+:root{--native-bg:var(--bg);--viewer-surface:var(--card);--viewer-text:var(--text)}
 *{box-sizing:border-box;min-inline-size:0;-webkit-tap-highlight-color:transparent}
 html{background:var(--bg)}
 body{margin:0;min-block-size:100vh;color:var(--text);
@@ -1212,6 +1222,7 @@ border:1px solid var(--edge);box-shadow:var(--shadow-lg);-webkit-backdrop-filter
 (function(){
 "use strict";
 var S=__STRINGS__, LANG="__LANG__", wa=window.Telegram&&Telegram.WebApp, app=document.getElementById("app");
+var themeCtl=window.CockpitTheme.create({telegram:wa,native:__NATIVE__===true&&!!wa});themeCtl.init();themeCtl.subscribe(function(){if(typeof natTheme==="function")natTheme();});
 var FSI="⁨", PDI="⁩", NS="http://www.w3.org/2000/svg", RTL=document.documentElement.dir==="rtl";
 var rtf=new Intl.RelativeTimeFormat(LANG,{numeric:"auto"}), nf=new Intl.NumberFormat(LANG);
 var cf=new Intl.NumberFormat(LANG,{notation:"compact",maximumFractionDigits:0}), pr=new Intl.PluralRules(LANG);
@@ -1222,6 +1233,9 @@ var digest=null, digestOff=false, opened={}, seenAt=0, RECENT=3*3600, followups=
 var cardDone={}, cardBusy={}, shownAt={}, stackAt=0, handled=0, stagger=0, redrawSoon=null, reduce=false;
 var renderFingerprint=null,renderedView=null,renderDeferred=null,renderDeferredSince=0,lastInteraction=0,pendingRestore=null,renderNewContent=false,animateEntries=true,renderHasPainted=false;
 var forkArmed={}, forkBusy={};
+function themeSettingRow(){var row=el("div","row col theme-setting"),body=el("div","body"),seg=el("div","seg three");
+ body.appendChild(el("div","nm",S.themeTitle));body.appendChild(el("div","mt",S.themeHint));
+ [["auto",S.themeAuto],["light",S.themeLight],["dark",S.themeDark]].forEach(function(item){var button=el("button","opt",item[1]);button.type="button";function selected(value){var on=value===item[0];button.classList.toggle("on",on);button.setAttribute("aria-pressed",String(on));}selected(themeCtl.getPreference());themeCtl.subscribe(selected);button.addEventListener("click",function(){themeCtl.setPreference(item[0]);});seg.appendChild(button);});body.appendChild(seg);row.appendChild(body);return row;}
 function questionTarget(value){return typeof value==="string"&&/^q[0-9a-f]{16}$/.test(value)?value.slice(1):"";}
 function requestTarget(value){return typeof value==="string"&&/^r[0-9a-f]{16}$/.test(value)?value.slice(1):"";}
 function questionAvailable(d,id){return (d.decisions||[]).some(function(x){return x.id===id&&(!x.stale||x.stale==="old");})||
@@ -1253,7 +1267,7 @@ var KIND_ICON={progress:"layers",choice:"list",ask:"pencil",link:"link",numbers:
 function icon(name){var s=document.createElementNS(NS,"svg");s.setAttribute("viewBox","0 0 24 24");s.setAttribute("class","i");
  s.setAttribute("aria-hidden","true");var p=document.createElementNS(NS,"path");p.setAttribute("d",ICONS[name]);s.appendChild(p);return s;}
 function svgAdd(host,tag,attrs){var n=document.createElementNS(NS,tag);Object.keys(attrs).forEach(function(k){n.setAttribute(k,attrs[k]);});host.appendChild(n);return n;}
-function haptic(kind,v){try{var h=wa&&wa.HapticFeedback;if(!h)return;if(kind==="tap")h.impactOccurred("light");
+function haptic(kind,v){try{var h=wa&&wa.HapticFeedback;if(!h)return;haptic.at=Date.now();if(kind==="tap")h.impactOccurred("light");
  else if(kind==="sel")h.selectionChanged();else h.notificationOccurred(v);}catch(e){}}
 function ago(sec){if(sec==null)return "–";if(sec<45)return S.now;var m=Math.round(sec/60),h=Math.round(sec/3600);
  var t=m<60?rtf.format(-m,"minute"):h<36?rtf.format(-h,"hour"):rtf.format(-Math.round(sec/86400),"day");
@@ -1419,7 +1433,7 @@ function compactBlock(key,title,figures,body,cls,force,startOpen){
  panel.appendChild(inner);reveal.appendChild(panel);box.appendChild(button);box.appendChild(reveal);box.body=inner;
  function draw(){box.className="compact"+(cls?" "+cls:"")+(open?" open":"");button.setAttribute("aria-expanded",String(open));
   button.title=open?S.compactCollapse:S.compactExpand;panel.inert=!open;panel.setAttribute("aria-hidden",String(!open));}
- var setOpen=bindBackLayer("compact:"+key,box,open,function(on){open=on;draw();try{localStorage.setItem(storageKey,on?"1":"0");}catch(e){}});
+ var setOpen=bindBackLayer("compact:"+key,box,open,function(on){open=on;draw();try{localStorage.setItem(storageKey,on?"1":"0");}catch(e){}if(typeof natPref==="function")natPref("block",key,on);});
  button.addEventListener("click",function(){setOpen(!open);haptic("sel");adoptBackLayers();});
  draw();return box;}
 function fold(key,title,n,cls){return compactBlock(key,title,n!=null?nf.format(n):null,null,cls);}
@@ -1473,7 +1487,7 @@ function decision(d,showTopic){
  source("s"+d.id,d,c);
  // A Claude Code permission request: its exact text, as is (textContent, never translated, left to right).
  if(typeof d.request==="string"&&d.request){var rq=el("pre","pq-request",d.request);rq.dir="ltr";c.appendChild(rq);}
- var ta=el("textarea");ta.maxLength=300;ta.rows=2;ta.placeholder=S.notePh;ta.value=notes[d.id]||"";var fitNote=tune(ta,true);
+ var ta=el("textarea");ta.maxLength=d.rich_decision===true?1000:300;ta.rows=2;ta.placeholder=S.notePh;ta.value=notes[d.id]||"";var fitNote=tune(ta,true);
  ta.addEventListener("input",function(){notes[d.id]=ta.value;syncClose();});
  var nt=el("button","note-t");nt.type="button";nt.appendChild(icon("pencil"));nt.appendChild(el("span",null,S.addNote));
  if(noteOpen[d.id]||ta.value){nt.hidden=true;}else{ta.hidden=true;}
@@ -2817,7 +2831,7 @@ function modelCard(m){
    .then(function(){modelBusy=false;var nc=modelCard(m);c.replaceWith(nc);});});
   g.appendChild(b);});
  c.appendChild(g);return c;}
-var SWITCHES=["live_activity_cockpit","day_briefing","day_nudges","day_auto_plan","auto_cards","auto_account_switch","quota_auto_continue","emergency_credit","session_auto_revive","progress","progress_details","compact_actions","auto_topic_names","state_emoji","away","voice_confirm","voice_copilot","delivery_end","status_repost","agent_notices","agents_topic","general_offer","brief_home","app_wide_cockpit","app_summary_rows"];
+var SWITCHES=["live_activity_cockpit","day_briefing","day_nudges","day_auto_plan","auto_cards","auto_account_switch","quota_auto_continue","emergency_credit","session_auto_revive","progress","progress_details","compact_actions","auto_topic_names","state_emoji","away","voice_confirm","voice_driving","voice_copilot","delivery_end","status_repost","agent_notices","agents_topic","general_offer","brief_home","app_wide_cockpit","app_summary_rows"];
 var COMPACT=[0,200,250,300,400,600];
 function setSetting(name,value,d){haptic("tap");
  post("/api/setting",{name:name,value:value}).then(function(r){if(!r.ok)throw r.status;return r.json();})
@@ -2852,6 +2866,12 @@ function settingsBox(d){
   ACTIVITY.forEach(function(v){var on=st.activity===v;var o=el("button","opt"+(on?" on":""),S["act_"+v]);o.type="button";
    o.addEventListener("click",function(){if(on)return;o.disabled=true;setSetting("activity",v,d);});ag.appendChild(o);});
   ab.appendChild(ag);ar.appendChild(ab);c.appendChild(ar);}
+ if("voice_confirm_driving" in st){var cr=el("div","row col"),cb=el("div","body");cb.appendChild(el("div","nm",S.set_voice_confirm_driving));
+  cb.appendChild(el("div","mt",S.hint_voice_confirm_driving));var cg=el("div","seg");
+  ["preview","send"].forEach(function(v){var on=st.voice_confirm_driving===v;
+   var o=el("button","opt"+(on?" on":""),S["carvoice_"+v]);o.type="button";o.setAttribute("aria-pressed",on?"true":"false");
+   o.addEventListener("click",function(){if(on)return;o.disabled=true;setSetting("voice_confirm_driving",v,d);});cg.appendChild(o);});
+  cb.appendChild(cg);cr.appendChild(cb);c.appendChild(cr);}
  if("voice_digest" in st){var dr=el("div","row col"),db=el("div","body");db.appendChild(el("div","nm",S.set_voice_digest));
   db.appendChild(el("div","mt",S.hint_voice_digest));var dg=el("div","seg");
   ["off","important","hourly","every_3_hours"].forEach(function(v){var on=st.voice_digest===v;
@@ -2871,6 +2891,7 @@ function settingsBox(d){
    ctl.addEventListener("click",function(){ctl.disabled=true;setSetting("cold_compact",v,d);});cg.appendChild(ctl);});cb.appendChild(cg);cr.appendChild(cb);c.appendChild(cr);}
  return c;}
 function renderSettings(d){
+ app.appendChild(enter(themeSettingRow(),"set-theme"));
  if(d.default_model)app.appendChild(enter(modelCard(d.default_model),"set-m"));
  if(d.settings){sec(S.bridge);app.appendChild(enter(settingsBox(d),"set-b"));}
  var lr=listenRevokeRow(d);if(lr)app.appendChild(enter(lr,"set-l"));
@@ -3030,7 +3051,7 @@ function switchTo(v,remember){if(backPending&&remember!==false&&!backReplay)retu
    // Retire the old tab's layers before rendering/adopting the destination's layers.
    if(backIndex>at+1){backSwitch=v;travelBack(at+1);return;}
    try{if(backHistory)history.replaceState(backState(backIndex),"");}catch(e){backHistory=false;}}}
- moreOpen=false;view=v;try{sessionStorage.setItem(TABKEY,v);}catch(e){}haptic("sel");render(last,true);window.scrollTo(0,0);}
+ moreOpen=false;view=v;try{sessionStorage.setItem(TABKEY,v);}catch(e){}if(typeof natPref==="function")natPref("tab","",v);haptic("sel");render(last,true);window.scrollTo(0,0);}
 function setMore(on){var sh=document.getElementById("more-tabs");
  if(!sh)return;var change=bindBackLayer("more",sh,!sh.hidden,function(value){var sheet=document.getElementById("more-tabs"),button=document.querySelector(".tab-more");
   moreOpen=value;if(sheet)sheet.hidden=!value;if(button)button.setAttribute("aria-expanded",String(value));});change(on);}
@@ -3215,7 +3236,7 @@ function render(d,force){
 }
 if(window.__CTB_TEST__===true)window.__ctbTest=Object.freeze({fingerprint:fingerprint,render:render});
 function fail(m,again){app.textContent="";var c=empty("chat",m,"",false);app.appendChild(c);
- if(again){var b=el("button","btn sm pri",S.retry);b.type="button";b.style.marginBlockStart="12px";
+ if(again){var b=el("button","btn sm pri",S.retry);b.type="button";b.setAttribute("data-native-main","");b.style.marginBlockStart="12px";
   b.addEventListener("click",function(){haptic("tap");load();});app.appendChild(b);}}
 function load(){
  if(!wa||!wa.initData){fail(S.open);status("");return;}
@@ -3247,11 +3268,8 @@ function renderFailed(err){fail(S.renderFailed,true);status("");
  if(renderReported[k])return;renderReported[k]=true;
  try{post("/api/client-error",{name:/^[A-Za-z]/.test(name)?name:"Error",at:at}).catch(function(){});}catch(e){}}
 // --- Telegram look, native buttons, refresh button and pull to refresh ----------------------------------------
-var BG={light:"#eef3fb",dark:"#0a1120"};
-function theme(){var sch="light";
- try{if(wa&&wa.colorScheme){sch=wa.colorScheme;document.documentElement.setAttribute("data-theme",sch);}
-  else if(window.matchMedia("(prefers-color-scheme: dark)").matches)sch="dark";}catch(e){}
- if(!wa)return;var col=BG[sch]||BG.light;
+function theme(){var sch=themeCtl.apply();
+ if(!wa)return;var col="";try{col=getComputedStyle(document.documentElement).getPropertyValue("--native-bg").trim();}catch(e){}if(!col)return;
  try{if(ver("6.9"))wa.setHeaderColor(col);else wa.setHeaderColor("secondary_bg_color");}catch(e){}
  try{if(ver("6.1"))wa.setBackgroundColor(col);}catch(e){}
  try{if(ver("7.10")&&wa.setBottomBarColor)wa.setBottomBarColor(col);}catch(e){}}
@@ -3285,7 +3303,7 @@ if(wa&&wa.onEvent){
  function safeX(){try{var a=wa.contentSafeAreaInset||{},b=wa.safeAreaInset||{};var x=Math.max(a["le"+"ft"]||0,a["ri"+"ght"]||0,b["le"+"ft"]||0,b["ri"+"ght"]||0);document.documentElement.style.setProperty("--hg-safe-x",x+"px");}catch(e){}}
  try{safeX();if(ver("8.0")){wa.onEvent("safeAreaChanged",pushLayout);wa.onEvent("contentSafeAreaChanged",pushLayout);wa.onEvent("safeAreaChanged",safeX);wa.onEvent("contentSafeAreaChanged",safeX);}}catch(e){}
 }
-load();schedule();
+natStart();natPrefsLoad(function(){load();schedule();});
 })();
 </script>
 </body>
@@ -3317,7 +3335,8 @@ PAGE = PAGE.replace("</style>", (_V2_ROOT / "cockpit_v2.css").read_text(encoding
                     + (_V2_ROOT / "cockpit_v2_family.css").read_text(encoding="utf-8") + "\n"
                     + (_V2_ROOT / "cockpit_v2_workmap.css").read_text(encoding="utf-8") + "\n"
                     + (_V2_ROOT / "cockpit_v2_art.css").read_text(encoding="utf-8") + "\n"
-                    + (_V2_ROOT / "cockpit_voice_copilot.css").read_text(encoding="utf-8") + "\n</style>", 1)
+                    + (_V2_ROOT / "cockpit_voice_copilot.css").read_text(encoding="utf-8") + "\n"
+                    + (_V2_ROOT / "cockpit_native.css").read_text(encoding="utf-8") + "\n</style>", 1)
 _V2_JS = (_V2_ROOT / "cockpit_v2.js").read_text(encoding="utf-8").replace(
     "__V2_STRINGS__", json.dumps(V2_STRINGS, ensure_ascii=False))
 # The v2 copy table is a top-level var: it goes with the page's other vars, never between two functions, so a function
@@ -3326,7 +3345,11 @@ _V2_VAR = next(line for line in _V2_JS.split("\n") if line.startswith("var V2_CO
 _PF_VAR = 'var pf=new Intl.NumberFormat(LANG,{style:"percent",maximumFractionDigits:0});\n'
 assert _PF_VAR in PAGE
 _APP_SWITCHES_VAR = "var APP_SWITCHES=" + json.dumps(cockpit_v2.APP_SWITCHES, ensure_ascii=False, separators=(",", ":")) + ";"
-PAGE = PAGE.replace(_PF_VAR, _PF_VAR + _V2_VAR + "\n" + _APP_SWITCHES_VAR + "\n", 1)
+# cockpit_native.js: its first line is the native state var (with the page's vars); its functions join the others.
+_NATIVE_JS = (_V2_ROOT / "cockpit_native.js").read_text(encoding="utf-8")
+_NATIVE_VAR, _NATIVE_FUNCS = _NATIVE_JS.split("\n", 1)
+assert _NATIVE_VAR.startswith("var NATIVE=__NATIVE__")
+PAGE = PAGE.replace(_PF_VAR, _PF_VAR + _V2_VAR + "\n" + _APP_SWITCHES_VAR + "\n" + _NATIVE_VAR + "\n", 1)
 PAGE = PAGE.replace("\nfunction render(d,force){", "\n" + _V2_JS.replace(_V2_VAR + "\n", "", 1) + "\n"
                     + (_V2_ROOT / "cockpit_v2_screens.js").read_text(encoding="utf-8") + "\n"
                     + (_V2_ROOT / "cockpit_app_request.js").read_text(encoding="utf-8") + "\n"
@@ -3338,16 +3361,20 @@ PAGE = PAGE.replace("\nfunction render(d,force){", "\n" + _V2_JS.replace(_V2_VAR
                     + (_V2_ROOT / "cockpit_v2_workmap.js").read_text(encoding="utf-8") + "\n"
                     + (_V2_ROOT / "cockpit_v2_art.js").read_text(encoding="utf-8") + "\n"
                     + (_V2_ROOT / "cockpit_mac_tools.js").read_text(encoding="utf-8") + "\n"
-                    + (_V2_ROOT / "cockpit_voice_copilot.js").read_text(encoding="utf-8") + "\nfunction render(d,force){", 1)
+                    + (_V2_ROOT / "cockpit_voice_copilot.js").read_text(encoding="utf-8") + "\n"
+                    + _NATIVE_FUNCS + "\nfunction render(d,force){", 1)
+
+PAGE = PAGE.replace("(function(){\n\"use strict\";", (_V2_ROOT / "cockpit_theme.js").read_text(encoding="utf-8") + "\n(function(){\n\"use strict\";", 1)
 
 _ICONS_AT = PAGE.index("var ICONS={")
 ICON_NAMES = frozenset(re.findall(r'([a-z]+):"M', PAGE[_ICONS_AT:PAGE.index("};", _ICONS_AT)]))  # what an app may use
 
 
-def render_page(lang: str, nonce: str) -> bytes:
+def render_page(lang: str, nonce: str, native: bool = False) -> bytes:
+    """The Cockpit page. `native` (the cockpit_native switch) turns on Telegram's own controls; anything but True is off."""
     s = STRINGS.get(lang) or STRINGS["en"]
     code = "he" if lang == "he" else "en"
-    return (PAGE.replace("__LANG__", code).replace("__DIR__", "rtl" if code == "he" else "ltr")
+    return (PAGE.replace("__NATIVE__", "true" if native is True else "false").replace("__LANG__", code).replace("__DIR__", "rtl" if code == "he" else "ltr")
             .replace("__TITLE__", s["title"]).replace("__NONCE__", nonce)
             .replace("__STRINGS__", json.dumps(s, ensure_ascii=False))).encode("utf-8")
 

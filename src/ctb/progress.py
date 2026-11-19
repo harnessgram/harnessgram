@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -199,6 +200,8 @@ def translate_interim(cfg: Config, bot, chat, thread, pieces: list, translate_fn
 
 JOB_CLAIM = 180.0  # seconds a claimed interim-text job belongs to the run that claimed it
 MAX_HEADS = 40  # headings kept waiting at most (a long turn re-asks the rest on its next card edit)
+PLAIN_JOB_PREFIX = "plain-step\0"
+PLAIN_CACHE_FILE = "plain-step-cache.json"
 
 
 def _jobs_paths(session: str, root: Optional[Path] = None) -> tuple:
@@ -295,7 +298,10 @@ def run_jobs(cfg: Config, session: str, root: Optional[Path] = None, bot=None, t
     translated = 0
     for words in heads or []:
         try:
-            if L.base(cfg.target_language) == "he":
+            if words.startswith(PLAIN_JOB_PREFIX):
+                spec = json.loads(words[len(PLAIN_JOB_PREFIX):])
+                he = _plain_model_text(spec, cfg)
+            elif L.base(cfg.target_language) == "he":
                 he = heading_he(words, cfg)
             else:
                 from .translate import translate_text
@@ -480,7 +486,7 @@ def agent_name(data: dict) -> str:
     return " · ".join(str(x) for x in (meta.get("description"), str(meta.get("model") or "").title()) if x)[:50]
 
 
-def detail(data: dict, links: Optional[list] = None) -> str:
+def detail(data: dict, links: Optional[list] = None, include_same: bool = False) -> str:
     """The action's command, path, pattern, query or url for the progress card, secrets hidden by creds.redact plus long tokens and bearer values. '' when it
     adds nothing to the description."""
     _, text, inp = _parts(data)
@@ -490,11 +496,132 @@ def detail(data: dict, links: Optional[list] = None) -> str:
         return ""
     same = out.strip() == text
     out = hide_signin(out, links)
-    if same:
+    if same and not include_same:
         return ""
     from .creds import redact_detail
     out = " ".join(redact_detail(out).split())
     return out[:220] + ("…" if len(out) > 220 else "")
+
+
+_HEBREW = re.compile(r"[\u0590-\u05ff]")
+_LATIN = re.compile(r"[A-Za-z]")
+_QUERY_URL = re.compile(r"https?://[^\s<>]+\?[^\s<>]+", re.I)
+_ENV_ASSIGN = re.compile(r"(?<![\w])([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)")
+
+
+def _plain_source(data: dict) -> dict:
+    """Small stable, redacted description input. This is all a background model may receive."""
+    from .creds import redact_detail
+    name = str(data.get("tool_name") or "Tool")[:80]
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    raw = json.dumps(inp, ensure_ascii=False, sort_keys=True, default=str)
+    raw = _QUERY_URL.sub("[redacted-url]", raw)
+    raw = _ENV_ASSIGN.sub(lambda m: m.group(1) + "=[redacted]", raw)
+    return {"tool": name, "input": redact_detail(raw)[:1200]}
+
+
+def _plain_key(spec: dict) -> str:
+    canonical = json.dumps(spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _command_word(spec: dict) -> str:
+    try:
+        inp = json.loads(spec.get("input") or "{}")
+    except (TypeError, ValueError):
+        inp = {}
+    command = str(inp.get("command") or "").strip()
+    try:
+        return os.path.basename(shlex.split(command)[0]).lower() if command else ""
+    except ValueError:
+        return command.split(maxsplit=1)[0].lower() if command else ""
+
+
+def plain_step_fallback(spec: dict) -> str:
+    """Instant, offline Hebrew explanation for common tools and commands."""
+    tool, command = str(spec.get("tool") or ""), _command_word(spec)
+    commands = {
+        "git": "בודק או מעדכן את היסטוריית השינויים", "gh": "בודק מידע על המאגר המרוחק",
+        "pytest": "מריץ את בדיקות התוכנה", "uv": "מריץ כלי פיתוח של פייתון",
+        "npm": "מריץ כלי פיתוח של האתר", "ls": "מציג את תוכן התיקייה",
+        "cat": "קורא תוכן של קובץ", "grep": "מחפש טקסט בקבצים", "rg": "מחפש טקסט בקבצים",
+        "sed": "מציג או משנה טקסט", "heavy-run": "מריץ פעולה ממושכת",
+        "ctb": "מפעיל פעולה של הגשר",
+    }
+    if command in commands:
+        return commands[command]
+    tools = {
+        "Read": "קורא קובץ", "Edit": "משנה קובץ", "Write": "כותב קובץ",
+        "Bash": "מריץ פקודה במחשב", "Agent": "מפעיל עוזר נוסף",
+        "WebSearch": "מחפש מידע באינטרנט", "WebFetch": "קורא מידע מהאינטרנט",
+        "Grep": "מחפש טקסט בקבצים", "Glob": "מחפש קבצים", "TodoWrite": "מעדכן את תוכנית העבודה",
+    }
+    if tool.startswith("mcp__"):
+        return "מפעיל כלי מחובר"
+    return tools.get(tool, "מבצע שלב טכני")
+
+
+def _plain_cache() -> dict:
+    return _heading_read(state_dir() / PLAIN_CACHE_FILE)
+
+
+def _plain_cached(spec: dict, cfg: Optional[Config] = None) -> Optional[str]:
+    if cfg is not None and not getattr(cfg, "translate_cache", True):
+        return None
+    value = _plain_cache().get(_plain_key(spec))
+    return value if isinstance(value, str) and value else None
+
+
+def _plain_acceptable(value: str) -> bool:
+    """One short Hebrew line; English is allowed only inside a bidi isolate, up to three words."""
+    value = value.strip()
+    if not value or "\n" in value or len(value) > 100 or not _HEBREW.search(value):
+        return False
+    outside = re.sub("\u2068[^\u2069]*\u2069", "", value)
+    if _LATIN.search(outside):
+        return False
+    return all(len(re.findall(r"[A-Za-z]+", part)) <= 3
+               for part in re.findall("\u2068([^\u2069]*)\u2069", value))
+
+
+def _plain_model_available(cfg: Config) -> bool:
+    from .translate import external_allowed
+    return bool(cfg.translate and L.base(cfg.target_language) == "he" and
+                getattr(cfg, "engines", None) and cfg.engines[0] == "gemini" and external_allowed(cfg))
+
+
+def _plain_model_text(spec: dict, cfg: Config) -> str:
+    """Routine-tier model improvement, accepted and cached only when it obeys the display contract."""
+    known = _plain_cached(spec, cfg)
+    if known:
+        return known
+    if not _plain_model_available(cfg):
+        return ""
+    from . import translate
+    prompt = ("Describe this coding-tool step in one short, simple Hebrew line for a nontechnical owner. "
+              "No jargon. Do not copy commands, paths, errors, secrets, or URLs. Use Hebrew only. If a product "
+              "name is essential, use at most three English words inside U+2068 and U+2069. Output only the line.\n" +
+              json.dumps(spec, ensure_ascii=False, sort_keys=True))
+    value = translate.ask(prompt, cfg).strip()
+    if not _plain_acceptable(value):
+        return ""
+    if getattr(cfg, "translate_cache", True):
+        _heading_store(state_dir() / PLAIN_CACHE_FILE, _plain_key(spec), value)
+    return value
+
+
+def plain_step_text(row: dict, cfg: Config, pending: Optional[list] = None) -> str:
+    spec = row.get("plain")
+    if not getattr(cfg, "plain_step_text", True) or not isinstance(spec, dict):
+        return ""
+    known = _plain_cached(spec, cfg)
+    if known:
+        return known
+    if pending is not None and _plain_model_available(cfg):
+        job = PLAIN_JOB_PREFIX + json.dumps(spec, ensure_ascii=False, sort_keys=True)
+        if job not in pending:
+            pending.append(job)
+    return plain_step_fallback(spec)
 
 
 BARE_COMMANDS = {"cd", "git", "ls", "cat", "grep", "sed", "python3", "uv", "gh", "find", "npm", "make"}
@@ -673,7 +800,7 @@ def card(row: dict, last: bool) -> str:
     head = tool_tagged(head, row.get("tool"))
     out = f"{mark} <b>{html.escape(head, quote=False)}</b>"
     if d:
-        out += f"\n<code>{html.escape(str(d), quote=False)}</code>"
+        out += f"\n<blockquote expandable>{html.escape(str(d), quote=False)}</blockquote>"
     return out
 
 
@@ -691,8 +818,10 @@ def append_progress(session: str, data: dict, cfg: Config, root: Optional[Path] 
     level = activity_level()
     row = {"kind": "action", "t": time.time(), "l": (label(data, getattr(cfg, "delegates", None)) if cfg.progress_details else str(data.get("tool_name") or "Tool")),
            "tool": data.get("tool_name") or ""}
+    if cfg.progress_details and getattr(cfg, "plain_step_text", True):
+        row["plain"] = _plain_source(data)
     links: list = []  # Claude sign-in links met in this call: sent whole, as messages of their own
-    d = detail(data, links) if cfg.progress_details else None
+    d = detail(data, links, include_same=getattr(cfg, "plain_step_text", True)) if cfg.progress_details else None
     if d:
         row["d"] = d
     from .creds import redact_detail
@@ -898,7 +1027,11 @@ def card_text(entry, cfg: Config, pending: Optional[list] = None, compact: bool 
     row = entry.get("row") if isinstance(entry, dict) else None
     if not isinstance(row, dict):
         return ""
-    rendered = translated_heading(row, cfg, cached_only=True, pending=pending)
+    plain = plain_step_text(row, cfg, pending)
+    if plain:
+        rendered = dict(row, l=L.RLM + plain, tool="")
+    else:
+        rendered = translated_heading(row, cfg, cached_only=True, pending=pending)
     if compact:
         rendered = {k: v for k, v in rendered.items() if k not in ("d", "output")}
         rendered["tool"] = ""
@@ -980,32 +1113,69 @@ def action_markup(ui_lang: str, expanded: bool) -> dict:
     ]}
 
 
-def toggle_card_details(cfg: Config, bot, session: str, message_id: int, expanded: bool) -> bool:
-    """Expand a retained action card; buttons for unknown messages do nothing."""
-    pdir = private_dir(state_dir() / "progress")
-    state_path = pdir / f"{safe_name(session)}.msg"
-    lock_path = pdir / f"{safe_name(session)}.lock"
-    with open(lock_path, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+CARD_LOCK_WAIT = 4.0  # a tap waits this long for a card being sent right now, then asks to try again
+# Telegram takes 4096 characters after the HTML is parsed; HTML is never shorter than what it shows, and the
+# emoji count double there, so the rendered HTML stays well below it.
+CARD_TEXT_LIMIT = 3800
+
+
+class CardBusy(Exception):
+    """The card is being sent or edited right now: the tap can be tried again in a moment."""
+
+
+def _card_state(pdir: Path, session: str, message_id: int, chat: Optional[int], thread: Optional[int]):
+    """(path, state) of the card `message_id`: the session's live card, its archive, or the archive of an
+    earlier session in the same chat and topic (a scheduled task's earlier run, a session that /clear replaced).
+    None when the bridge keeps no such card."""
+    live = pdir / f"{safe_name(session)}.msg"
+    candidates = [live, pdir / f"{safe_name(session)}.card-{message_id}"]
+    if chat is not None:
+        candidates += sorted(path for path in pdir.glob(f"*.card-{message_id}") if path not in candidates)
+    for path in candidates:
         try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            state = None
-        if not state or state.get("id") != message_id or not state.get("cards"):
-            archive = pdir / f"{safe_name(session)}.card-{message_id}"
-            state_path = archive
+            continue
+        if not isinstance(state, dict) or state.get("id") != message_id or not state.get("cards"):
+            continue
+        if path.name.startswith(f"{safe_name(session)}."):
+            return path, state
+        # another session's card answers only in the very chat and topic it was sent to
+        if chat is not None and state.get("chat") == chat and state.get("thread") == thread:
+            return path, state
+    return None
+
+
+def toggle_card_details(cfg: Config, bot, session: str, message_id: int, expanded: bool,
+                        chat: Optional[int] = None, thread: Optional[int] = None,
+                        wait: Optional[float] = None) -> bool:
+    """Show or hide the details of a kept action card in place. False when the bridge keeps no such card or
+    Telegram refuses the edit (the tap then says the button is outdated); CardBusy when the card's sender
+    holds it longer than `wait` seconds (the tap must never hold the whole inbox)."""
+    if not session or type(message_id) is not int:
+        return False
+    pdir = private_dir(state_dir() / "progress")
+    lock_path = pdir / f"{safe_name(session)}.lock"
+    deadline = time.monotonic() + (CARD_LOCK_WAIT if wait is None else wait)
+    with open(lock_path, "a") as lock:
+        while True:
             try:
-                state = json.loads(archive.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return False
-        if state.get("id") != message_id or not state.get("cards"):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise CardBusy() from None
+                time.sleep(0.05)
+        found = _card_state(pdir, session, message_id, chat, thread)
+        if found is None:
             return False
+        state_path, state = found
         state["expanded"] = bool(expanded)
         ui_lang = getattr(cfg, "ui_language", "en")
-        text = render_cards(ui_lang, card_texts(state["cards"], cfg, compact=not expanded), time.time())
+        text = render_card_state(ui_lang, state, cfg, compact=True, now=time.time())
         try:
-            bot.call("editMessageText", {"chat_id": chat_of(cfg, session), "message_id": message_id,
-                                          "text": text, "parse_mode": "HTML",
+            bot.call("editMessageText", {"chat_id": state.get("chat") or chat_of(cfg, session),
+                                          "message_id": message_id, "text": text, "parse_mode": "HTML",
                                           "reply_markup": action_markup(ui_lang, expanded)})
         except TelegramError as exc:
             if "not modified" not in str(exc).lower():
@@ -1014,19 +1184,39 @@ def toggle_card_details(cfg: Config, bot, session: str, message_id: int, expande
     return True
 
 
-def render_cards(ui_lang: str, cards, now: float) -> str:
+def render_card_state(ui_lang: str, state: dict, cfg: Config, compact: bool, now: float,
+                      pending: Optional[list] = None) -> str:
+    """A card as shown. Compact, its steps are one heading each; expanded (the Show details button), EVERY
+    step shows its command and output, the earlier ones too, so the tap visibly opens the folded list. An
+    expanded card that would not fit one message folds its oldest steps back, never fails the edit."""
+    cards = state.get("cards") or []
+    if not compact or not state.get("expanded"):
+        return render_cards(ui_lang, card_texts(cards, cfg, pending, compact=compact), now)
+    full = card_texts(cards, cfg, pending, compact=False)
+    keep = len(full)
+    text = render_cards(ui_lang, full, now, keep=keep)
+    while keep > 0 and len(text) > CARD_TEXT_LIMIT:
+        keep -= 1
+        text = render_cards(ui_lang, full, now, keep=keep)
+    return text
+
+
+def render_cards(ui_lang: str, cards, now: float, keep: Optional[int] = None) -> str:
     """The live activity message: the newest steps in full, every older step folded into one collapsed
-    quote of one-line entries, so a long turn stays one short message instead of a screen dump."""
+    quote of one-line entries, so a long turn stays one short message instead of a screen dump.
+    `keep`: how many of the newest steps are shown in full (default: the activity level's)."""
     title = t("progress_action_updated", lang=ui_lang)
     prefix = L.RLM if ui_lang == "he" else ""
     cards = list(cards)
-    keep = KEEP_FULL_VERBOSE if activity_level() == "full" else KEEP_FULL
-    older, recent = (cards[:-keep] if len(cards) > keep else []), cards[-keep:]
+    if keep is None:
+        keep = KEEP_FULL_VERBOSE if activity_level() == "full" else KEEP_FULL
+    split = max(len(cards) - max(keep, 0), 0)
+    older, recent = cards[:split], cards[split:]
     body = "\n\n".join(recent)
     if older:
         lines = "\n".join(compact_card(c) for c in older)
         label = t("progress_earlier_steps", lang=ui_lang, n=len(older))
-        body = f"{label}\n<blockquote expandable>{lines}</blockquote>\n\n" + body
+        body = f"{label}\n<blockquote expandable>{lines}</blockquote>" + ("\n\n" + body if body else "")
     return prefix + f"⏳ <b>{title}</b> {time.strftime('%H:%M:%S', time.localtime(now))}\n━━━━━━━━━━━━\n" + body
 
 
@@ -1075,9 +1265,11 @@ def _send_ordered(cfg, session, rows, state, state_path, thread, bot, now_fn, fa
     def archive_card():
         _archive_card(state, state_path.parent, session, compact)
 
-    def render(cards):
-        expanded = bool(state.get("expanded"))
-        return render_cards(ui_lang, card_texts(cards, cfg, heads, compact=compact and not expanded), now_fn())
+    def render(cards, shown: bool = True):
+        """The card as shown (`shown`), or as it is measured for splitting: compact, whatever its expansion,
+        so where a long turn starts a new card never depends on a tap."""
+        view = dict(state, cards=cards) if shown else {"cards": cards}
+        return render_card_state(ui_lang, view, cfg, compact=compact, now=now_fn(), pending=heads)
 
     def flush(force: bool) -> bool:
         """Push the card in `state` to Telegram. True when nothing is left unshown."""
@@ -1112,6 +1304,7 @@ def _send_ordered(cfg, session, rows, state, state_path, thread, bot, now_fn, fa
             else:
                 params.update(message_thread_id=thread, disable_notification=True)
                 state["id"] = flood.optional_call(bot, "sendMessage", params, budget=not force).get("message_id")
+                state["chat"], state["thread"] = chat, thread  # where its Show details button may be tapped
                 changed = True
         except TelegramError:
             return False
@@ -1191,9 +1384,9 @@ def _send_ordered(cfg, session, rows, state, state_path, thread, bot, now_fn, fa
                 state.pop("text_ids", None)
                 state.pop("tr", None)
             else:
-                item = {"row": {k: row[k] for k in ("l", "d", "tool", "output", "error") if k in row}}
+                item = {"row": {k: row[k] for k in ("l", "d", "tool", "output", "error", "plain") if k in row}}
                 cards = state.get("cards", []) + [item]
-                if len(render(cards)) > 3500 and state.get("cards"):
+                if len(render(cards, shown=False)) > 3500 and state.get("cards"):
                     if not flush(force=True):
                         break  # the full card goes out before a new one starts
                     archive_card()
@@ -1228,9 +1421,8 @@ def _final_flush(cfg: Config, session: str, state: dict, bot=None) -> None:
         bot = bot or Bot.from_config(cfg)
         compact = compact_actions_on(cfg, session)
         expanded = bool(state.get("expanded"))
-        params = {"chat_id": chat_of(cfg, session), "text": render_cards(getattr(cfg, "ui_language", "en"),
-                                                                          card_texts(state["cards"], cfg, compact=compact and not expanded), time.time()),
-                  "parse_mode": "HTML"}
+        params = {"chat_id": chat_of(cfg, session), "parse_mode": "HTML",
+                  "text": render_card_state(getattr(cfg, "ui_language", "en"), state, cfg, compact=compact, now=time.time())}
         if compact:
             params["reply_markup"] = action_markup(getattr(cfg, "ui_language", "en"), expanded)
         if state.get("id"):
@@ -1244,6 +1436,7 @@ def _final_flush(cfg: Config, session: str, state: dict, bot=None) -> None:
             sent = flood.optional_call(bot, "sendMessage", params, budget=False)
             if isinstance(sent, dict) and sent.get("message_id"):
                 state["id"] = sent["message_id"]
+                state["chat"], state["thread"] = found.chat, found.thread
     except Exception:
         pass  # a card that cannot be shown now is dropped with the step
 

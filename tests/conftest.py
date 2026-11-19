@@ -310,6 +310,9 @@ def isolated(tmp_path, monkeypatch):
     # no late spinner-closing timers leaking from one test into the next; its own tests turn it on
     import ctb.inbox
     monkeypatch.setattr(ctb.inbox, "TAP_GRACE", None)
+    # a refused voice preview is retried off the poll loop: in tests the retries run at once, in the test's own thread
+    monkeypatch.setattr(ctb.inbox, "_voice_later", lambda fn, *args: fn(*args))
+    monkeypatch.setattr(ctb.inbox, "_voice_sleep", lambda seconds: None)
     # Claude accounts: never the real profiles, home folder or login of the machine running the tests.
     monkeypatch.setenv("CTB_PROFILES_DIR", str(tmp_path / "profiles"))
     monkeypatch.setenv("CTB_CLAUDE_HOME", str(tmp_path / "claude-home"))

@@ -320,3 +320,55 @@ Every block currently has `visibility: private_work`. This is the seam for wave
 recipient or new Google permission. Partner access and family-only views are
 wave 2; topic-specific shows, closing summaries, five-minute warnings and lock
 screen activities are later waves.
+
+## Native Telegram feel (`cockpit_native`)
+
+`"cockpit_native": true` in the config turns on Telegram's own Mini App controls in the Cockpit in place of the
+page's home-made equivalents. It is off by default so it can be previewed first; only the JSON value `true` turns it
+on (anything else reads as off). Restart `harnessgram panel` after changing it: the page is built with the switch.
+
+Every native call the switch adds goes through one wrapper (`natCall` in `src/ctb/cockpit_native.js`). With the
+switch off, or in a plain browser without `Telegram.WebApp`, the wrapper does nothing and each screen keeps its own
+control, so the page behaves exactly as before. Haptics keep going through the page's one `haptic()` helper.
+No server-side check moves to the client. Destructive and sensitive actions retain their existing in-page guarded
+flows, and the sensitive-button Face ID flow (`sensitive_buttons.py`) is untouched.
+
+### Audit: Telegram Mini App features and the Cockpit
+
+Source: the official Telegram Mini Apps reference (core.telegram.org/bots/webapps). "Before" is the Cockpit without
+the switch; "With the switch" is what `cockpit_native` adds.
+
+| Feature (min. version) | Before | With the switch |
+| --- | --- | --- |
+| `ready`, `expand` | used | unchanged |
+| `colorScheme`, `themeChanged` | used: sets light/dark, fixed brand page colours | unchanged, plus the theme mapping below |
+| `themeParams` / `--tg-theme-*` (6.1+) | a few tokens fall back to `--tg-theme-*` CSS variables; page surfaces are fixed brand colours | page, card, field, line, text and hint tokens (classic and v2) follow `themeParams`; brand art, accents and answer colours stay ours; re-applied on `themeChanged` |
+| `setHeaderColor`, `setBackgroundColor`, `setBottomBarColor` (6.1/7.10) | fixed brand colours | Telegram's `secondary_bg_color` and `bottom_bar_bg_color` |
+| `HapticFeedback` (6.1) | one `haptic()` helper, called on many screens | same helper; a catch-all adds `selectionChanged` for tabs, switches, pickers and disclosures and `impactOccurred` for other taps a screen did not answer itself, never twice for one tap; action results keep `notificationOccurred` success/warning/error |
+| `BackButton` (6.1) | shown for every sub-screen, sheet and tab step through the page's back stack | unchanged; the page's own back arrows (project page, knowledge, add-ons) and the v2 exit button are hidden while Telegram's BackButton exists |
+| `SettingsButton` (7.0) | opens Settings | unchanged |
+| `MainButton` / `BottomButton` (7.10) | none: in-page primary buttons | a screen's primary action (`data-native-main`) moves to the bottom button with its label, disabled state and progress spinner; used by the schedule add sheet, the family editor, the app-request sheet, knowledge suggestions and the load-failed retry buttons |
+| `SecondaryButton` (7.10) | none | a companion action (`data-native-second`): the family editor's Cancel |
+| `showPopup` / `showConfirm` (6.2) | home-made second tap ("Confirm?" within four seconds) | not used; destructive and sensitive actions keep the existing guarded flow |
+| `showAlert` (6.2) | in-page toasts | unchanged (toasts do not block) |
+| `enableClosingConfirmation` (6.2) | on while a note or answer is typed | unchanged |
+| `disableVerticalSwipes` (7.7) | used | unchanged |
+| `safeAreaInset`, `contentSafeAreaInset` (8.0) | used for side insets and app frames | unchanged, plus fullscreen padding |
+| `requestFullscreen`, `isFullscreen`, `fullscreenChanged` (8.0) | not used | phones (`ios`, `android`) open full screen; the header art runs under the status bar and content starts below Telegram's top controls |
+| `CloudStorage` (6.9) | not used: last tab in `sessionStorage`, opened blocks in `localStorage` | last tab and opened blocks are kept in one small `cockpit_prefs` value per user and restored on any device; the browser storage stays the fast local copy, and a missing, slow (over 0.9 s) or broken value falls back to it |
+| `isActive`, `activated`, `deactivated` (8.0) | pause polling while hidden | unchanged |
+| `openLink`, `openTelegramLink` | used | unchanged |
+| `BiometricManager` (7.2) | not used | not used; follow-up below |
+| `shareMessage` (8.0) | not used | not used: it needs a message prepared by the bot (`savePreparedInlineMessage`), which the Cockpit has no flow for |
+| `shareToStory`, `downloadFile`, `addToHomeScreen`, `lockOrientation`, `setEmojiStatus` (7.8/8.0) | not used | not used: no Cockpit flow needs them |
+| `showScanQrPopup`, `readTextFromClipboard`, `requestWriteAccess`, `requestContact`, `switchInlineQuery`, `openInvoice`, `sendData` | not used | not used: no Cockpit flow needs them (clipboard reads are attachment-menu only) |
+| `Accelerometer`, `DeviceOrientation`, `Gyroscope`, `LocationManager` (8.0) | not used | not used |
+| `DeviceStorage`, `SecureStorage` (9.0) | not used | not used: UI preferences are not secret, and CloudStorage follows the user across devices |
+
+### Follow-ups
+
+- `BiometricManager`: an extra local check before a sensitive answer, added on top of the server's existing check
+  and failing closed (no biometrics, a refusal or an error means no answer is sent). It needs its own review of the
+  sensitive-button flow, so it is not part of this switch.
+- More primary actions can opt in with `data-native-main` as screens are reviewed; a screen with two candidates keeps
+  its own buttons.

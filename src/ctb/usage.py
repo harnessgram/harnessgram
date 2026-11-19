@@ -6,6 +6,7 @@ import math
 import hashlib
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,21 @@ from .i18n import t as translate_ui
 from .config import Config, state_dir
 
 TAIL = 6_000_000  # bytes of the transcript tail to search
+
+# Frequent views ask the same questions about every live transcript. Cache only
+# the small derived values (never multi-megabyte tails), invalidating on append,
+# truncation, or replacement.
+_transcript_cache_lock = threading.Lock()
+_context_cache: dict[str, tuple[tuple[int, int, int], Tuple[int, str, bool]]] = {}
+_background_cache: dict[str, tuple[tuple[int, int, int], Dict[str, str], float]] = {}
+_CACHE_MAX = 2000  # transcripts; both caches start over past this, so they never grow without bound
+
+
+def _file_stamp(path: str) -> tuple[int, int, int]:
+    st = os.stat(path)
+    return st.st_ino, st.st_size, st.st_mtime_ns
+
+
 PROJECTS = Path.home() / ".claude" / "projects"
 
 
@@ -234,7 +250,7 @@ def _summary_tokens(row: dict) -> int:
     return len(content) // 4 if isinstance(content, str) else 0
 
 
-def context_state(path: str) -> Tuple[int, str, bool]:
+def _read_context_state(path: str) -> Tuple[int, str, bool]:
     """(tokens, model, compacted): the newest assistant record with usage: input + cache read + cache
     creation, i.e. what the last request held in context. When a compaction is newer than every such
     record the old number is stale: tokens is compactMetadata.postTokens (or the summary's size) and
@@ -276,6 +292,24 @@ def context_state(path: str) -> Tuple[int, str, bool]:
         if ctx:
             return ctx, str(msg.get("model") or ""), False
     return 0, "", False
+
+
+def context_state(path: str) -> Tuple[int, str, bool]:
+    """Cached context state; an unchanged transcript is not opened again."""
+    try:
+        stamp = _file_stamp(path)
+    except OSError:
+        return 0, "", False
+    with _transcript_cache_lock:
+        known = _context_cache.get(path)
+    if known and known[0] == stamp:
+        return known[1]
+    result = _read_context_state(path)
+    with _transcript_cache_lock:
+        if len(_context_cache) > _CACHE_MAX:
+            _context_cache.clear()
+        _context_cache[path] = (stamp, result)
+    return result
 
 
 def context_tokens(path: str) -> Tuple[int, str]:
@@ -653,7 +687,7 @@ def background_commands(path: str) -> list:
     return [c for c in running.values() if c.strip()]
 
 
-def background_of(path: str, now: Optional[float] = None) -> Dict[str, str]:
+def _read_background_of(path: str, now: Optional[float] = None) -> tuple[Dict[str, str], float]:
     """Background agents and commands still running in a session (transparency),
     from its transcript: started (Agent/Bash in background, a resumed agent) minus finished
     (task-notification with a final status). {task_id: label}."""
@@ -663,7 +697,7 @@ def background_of(path: str, now: Optional[float] = None) -> Dict[str, str]:
             f.seek(max(0, size - TAIL))
             lines = f.read().decode("utf-8", "replace").splitlines()
     except OSError:
-        return {}
+        return {}, float("inf")
     running, labels, names, started = {}, {}, {}, {}
     for line in lines:
         if not any(k in line for k in ("run_in_background", "tool_result", "task-id")):
@@ -707,7 +741,39 @@ def background_of(path: str, now: Optional[float] = None) -> Dict[str, str]:
     else:
         cutoff_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=3)
     cutoff = cutoff_dt.isoformat()
-    return {t: l for t, l in running.items() if not started.get(t) or started[t] >= cutoff[:19]}
+    result = {t: l for t, l in running.items() if not started.get(t) or started[t] >= cutoff[:19]}
+    expiries = []
+    for task in result:
+        value = started.get(task)
+        if not value:
+            continue
+        try:
+            started_at = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=datetime.timezone.utc)
+            expiries.append(started_at.timestamp() + 3 * 3600)
+        except (ValueError, TypeError):
+            pass
+    return result, min(expiries, default=float("inf"))
+
+
+def background_of(path: str, now: Optional[float] = None) -> Dict[str, str]:
+    """Background work, cached until the file changes or the next job ages out."""
+    clock = time.time() if now is None else now
+    try:
+        stamp = _file_stamp(path)
+    except OSError:
+        return {}
+    with _transcript_cache_lock:
+        known = _background_cache.get(path)
+    if known and known[0] == stamp and clock < known[2]:
+        return dict(known[1])
+    result, expires = _read_background_of(path, now=clock)
+    with _transcript_cache_lock:
+        if len(_background_cache) > _CACHE_MAX:
+            _background_cache.clear()
+        _background_cache[path] = (stamp, result, expires)
+    return dict(result)
 
 
 TASK_CUT = 48  # a background task label is cut here so a bullet stays one phone line

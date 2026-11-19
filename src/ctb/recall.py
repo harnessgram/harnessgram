@@ -144,12 +144,12 @@ def _session_name(cfg, session: str) -> str:
     return name or topics.session_name(session)
 
 
-def _candidates(cfg, session: str) -> List[str]:
+def _candidates(cfg, session: str, *, exact: bool = False) -> List[str]:
     """Names that may be the session's ledger project, best first (none is checked against a file here)."""
     from . import brief, idle_lines, projects, topics, work_lines
     out: List[str] = []
     for project, lead in idle_lines.settings(cfg)["leads"].items():
-        if session == lead or (len(lead) >= 8 and session.startswith(lead)):
+        if session == lead or (not exact and len(lead) >= 8 and session.startswith(lead)):
             out.append(project)
     found = topics.place(cfg, session)
     chat = found.chat if found and not found.home else None
@@ -188,12 +188,12 @@ def _candidates(cfg, session: str) -> List[str]:
     return ordered
 
 
-def project_for(cfg, session: str, folder: Optional[Path] = None) -> str:
+def project_for(cfg, session: str, folder: Optional[Path] = None, *, exact: bool = False) -> str:
     """The ledger project (a file stem) of the session, or "" when no ledger file matches it."""
     folder = folder if folder is not None else ledger_folder(cfg)
     if folder is None or not _safe_session(session):
         return ""
-    for name in _candidates(cfg, session):
+    for name in _candidates(cfg, session, exact=exact):
         if _SAFE_PROJECT.fullmatch(name) and (folder / (name + ".json")).is_file():
             return name
     return ""

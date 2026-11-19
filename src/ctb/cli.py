@@ -541,9 +541,14 @@ def _parser() -> "argparse.ArgumentParser":
     dc = sub.add_parser("decide", help="leave a yes/no decision for the owner in the control panel "
                                        "(run by the agent inside its session)")
     dcs = dc.add_subparsers(dest="decide_cmd", required=True, metavar="action")
-    da = dcs.add_parser("ask", help="ask a question; the owner answers with a tap in the panel")
+    ask_help = "ask a question; the owner answers with a tap in the panel"
+    da = dcs.add_parser("ask", help=ask_help, description=ask_help)
     da.add_argument("title", help="the question, up to 200 characters")
     da.add_argument("--detail", default="", help="more context, up to 1500 characters")
+    da.add_argument("--image", action="append", default=[],
+                    help=argparse.SUPPRESS)
+    da.add_argument("--link", action="append", default=[], metavar="LABEL=URL",
+                    help=argparse.SUPPRESS)
     da.add_argument("--yes", default="", help="label of the yes button (30 characters)")
     da.add_argument("--no", default="", help="label of the no button (30 characters)")
     da.add_argument("--routine", action="store_true",
@@ -1702,7 +1707,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return decide_run(cfg, args.decide_cmd, title=getattr(args, "title", ""),
                           detail=getattr(args, "detail", ""), yes=getattr(args, "yes", ""),
                           no=getattr(args, "no", ""), ident=getattr(args, "id", ""),
-                          routine=bool(getattr(args, "routine", False)))
+                          routine=bool(getattr(args, "routine", False)),
+                          images=list(getattr(args, "image", None) or []), links=list(getattr(args, "link", None) or []))
     return 2
 
 

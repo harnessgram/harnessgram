@@ -272,7 +272,14 @@ def _drain_live_activity(cfg: Config, now: float) -> None:
 def run_once(cfg: Config, bot=None, now: Optional[float] = None,
              find: Callable[[str], Optional[str]] = status.transcript_of,
              listener_check: Optional[Callable[[], object]] = None) -> int:
-    """One round: refresh the placeholder of one busy, recently active session, in turn. Returns 0 or 1."""
+    """One round: refresh the placeholder of one busy, recently active session, in turn. Returns 0 or 1.
+    The round lists the projects folder once for every transcript lookup (status.transcript_round)."""
+    with status.transcript_round():
+        return _round(cfg, bot, now, find, listener_check)
+
+
+def _round(cfg: Config, bot, now: Optional[float], find: Callable[[str], Optional[str]],
+           listener_check: Optional[Callable[[], object]]) -> int:
     from . import reply_outbox, policy
     now = time.time() if now is None else now
     if listener_check is not None:
@@ -284,6 +291,11 @@ def run_once(cfg: Config, bot=None, now: Optional[float] = None,
     try:
         from . import auto_cards
         auto_cards.start(cfg, now)  # local progress does not depend on Telegram or an open Cockpit
+    except Exception:
+        pass
+    try:
+        from . import helper_jobs
+        helper_jobs.patrol_tick(cfg, now)  # its own 10-minute clock and thread; inert while its switch is off
     except Exception:
         pass
     try:

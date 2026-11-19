@@ -31,7 +31,8 @@ VERSION = 1
 # chat-widget: a widget button in the owner's private chat (the callback's sender and chat are the owner).
 VIAS = frozenset({"panel", "widget", "chat-widget"})
 SIG_FIELDS = ("payload", "signature", "key")
-MAX_PAYLOAD_B64 = 16384  # title 200 + detail 1500 + note 300 characters, at most 4 bytes each, plus the frame
+# title 200 + detail 4000 + note 1000 characters, at most 4 bytes each, base64, plus the frame, the links and picture ids
+MAX_PAYLOAD_B64 = 65536
 INSTALL_HINT = "install the signing extra: uv tool install --reinstall 'harnessgram[sign]'"
 
 
@@ -107,6 +108,11 @@ def payload(rec: dict, by: int, via: str) -> bytes:
     obj = {"v": VERSION, "kind": KIND, "id": rec["id"], "title": rec["title"], "detail": rec["detail"],
            "choice": rec["choice"], "note": rec["note"], "created": float(rec["created"]),
            "closed": float(rec["closed"]), "routine": rec.get("routine") is True, "by": by, "via": via}
+    # What the owner saw with the question is signed too; a record without links or pictures signs the same bytes as before.
+    if rec.get("links"):
+        obj["links"] = [{"label": link["label"], "url": link["url"]} for link in rec["links"]]
+    if rec.get("images"):
+        obj["images"] = list(rec["images"])
     return json.dumps(obj, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
 
 

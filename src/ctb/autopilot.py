@@ -213,11 +213,13 @@ class NotTyped(OSError):
 def type_into(pane: str, text: str, session: str) -> None:
     """Submit text only while an empty, ready box still belongs to ``session``.
 
-    The process and exact input contents are checked again after the literal text is
-    inserted and immediately before Enter.  On a failed check, only an exact copy of
-    our text is eligible for removal.
+    The Claude process of the session (pid and start time) is read before typing and compared again,
+    together with the exact input contents, after the literal text is inserted and immediately before Enter.
+    On a failed check no Enter is sent, the reason is logged, and only an exact copy of our text is
+    eligible for removal.
     """
-    from .inbox import _tmux, dismiss_tip, input_box, pane_runs_session, submitted, take_back, typed_mark
+    from .inbox import (_tmux, dismiss_tip, input_box, pane_session_process, poll_log,
+                        submitted, take_back, typed_mark)
     from .terminal_lock import locked
     clean = " ".join(text.split())
     terminal_guard = locked()
@@ -228,7 +230,8 @@ def type_into(pane: str, text: str, session: str) -> None:
     try:
         if not dismiss_tip(pane):
             raise NotTyped("pane has an open dialog")
-        if not pane_runs_session(pane, session):
+        identity = pane_session_process(pane, session)
+        if identity is None:
             raise NotTyped("pane does not run session")
         before, ready = input_box(pane)
         if before != "" or not ready:
@@ -238,9 +241,12 @@ def type_into(pane: str, text: str, session: str) -> None:
         first = _tmux("send-keys", "-t", pane, "-l", "--", tmux_text(clean))
         if first.returncode:
             raise OSError("tmux send-keys failed")
-        owns_pane = pane_runs_session(pane, session)
+        same_process = pane_session_process(pane, session, identity[0]) == identity
         after, ready = input_box(pane)  # final, exact read immediately before Enter
-        if after != clean or not ready or not owns_pane:
+        if after != clean or not ready or not same_process:
+            why = ("session process changed" if not same_process
+                   else "input box changed" if after != clean else "input box not ready")
+            poll_log(f"autopilot {session[:8]}: no Enter, {why} before submit")
             try:
                 if after == clean:
                     take_back(pane, clean)

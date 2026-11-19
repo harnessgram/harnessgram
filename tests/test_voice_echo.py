@@ -13,6 +13,7 @@ def echoes(bot):
 def test_car_mode_sends_one_quiet_echo_without_buttons(isolated, bot):
     topics, box, thread = rig(bot)
     I.set_car_mode(True)
+    voice.set_car_choice("send")  # car mode skips the preview only when set to send directly
     assert I.handle(voice_update(thread), cfg(target_language="he"), bot, topics, box, VoiceMedia(), 0) == "queued"
     assert [i["id"] for i in box.take(SID)] == [8]
     [echo] = echoes(bot)
@@ -48,6 +49,7 @@ def test_a_forward_is_never_echoed(isolated, bot):
 def test_the_switch_turns_the_echo_off(isolated, bot):
     topics, box, thread = rig(bot)
     I.set_car_mode(True)
+    voice.set_car_choice("send")
     addons.set_on(Config(), "voice_echo", False)
     assert I.handle(voice_update(thread), cfg(target_language="he"), bot, topics, box, VoiceMedia(), 0) == "queued"
     assert echoes(bot) == []

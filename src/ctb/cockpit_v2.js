@@ -36,7 +36,7 @@ function v2OpenCount(d){var srv=typeof d.waiting_count==="number";
 function v2OwnerRequest(r){return r.status==="open"&&r.wait==="owner"&&!r.older;}
 function v2PageHead(title,ic,greeting){var h=el("div","v2-page-head"),i=el("span","v2-head-icon");i.appendChild(icon(ic));h.appendChild(i);var b=el("div");b.appendChild(el("h2",null,title));if(greeting)b.appendChild(el("div","v2-greeting",greeting));h.appendChild(b);app.appendChild(h);}
 function v2Decision(d){
- var c=el("article","v2-decision");c.id="question-"+d.id;c.setAttribute("data-v2-decision",d.id);
+ var rich=d.rich_decision===true,c=el("article","v2-decision");c.id="question-"+d.id;c.setAttribute("data-v2-decision",d.id);
  if(d.id===target)c.classList.add("question-highlight");
  var project=el("bdi","v2-decision-project",shown(d,"project_name")||shown(d,"topic")||S.waiting);c.appendChild(project);
  var q=el("p","v2-question",shown(d,"title"));q.dir="auto";c.appendChild(q);
@@ -46,27 +46,82 @@ function v2Decision(d){
  // Approval conditions must stay visible before the answer controls, even
  // when the optional source, topic link and note disclosure is collapsed.
  // A detail that is nothing but the recommendation line is already shown in full above: show it once.
- if(detail&&!(match&&!detail.replace(match[0],"").trim())){var dt=el("div","detail",detail);dt.dir="auto";c.appendChild(dt);}
+ if(detail&&!(match&&!detail.replace(match[0],"").trim())){var dt=rich?v2RichDetail(detail):el("div","detail",detail);dt.dir="auto";c.appendChild(dt);}
+ // What the owner needs to decide: the pictures (tap to enlarge) and the links the agent attached.
+ var pics=rich&&Array.isArray(d.images)?d.images.filter(function(id){return typeof id==="string"&&/^[0-9a-f]{32}$/.test(id);}):[];
+ if(pics.length)c.appendChild(v2DecisionPictures(pics));
+ var links=rich&&Array.isArray(d.links)?d.links.filter(v2SafeLink):[];if(links.length)c.appendChild(v2DecisionLinks(links));
  // A Claude Code permission request: its exact text, as is (textContent, never translated, left to right).
  if(typeof d.request==="string"&&d.request){var rq=el("pre","pq-request",d.request);rq.dir="ltr";c.appendChild(rq);}
- var ta=el("textarea");ta.maxLength=300;ta.rows=2;ta.placeholder=S.notePh;ta.value=notes[d.id]||"";tune(ta,true);ta.addEventListener("input",function(){notes[d.id]=ta.value;syncClose();});
+ var ta=el("textarea",rich?"v2-comment":null);ta.maxLength=rich?1000:300;ta.rows=2;ta.placeholder=rich?V2.now.commentPh:S.notePh;if(rich)ta.setAttribute("aria-label",V2.now.commentPh);ta.value=notes[d.id]||"";var fitTa=tune(ta,true);
  var content=el("div");content.appendChild(el("div","safe",ago(d.age)+(d.old?" · "+V2.now.older:"")));
  if(d.link)content.appendChild(v2MessageLink(d.link));
  source("v2"+d.id,d,c);
- if(d.url&&d.url!==d.link)content.appendChild(topicBtn(d.url));content.appendChild(ta);content.appendChild(el("div","safe",S.tapNote));
- var more=compactBlock("v2-decision:"+d.id,V2.now.details,"",content,"v2-detail",!!notes[d.id]);
+ if(d.url&&d.url!==d.link)content.appendChild(topicBtn(d.url));if(!rich)content.appendChild(ta);content.appendChild(el("div","safe",S.tapNote));
+ var more=compactBlock("v2-decision:"+d.id,V2.now.details,"",content,"v2-detail",rich?false:!!notes[d.id]);
  // Reuse the actual back-aware disclosure button. Moving it beside the picture
  // keeps aria-expanded correct even when native Back collapses the details.
  var picture=el("div","v2-picture");picture.appendChild(v2Image(d.project_asset,null,d.project_art));var mb=more.querySelector(".compact-toggle");
  mb.textContent="";mb.appendChild(el("span","v2-more",V2.now.more));mb.appendChild(el("span","v2-less",V2.now.less));picture.appendChild(mb);c.appendChild(picture);
  var buttons=el("div","v2-answer-buttons"),yes=el("button",null,shown(d,"yes")||V2.now.yes),no=el("button",null,shown(d,"no")||V2.now.no);
- [[yes,"yes"],[no,"no"]].forEach(function(p){p[0].type="button";p[0].setAttribute("data-v2-answer",p[1]);p[0].addEventListener("click",function(){answer(c,d,p[1],[yes,no],ta);});buttons.appendChild(p[0]);});c.appendChild(buttons);
+ // The owner's own words: sent with yes or no, or alone ("reply" on the same route), which answers and approves nothing.
+ var talk=el("div","v2-comment-box"),only=el("button","v2-comment-only",V2.now.commentOnly);only.type="button";only.setAttribute("data-v2-reply",d.id);
+ var syncOnly=function(){only.disabled=!ta.value.trim()||ta.disabled||(!!d.stale&&d.stale!=="old");};
+ ta.addEventListener("input",function(){notes[d.id]=ta.value;syncOnly();syncClose();});
+ only.addEventListener("click",function(){v2Reply(c,d,ta,only,fitTa,syncOnly);});
+ if(rich){talk.appendChild(ta);talk.appendChild(el("div","safe v2-comment-hint",V2.now.commentHint));talk.appendChild(only);}
+ if(Array.isArray(d.replies)&&d.replies.length)c.appendChild(v2Replies(d.replies));
+ if(typeof d.request==="string"&&d.request)only.hidden=true;  // a permission request is answered by its hook: no comment alone
+ if(rich){c.appendChild(talk);syncOnly();}
+ [[yes,"yes"],[no,"no"]].forEach(function(p){p[0].type="button";p[0].setAttribute("data-v2-answer",p[1]);p[0].addEventListener("click",function(){answer(c,d,p[1],rich?[yes,no,only]:[yes,no],ta);});buttons.appendChild(p[0]);});c.appendChild(buttons);
  // An old but still-open decision stays answerable; the owner may also just clear it (same endpoint, no confirm).
  if(d.old){var rm=el("button","v2-old-remove",V2.now.remove);rm.type="button";rm.setAttribute("data-v2-dismiss",d.id);rm.addEventListener("click",function(){v2Dismiss([d.id],[rm,yes,no]);});c.appendChild(rm);}
  if(d.decline_only===true)yes.disabled=true;  // a request the phone cannot show exactly is approved at the computer
  if(d.stale&&d.stale!=="old"){yes.disabled=no.disabled=true;c.appendChild(el("div","err",S["why_"+d.stale]||V2.now.unavailable));}
  c.appendChild(more);return c;
 }
+// The detail as markdown-lite: a blank line starts a paragraph, a "- " (or "• ", "* ") line is a bullet and **x** is
+// bold. Built from text nodes only (no HTML parsing at all), so nothing an agent writes can become markup or a link.
+function v2Inline(node,text){String(text).split(/(\*\*[^*\n]+\*\*)/).forEach(function(part){
+ if(/^\*\*[^*\n]+\*\*$/.test(part))node.appendChild(el("b",null,part.slice(2,-2)));else if(part)node.appendChild(document.createTextNode(part));});return node;}
+function v2RichDetail(text){var box=el("div","detail v2-rich");box.dir="auto";
+ String(text).split(/\n{2,}/).forEach(function(block){var list=null,para=null;
+  block.split("\n").forEach(function(line){var m=line.match(/^\s*[-•*]\s+(.+)$/);
+   if(m){para=null;if(!list){list=el("ul");list.dir="auto";box.appendChild(list);}var li=el("li");li.dir="auto";list.appendChild(v2Inline(li,m[1]));return;}
+   list=null;if(!para){para=el("p");para.dir="auto";box.appendChild(para);}else para.appendChild(document.createTextNode("\n"));v2Inline(para,line);});});
+ return box;}
+// Pictures come only through the owner's short-lived media token (the same route as choice-card pictures), never a public URL.
+function v2DecisionPictures(ids){var g=el("div","v2-decision-pictures");
+ ids.forEach(function(id,i){var name=V2.now.picture+" "+nf.format(i+1),cell=el("div","v2-decision-picture-cell"),b=el("button","choice-preview v2-decision-picture");
+  b.type="button";b.disabled=true;b.setAttribute("aria-label",S.cardEnlarge+": "+name);
+  var img=el("img");img.width=4;img.height=3;img.alt=name;img.decoding="async";img.loading="lazy";img.draggable=false;b.appendChild(img);b.appendChild(el("span","choice-zoom",S.cardEnlarge));
+  var err=el("div","choice-image-error");err.hidden=true;err.setAttribute("role","status");
+  function failed(m){err.textContent=m;err.hidden=false;b.disabled=true;}
+  img.addEventListener("load",function(){b.disabled=false;err.hidden=true;});img.addEventListener("error",function(){failed(S.cardImageError);});
+  cardImageUrl(id).then(function(u){img.src=u;}).catch(function(e){failed(e.message);});
+  b.addEventListener("click",function(){haptic("tap");cardImageUrl(id).then(function(u){openCardImage(u,name,b);}).catch(function(e){failed(e.message);});});
+  cell.appendChild(b);cell.appendChild(err);g.appendChild(cell);});
+ return g;}
+function v2SafeLink(l){return !!l&&typeof l.url==="string"&&/^https:\/\/[^\s\/?#@]+([\/?#][^\s]*)?$/i.test(l.url);}
+function v2LinkHost(u){try{return new URL(u).hostname;}catch(e){return "";}}
+function v2DecisionLinks(links){var box=el("div","v2-decision-links");
+ links.forEach(function(l){var b=el("button","v2-decision-link");b.type="button";b.appendChild(icon("link"));
+  var t=el("span","v2-link-text"),name=el("bdi",null,(typeof l.label==="string"&&l.label)||v2LinkHost(l.url)||l.url),host=el("small",null,v2LinkHost(l.url));
+  host.dir="ltr";t.appendChild(name);t.appendChild(host);b.appendChild(t);
+  b.addEventListener("click",function(e){e.preventDefault();e.stopPropagation();haptic("tap");openLink(l.url);});box.appendChild(b);});
+ return box;}
+function v2Replies(list){var box=el("div","v2-replies");box.appendChild(el("div","v2-replies-title",V2.now.yourComments));
+ list.forEach(function(r){var row=el("p","v2-reply",r.text);row.dir="auto";box.appendChild(row);});return box;}
+// A comment alone: the decision stays open and nothing is approved; the session reads it as the owner's own words.
+function v2Reply(c,d,ta,btn,fit,sync){var t=ta.value.trim();if(!t)return;haptic("tap");btn.disabled=true;ta.disabled=true;
+ var old=c.querySelector(".err");if(old)old.remove();
+ function fail(msg){ta.disabled=false;sync();c.appendChild(el("div","err",msg));}
+ post("/api/decide",{id:d.id,choice:"reply",note:t}).then(function(r){
+  if(r.ok)return r.json().then(function(){haptic("n","success");delete notes[d.id];syncClose();ta.value="";ta.disabled=false;fit();sync();
+   d.replies=(Array.isArray(d.replies)?d.replies:[]).concat([{text:t,age:0}]);var prev=c.querySelector(".v2-replies"),list=v2Replies(d.replies);
+   if(prev)prev.replaceWith(list);else c.insertBefore(list,c.querySelector(".v2-comment-box"));toast(V2.now.commentSent);});
+  haptic("n","error");fail(r.status===403?S.reopen:r.status===503?S.busy:r.status===404||r.status===409?S.gone:S.failed);})
+ .catch(function(){haptic("n","error");fail(S.failed);});}
 // An agent's ask/choice card keeps its own answer controls; the picture is decoration.
 function v2MessageLink(url){var b=el("button","v2-message-link",V2.now.messageLink);b.type="button";b.addEventListener("click",function(e){e.preventDefault();e.stopPropagation();haptic("tap");openLink(url);});return b;}
 function v2AskCard(c){var box=agentCard(c,false);box.classList.add("v2-card-decision");box.setAttribute("data-v2-decision",c.id);box.insertBefore(v2Image(c.project_asset,"v2-card-picture",c.project_art),box.firstChild);if(c.link)box.appendChild(v2MessageLink(c.link));return box;}
@@ -160,8 +215,9 @@ function v2TopicCleanup(d){
   var ids=rows.map(function(x){return x.id;}),all=el("button","v2-cleanup-all",v2CleanupArmed?V2.cleanup.confirmAll.replace("{n}",nf.format(ids.length)):V2.cleanup.closeAll);
   all.type="button";all.setAttribute("data-v2-cleanup","all");all.setAttribute("aria-live","polite");btns.push(all);
   all.addEventListener("click",function(){
+   var go=function(){v2CleanupPost({action:"close",ids:ids,confirm:ids.length},btns,function(j){var done=j.closed_ids||[];if(done.length)v2CleanupResult={kind:"close",ids:done};});};
    if(!v2CleanupArmed){v2CleanupArmed=true;render(last,true);return;}
-   v2CleanupPost({action:"close",ids:ids,confirm:ids.length},btns,function(j){var done=j.closed_ids||[];if(done.length)v2CleanupResult={kind:"close",ids:done};});});
+   go();});
   body.appendChild(all);
   if(v2CleanupArmed){var no=el("button","v2-cleanup-cancel",S.cancelIt);no.type="button";no.setAttribute("data-v2-cleanup","cancel");
    no.addEventListener("click",function(){v2CleanupArmed=false;render(last,true);});body.appendChild(no);}

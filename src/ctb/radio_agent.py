@@ -304,5 +304,10 @@ def press(q: dict, cfg, bot, session: Optional[str], mine: bool) -> str:
                                                     "reply_markup": {"inline_keyboard": []}})
             except Exception:  # noqa: BLE001
                 pass
-    threading.Thread(target=work, daemon=True, name="radio-agent-queue").start()
+    action = bot.defer(work) if hasattr(bot, "defer") else work
+    try:
+        threading.Thread(target=action, daemon=True, name="radio-agent-queue").start()
+    except BaseException:
+        getattr(action, "cancel", lambda: None)()
+        raise
     return "radio-queued"

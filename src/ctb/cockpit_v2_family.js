@@ -111,9 +111,9 @@ function fbOpen(opener){
    var e=fbEdit,ta=el("textarea","fb-field");ta.rows=2;ta.maxLength=100;ta.value=e.text||"";ta.placeholder=fbT("placeholder");ta.setAttribute("aria-label",fbT(e.mode==="add"?"addTitle":"editTitle"));
    ta.setAttribute("data-fb","field");ta.setAttribute("enterkeyhint","send");tune(ta,true);
    edit.appendChild(el("h3","fb-edit-title",fbT(e.mode==="add"?"addTitle":"editTitle")));edit.appendChild(ta);
-   var row=el("div","fb-actions"),save=el("button","btn pri fb-save");save.type="button";save.setAttribute("data-fb","save");
+   var row=el("div","fb-actions"),save=el("button","btn pri fb-save");save.type="button";save.setAttribute("data-native-main","");save.setAttribute("data-fb","save");
    var label=el("span",null,fbT("save"));save.appendChild(icon("check"));save.appendChild(label);row.appendChild(save);
-   var cancel=el("button","btn fb-cancel",fbT("cancel"));cancel.type="button";cancel.setAttribute("data-fb","cancel");row.appendChild(cancel);
+   var cancel=el("button","btn fb-cancel",fbT("cancel"));cancel.type="button";cancel.setAttribute("data-fb","cancel");cancel.setAttribute("data-native-second","");row.appendChild(cancel);
    var del=null;if(e.mode==="edit"){del=el("button","btn fb-delete",fbT("delete"));del.type="button";del.setAttribute("data-fb","delete");row.appendChild(del);}
    edit.appendChild(row);var out=el("div","fb-out");out.setAttribute("aria-live","polite");edit.appendChild(out);
    function sync(){save.disabled=fbSaving||!ta.value.trim();}

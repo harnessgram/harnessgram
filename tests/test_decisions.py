@@ -233,10 +233,10 @@ def test_lengths_are_enforced_and_nothing_is_saved(rig, capsys, kw):
 
 
 def test_texts_at_the_limits_are_accepted_and_bidi_controls_are_dropped(rig):
-    rec = ask(rig, title="‮" + "t" * decisions.TITLE_CHARS, detail="w" * decisions.DETAIL_CHARS,  # not hex: see creds
+    rec = ask(rig, title="‮" + "t" * decisions.TITLE_CHARS, detail="w" * decisions.LEGACY_DETAIL_CHARS,  # not hex: see creds
               yes="y" * decisions.LABEL_CHARS, no="n" * decisions.LABEL_CHARS)
     assert len(rec["title"]) == decisions.TITLE_CHARS and "‮" not in rec["title"]
-    assert len(rec["detail"]) == decisions.DETAIL_CHARS
+    assert len(rec["detail"]) == decisions.LEGACY_DETAIL_CHARS
 
 
 def fill(rig, sessions, each):
@@ -362,19 +362,19 @@ def test_malformed_answers_are_refused_and_leave_it_open(rig, server, raw):
 
 def test_note_length_and_body_size_limits(rig, server):
     rec = ask(rig)
-    assert tap(server, rec["id"], note="n" * (decisions.NOTE_CHARS + 1))[0] == 400
+    assert tap(server, rec["id"], note="n" * (decisions.LEGACY_NOTE_CHARS + 1))[0] == 400
     big = json.dumps({"id": rec["id"], "choice": "yes", "note": "x" * panel.MAX_DECIDE_BODY})
     code, _, data = tap(server, rec["id"], raw=big)
     assert code == 413 and b"sessions" not in data
     assert decisions.open_decisions()[0]["id"] == rec["id"] and queued(rig, ORBIT_S) == []
-    # the biggest legal answer (300 four-byte characters) still fits
-    assert len(json.dumps({"id": rec["id"], "choice": "yes", "note": "😀" * 300}, ensure_ascii=False).encode()) <= panel.MAX_DECIDE_BODY
-    assert tap(server, rec["id"], raw=json.dumps({"id": rec["id"], "choice": "yes", "note": "😀" * 300},
-                                                 ensure_ascii=False))[0] == 200
+    # the biggest legal answer (NOTE_CHARS four-byte characters) still fits
+    biggest = {"id": rec["id"], "choice": "yes", "note": "😀" * decisions.LEGACY_NOTE_CHARS}
+    assert len(json.dumps(biggest, ensure_ascii=False).encode()) <= panel.MAX_DECIDE_BODY
+    assert tap(server, rec["id"], raw=json.dumps(biggest, ensure_ascii=False))[0] == 200
 
 
 def test_the_state_route_keeps_its_small_body_cap(server):
-    assert panel.MAX_BODY == 64 and panel.MAX_DECIDE_BODY < 2048
+    assert panel.MAX_BODY == 64 and panel.MAX_DECIDE_BODY < 8192 and panel.ROUTES["/api/card"] == panel.MAX_CARD_BODY < 2048
     code, _, _ = call(server, init=signed(), body=b"x" * (panel.MAX_BODY + 1))
     assert code == 413
 

@@ -120,7 +120,7 @@ function scOpen(opener){
  dialog.appendChild(el("p","sc-hint",scT("hint")));
  var ta=el("textarea","sc-field");ta.rows=2;ta.maxLength=200;ta.placeholder=scT("placeholder");ta.setAttribute("aria-label",scT("addTitle"));ta.setAttribute("data-sc","field");
  ta.setAttribute("enterkeyhint","send");var fit=tune(ta,true);dialog.appendChild(ta);
- var row=el("div","sc-actions"),save=el("button","btn pri sc-save");save.type="button";save.disabled=true;save.setAttribute("data-sc","save");
+ var row=el("div","sc-actions"),save=el("button","btn pri sc-save");save.type="button";save.setAttribute("data-native-main","");save.disabled=true;save.setAttribute("data-sc","save");
  var label=el("span",null,scT("save"));save.appendChild(icon("check"));save.appendChild(label);row.appendChild(save);dialog.appendChild(row);
  var out=el("div","sc-out");out.setAttribute("aria-live","polite");dialog.appendChild(out);
  var busy=false,setOpen=null;

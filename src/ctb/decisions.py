@@ -1,8 +1,10 @@
 """The decisions board: a question an agent leaves for the owner in the control panel (`ctb decide ask|list|cancel`).
 
-A decision is a title, an optional detail and two buttons. It lives in a small private state file guarded
+A decision is a title, an optional detail (markdown-lite: paragraphs, "- " bullets, **bold**; shown as text, never
+as markup), optional pictures (private copies, served only to the owner) and https links, and two buttons. It lives in a small private state file guarded
 by a file lock (the panel server and the CLI are separate processes). The owner answers once, with a tap
-in the control panel. The answer is queued to the asking session's inbox as a "panel" message (fixed
+in the control panel, with an optional comment in their own words; they may also send a comment alone, which
+answers nothing and leaves the decision open (`reply`). The answer is queued to the asking session's inbox as a "panel" message (fixed
 server wording, the session's own question and labels quoted as text it wrote) and the choice, without
 the note, is shown as a notice in the session's own topic. The panel verified the owner, so a yes there
 approves exactly the action the question names and nothing else; the text the session receives says so. The CLI only acts for the session it runs inside: that
@@ -34,9 +36,17 @@ from .pins import SUPERGROUP_PREFIX
 
 STATE_FILE = "decisions.json"
 TITLE_CHARS = 200
-DETAIL_CHARS = 1500
+DETAIL_CHARS = 4000
 LABEL_CHARS = 30
-NOTE_CHARS = 300
+NOTE_CHARS = 1000
+LEGACY_DETAIL_CHARS = 1500
+LEGACY_NOTE_CHARS = 300
+MAX_IMAGES = 6
+MAX_LINKS = 6
+LINK_LABEL_CHARS = 60
+URL_CHARS = 2048
+MAX_REPLIES = 20  # comments sent without deciding, per decision; the newest REPLIES_SHOWN are shown back
+REPLIES_SHOWN = 5
 MAX_OPEN = 50
 MAX_OPEN_PER_SESSION = 5
 LOCK_WAIT = 2.0  # seconds the panel waits for the decisions and inbox locks before answering 503
@@ -146,6 +156,19 @@ def _record(ident, raw) -> Optional[dict]:
            "routine": raw.get("routine") is True}
     if type(raw.get("msg")) is int and raw["msg"] > 0:
         rec["msg"] = raw["msg"]
+    images = _images(raw.get("images"))
+    if images:
+        rec["images"] = images
+    links = _links(raw.get("links"))
+    if links:
+        rec["links"] = links
+    replies = raw.get("replies")
+    if isinstance(replies, list):
+        kept = [{"at": float(r["at"]), "text": r["text"]} for r in replies[-MAX_REPLIES:]
+                if isinstance(r, dict) and _num(r.get("at")) and isinstance(r.get("text"), str)
+                and 0 < len(r["text"]) <= NOTE_CHARS]
+        if kept:
+            rec["replies"] = kept
     if raw.get("action") == "emergency_credit":
         rec["action"] = "emergency_credit"
         rec["routine"] = False
@@ -170,6 +193,62 @@ def _record(ident, raw) -> Optional[dict]:
             rec["answer_sig"] = {k: raw["answer_sig"][k] for k in decision_sign.SIG_FIELDS}
     _notice_fields(rec, raw)
     return rec
+
+
+def _images(raw) -> List[str]:
+    """Stored picture ids, or [] for anything malformed (an old record has none)."""
+    from . import card_media
+    if not isinstance(raw, list) or len(raw) > MAX_IMAGES:
+        return []
+    ids = [i for i in raw if isinstance(i, str) and card_media.ID.fullmatch(i)]
+    return ids if len(ids) == len(raw) and len(set(ids)) == len(ids) else []
+
+
+def _links(raw) -> List[dict]:
+    """Stored links, re-checked on every load: each one https only, or the whole list is dropped."""
+    if not isinstance(raw, list) or len(raw) > MAX_LINKS:
+        return []
+    out = []
+    for item in raw:
+        if (not isinstance(item, dict) or not isinstance(item.get("url"), str) or not isinstance(item.get("label"), str)
+                or len(item["label"]) > LINK_LABEL_CHARS or not https_link(item["url"])):
+            return []
+        out.append({"label": item["label"], "url": item["url"]})
+    return out
+
+
+def https_link(url: str) -> bool:
+    """One plain https link: a host, no login part, no whitespace or control characters, nothing that reads as a
+    credential or a private sign-in link (the same rules as a link card)."""
+    if not isinstance(url, str) or not url or len(url) > URL_CHARS or any(c.isspace() or ord(c) < 32 for c in url):
+        return False
+    if any(unicodedata.category(c) in ("Cc", "Cf") for c in url) or BIDI_CONTROLS.search(url):
+        return False
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 - a malformed port raises here
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not parts.hostname or parts.username is not None or parts.password is not None:
+        return False
+    from .creds import hide_owner_links, redact_channel
+    return hide_owner_links(redact_channel(url)) == url
+
+
+def parse_link(raw: str) -> dict:
+    """`--link "label=https://..."` (or a bare https link) as {"label", "url"}; refused when it is not one https link."""
+    text = str(raw or "").strip()
+    if text.lower().startswith("https://"):
+        label, url = "", text
+    elif "=" in text:
+        label, url = (part.strip() for part in text.split("=", 1))
+    else:
+        raise DecisionError("a link is label=https://... (or just the https:// link)")
+    if not https_link(url):
+        raise DecisionError("each link must be one https:// link (no login part, no spaces, no credentials or "
+                            "private sign-in links)")
+    return {"label": clean(label, LINK_LABEL_CHARS, "link label", required=False), "url": url}
 
 
 def _notice_fields(rec, raw):
@@ -198,6 +277,32 @@ def _save(path, data: Dict[str, dict]) -> None:
     for gone in closed[KEEP_CLOSED:]:
         del data[gone["id"]]
     write_private(path, json.dumps(data, ensure_ascii=False))
+    _sweep_media(data.values())
+
+
+def _sweep_media(records, now: Optional[float] = None) -> None:
+    """Under the decisions lock: a picture lives while its decision is open and a short grace after it closes (a late
+    tap still sees it); files no record names are removed after the same grace (a copy made before the lock)."""
+    from . import card_media
+    if not any(r.get("images") for r in records) and not (state_dir() / card_media.DECISION_DIR).exists():
+        return
+    card_media.cleanup(list(records), now, name=card_media.DECISION_DIR)
+
+
+def image_available(ident: str, now: Optional[float] = None) -> bool:
+    """Whether `ident` is a picture of a decision that is open (or closed within the grace)."""
+    from . import card_media
+    if not isinstance(ident, str) or not card_media.ID.fullmatch(ident):
+        return False
+    now = time.time() if now is None else now
+    return any(ident in r.get("images", []) and (r["state"] == "open" or now - r["closed"] < card_media.GRACE)
+               for r in _load(state_dir() / STATE_FILE).values())
+
+
+def image(ident: str):
+    """(bytes, content type) of one decision picture the owner may see, or None."""
+    from . import card_media
+    return card_media.read(ident, name=card_media.DECISION_DIR) if image_available(ident) else None
 
 
 def open_decisions() -> List[dict]:
@@ -214,8 +319,11 @@ def open_decisions() -> List[dict]:
 
 def create(session: str, chat: int, thread: int, title: str, detail: str = "", yes: str = "", no: str = "",
            lang: str = "en", now: Optional[float] = None, perm: str = "", request: str = "",
-           decline_only: bool = True, routine: bool = False, action: str = "") -> dict:
-    """`perm`: the id of a Claude Code permission request (permission_request.py only). Its answer goes to that
+           decline_only: bool = True, routine: bool = False, action: str = "", images=(), links=(),
+           rich: bool = False) -> dict:
+    """`images`: paths of pictures the owner needs to decide (PNG, JPEG or WebP; private, metadata-free copies are
+    stored, the sources are never named). `links`: "label=https://..." strings or {"label", "url"} dicts.
+    `perm`: the id of a Claude Code permission request (permission_request.py only). Its answer goes to that
     request's hook, never to the session as a message. `routine`: the asking agent says this question approves
     nothing sensitive, so the owner may also answer it from a phone widget. Text that names a sensitive area keeps it
     sensitive anyway (sensitive_buttons.py)."""
@@ -224,7 +332,8 @@ def create(session: str, chat: int, thread: int, title: str, detail: str = "", y
         raise DecisionError("bad permission request id")
     rec = {"session": session, "chat": chat, "thread": thread,
            "title": clean(title, TITLE_CHARS, "title"),
-           "detail": clean(detail, DETAIL_CHARS, "detail", multiline=True, required=False),
+           "detail": clean(detail, DETAIL_CHARS if rich else LEGACY_DETAIL_CHARS, "detail", multiline=True,
+                           required=False),
            "yes": clean(yes, LABEL_CHARS, "yes label", required=False) or t("decide_yes", lang=lang),
            "no": clean(no, LABEL_CHARS, "no label", required=False) or t("decide_no", lang=lang),
            "created": now, "state": "open", "routine": routine is True and not perm,
@@ -236,6 +345,38 @@ def create(session: str, chat: int, thread: int, title: str, detail: str = "", y
         raise DecisionError(f"the no label {rec['no']!r} reads as a yes; name what no does, e.g. \"Hold\"")
     if "".join(re.findall(r"\w+", rec["yes"].lower())) == "".join(re.findall(r"\w+", rec["no"].lower())):
         raise DecisionError("the yes and no labels are the same")
+    images, links = list(images or ()), list(links or ())
+    if (images or links) and not rich:
+        raise DecisionError("rich decisions are disabled")
+    if (images or links) and perm:
+        raise DecisionError("a permission request carries no pictures or links")
+    if len(images) > MAX_IMAGES:
+        raise DecisionError(f"at most {MAX_IMAGES} pictures")
+    if len(links) > MAX_LINKS:
+        raise DecisionError(f"at most {MAX_LINKS} links")
+    parsed = [dict(link) if isinstance(link, dict) else parse_link(link) for link in links]
+    if parsed:
+        if _links(parsed) != parsed:
+            raise DecisionError("each link must be one https:// link with a short label")
+        rec["links"] = parsed
+    copied: List[str] = []
+    if images:
+        from . import card_media
+        try:
+            copied = card_media.store_many(images, name=card_media.DECISION_DIR)
+        except card_media.MediaError as e:
+            raise DecisionError(str(e)) from None
+        rec["images"] = copied
+    try:
+        return _create_locked(session, rec)
+    except BaseException:
+        if copied:
+            from . import card_media
+            card_media.discard(copied, name=card_media.DECISION_DIR)
+        raise
+
+
+def _create_locked(session: str, rec: dict) -> dict:
     with _locked() as path:
         data = _load(path)
         if sum(1 for r in data.values() if r["state"] == "open") >= MAX_OPEN:
@@ -351,7 +492,8 @@ def answer(cfg: Config, inbox, ident: str, choice: str, note: str = "", now: Opt
     from .progress import append_boundary
     if choice not in ("yes", "no"):
         raise DecisionError("choose yes or no")
-    note = clean(note, NOTE_CHARS, "note", multiline=True, required=False, owner_text=True)
+    note_limit = NOTE_CHARS if cfg.rich_decisions_enabled is True else LEGACY_NOTE_CHARS
+    note = clean(note, note_limit, "note", multiline=True, required=False, owner_text=True)
     now = time.time() if now is None else now
     key = decision_sign.key_for_answer(by, via)  # outside the lock: a slow Keychain never holds it
     until = time.monotonic() + LOCK_WAIT
@@ -414,6 +556,76 @@ def answer(cfg: Config, inbox, ident: str, choice: str, note: str = "", now: Opt
         from .inbox import poll_log
         poll_log(f"panel boundary {rec['session'][:8]}: {type(exc).__name__}")
     return dict(rec, where=found)
+
+
+def reply_text(rec: dict, text: str) -> str:
+    """What the session reads for a comment sent without deciding. It answers nothing and approves nothing."""
+    return "\n".join([
+        "💬 The owner wrote a comment on this session's open question in the control panel, without answering it.",
+        f"The question this session asked: {quoted(rec['title'])}",
+        f"The owner's comment, in their own words: {quoted(text)}",
+        "This is NOT an answer and NOT an approval: no button was tapped, nothing is approved by it (not this "
+        "question's action and no other sensitive action), and the question stays open until the owner taps "
+        "one of its buttons. Read the comment, adjust, and wait for the owner's answer.",
+    ])
+
+
+def reply(cfg: Config, inbox, ident: str, text: str, now: Optional[float] = None,
+          session: Optional[str] = None) -> dict:
+    """The owner's comment on an open decision, sent alone: queued to the asking session as the owner's own words,
+    marked as not an answer. The decision stays open and unanswered; nothing is signed, nothing is approved. At most
+    MAX_REPLIES per decision (a flood of comments must not bury the session's inbox)."""
+    if cfg.rich_decisions_enabled is not True:
+        raise DecisionError("rich decisions are disabled")
+    from .inbox import LockBusy
+    from .progress import append_boundary
+    text = clean(text, NOTE_CHARS, "comment", multiline=True, owner_text=True)
+    now = time.time() if now is None else now
+    until = time.monotonic() + LOCK_WAIT
+    with _locked(until) as path:
+        data = _load(path)
+        rec = data.get(ident) if isinstance(ident, str) else None
+        if rec is None or (session is not None and rec["session"] != session):
+            raise DecisionError("no such decision", "unknown")
+        if rec["state"] != "open":
+            raise DecisionError(f"already {rec['state']}", "closed", rec["state"], rec["choice"])
+        if rec.get("perm") or rec.get("action"):  # answered by its hook or by the bridge, never read by a session
+            raise DecisionError("this decision takes no comment", "invalid")
+        before = list(rec.get("replies", []))
+        if len(before) >= MAX_REPLIES:
+            raise DecisionError(f"at most {MAX_REPLIES} comments on one decision", "invalid")
+        rec["replies"] = before + [{"at": float(now), "text": text}]
+        _save(path, data)
+        found = _where(cfg, rec)
+        key = secrets.token_hex(8)
+        try:
+            inbox.put(rec["session"], {"text": reply_text(rec, text), "at": int(now), "id": None, "source": "panel",
+                                       "chat": found[0] if found else home_chat(cfg), "key": key,
+                                       "decision": rec["id"], "reply": True}, until=until)
+        except BaseException as e:
+            if before:
+                rec["replies"] = before
+            else:
+                rec.pop("replies", None)
+            _save(path, data)
+            if isinstance(e, LockBusy):
+                raise DecisionError("busy, try again", "busy") from None
+            raise
+    try:
+        append_boundary(rec["session"], until=max(until, time.monotonic() + 0.5))
+    except (OSError, TimeoutError) as exc:
+        from .inbox import poll_log
+        poll_log(f"panel boundary {rec['session'][:8]}: {type(exc).__name__}")
+    return dict(rec, where=found, reply_key=key)
+
+
+def announce_reply(inbox, rec: dict) -> None:
+    """Wake the session for a comment; the topic notice stays open (the decision is still waiting)."""
+    from .inbox import _deliver_button_word, record_wake_error
+    try:
+        _deliver_button_word(inbox, rec["session"])
+    except Exception as exc:
+        record_wake_error(inbox, rec["session"], exc)
 
 
 def announce(cfg: Config, bot, inbox, rec: dict) -> bool:
@@ -479,7 +691,7 @@ def _fail(reason: str) -> int:
 
 
 def run(cfg: Config, action: str, title: str = "", detail: str = "", yes: str = "", no: str = "",
-        ident: str = "", bot=None, routine: bool = False) -> int:
+        ident: str = "", bot=None, routine: bool = False, images=(), links=()) -> int:
     """`ctb decide <action>`: 0 when it worked, 1 with a one-line reason when it was refused. The session is
     always the one the command runs inside (see caller_session)."""
     try:
@@ -503,10 +715,15 @@ def run(cfg: Config, action: str, title: str = "", detail: str = "", yes: str = 
         if not cfg.ready:
             raise DecisionError("bot_token / owner_chat_id missing in the config")
         lang = getattr(cfg, "ui_language", "") or "en"
-        rec = create(sid, chat, thread, title, detail, yes, no, lang, routine=routine)
+        rich = cfg.rich_decisions_enabled is True
+        rec = create(sid, chat, thread, title, detail, yes, no, lang, routine=routine, images=images, links=links,
+                     rich=rich)
         from . import cockpit_notice
         cockpit_notice.update(cfg, rec, True, bot)
         print(f"decision {rec['id']} is waiting in the control panel: {rec['title']}")
+        if not rec["detail"] and not rec.get("images") and not rec.get("links"):
+            print("tip: include what the owner needs to decide: --detail with the context and the options, "
+                  "--image for screenshots or designs, --link for pages to check")
         return 0
     except DecisionError as e:
         return _fail(e.reason)

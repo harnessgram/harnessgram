@@ -66,6 +66,7 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "pane_for_session", lambda s: "%1")
     monkeypatch.setattr(I, "pane_runs_session", lambda *a, **k: True)  # the fake pane hosts the session
+    monkeypatch.setattr(I, "pane_session_process", lambda *a, **k: (7, "Wed Nov 18 13:00:00 2026"))
     monkeypatch.setattr(I, "pass_trust", lambda *a, **k: True)
     monkeypatch.setattr(os, "kill", lambda pid, sig: None)
     monkeypatch.setattr(H, "spawn_delivered", lambda items: None)

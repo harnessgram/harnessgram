@@ -35,7 +35,7 @@ function arOpen(opener){
  var ta=el("textarea","ar-field");ta.rows=2;ta.maxLength=500;ta.placeholder=V2.tools.arPlaceholder;ta.setAttribute("aria-label",V2.tools.arTitle);
  ta.setAttribute("autocapitalize","off");ta.setAttribute("autocomplete","off");ta.setAttribute("autocorrect","off");ta.setAttribute("spellcheck","false");ta.setAttribute("enterkeyhint","send");
  var fit=tune(ta,true);dialog.appendChild(ta);
- var row=el("div","ar-actions"),send=el("button","btn pri ar-send");send.type="button";send.disabled=true;send.appendChild(icon("send"));
+ var row=el("div","ar-actions"),send=el("button","btn pri ar-send");send.type="button";send.setAttribute("data-native-main","");send.disabled=true;send.appendChild(icon("send"));
  var label=el("span",null,V2.tools.arSend);send.appendChild(label);row.appendChild(send);
  var paste=null;
  if(navigator.clipboard&&typeof navigator.clipboard.readText==="function"){paste=el("button","btn sm ar-paste",V2.tools.arPaste);paste.type="button";row.insertBefore(paste,send);}

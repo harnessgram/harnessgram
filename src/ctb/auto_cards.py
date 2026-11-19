@@ -7,12 +7,14 @@ import hashlib
 import json
 import re
 import threading
+import time
 from typing import Callable, Iterable, Optional
 
 from . import cards
 from .config import set_setting, setting_on
 
 WATCH_EVERY = 30.0
+MODEL_RETRY_AFTER = 600.0  # a failed helper-agent title call is not repeated sooner than this
 TITLE_TRANSLATION_TIMEOUT = 15.0  # the existing translate.TRANSLATE_BUDGET
 _HEBREW = re.compile(r"[א-ת]")
 _LATIN = re.compile(r"[A-Za-z][A-Za-z0-9_.+-]*")
@@ -123,12 +125,20 @@ def _group(text: str) -> str:
     return "המשך העבודה"
 
 
-def fallback(row: dict, snapshot: dict, title: Optional[str] = None) -> dict:
-    """Task status is evidence; tool-only progress is explicitly an estimate, never completion."""
+def english_steps(snapshot: dict) -> list:
+    """The remaining task subjects of a snapshot that are not Hebrew: what the model-made names would replace."""
+    _valid, remaining, body = cards._todo_body(snapshot["tasks"])
+    return [s for s in body["steps"] if remaining and isinstance(s, str) and not _HEBREW.search(s)]
+
+
+def fallback(row: dict, snapshot: dict, title: Optional[str] = None, step_names: Optional[dict] = None) -> dict:
+    """Task status is evidence; tool-only progress is explicitly an estimate, never completion. `step_names`
+    maps a task subject to the Hebrew name a helper agent made for it; a subject without one is grouped as before."""
     title = title or hebrew_line(row.get("title"), title_fallback(row.get("title")), cards.TITLE_CHARS)
     _valid, remaining, body = cards._todo_body(snapshot["tasks"])
     if remaining:
-        steps = [hebrew_line(s, _group(s)) for s in body["steps"]]
+        names = step_names or {}
+        steps = [hebrew_line(names.get(s, s), _group(s)) for s in body["steps"]]
         at, percent = body["at"], body["percent"]
     else:
         groups = []
@@ -170,6 +180,7 @@ class Watcher:
         self.lock = threading.RLock()
         self.sessions: dict = {}
         self.translations: OrderedDict[str, str] = OrderedDict()
+        self.model_names: OrderedDict = OrderedDict()  # (title, steps) -> (when, names or None)
 
     def _cached_translation(self, title: str, cfg) -> Optional[str]:
         with self.lock:
@@ -187,8 +198,30 @@ class Watcher:
         translated = _translated_title(title, cfg, self.translate_fn, cache)
         return translated
 
+    def _model_names(self, title: str, steps: list, cfg) -> Optional[dict]:
+        """Hebrew names from the card-titles helper agent, cached by content. A failure is remembered for
+        MODEL_RETRY_AFTER seconds, so a broken helper is not asked again on every scan."""
+        key = (title, tuple(steps))
+        now = time.monotonic()
+        with self.lock:
+            hit = self.model_names.get(key)
+            if hit is not None and (hit[1] is not None or 0 <= now - hit[0] < MODEL_RETRY_AFTER):
+                return hit[1]
+        try:
+            from .helper_jobs import card_names
+            names = card_names(cfg, title, steps)
+        except Exception:
+            names = None
+        with self.lock:
+            self.model_names[key] = (now, names)
+            while len(self.model_names) > 128:
+                self.model_names.popitem(last=False)
+        return names
+
     def sync(self, rows: Iterable[dict], now: float, initial_only: bool = False, cfg=None) -> None:
         from .auto_progress import activity_snapshot
+        from .helper_agents import enabled as helper_on
+        model_on = helper_on(cfg, "card_titles")
         pending = []
         with self.lock:
             rows = list(rows)
@@ -224,15 +257,19 @@ class Watcher:
                         needs_translation = isinstance(row.get("title"), str) and not _HEBREW.search(row["title"])
                         same_title = state.get("source_title") == row.get("title")
                         title = state.get("translated_title") if same_title else None
+                        sources = english_steps(snapshot) if model_on else []
+                        names = {k: v for k, v in (state.get("step_names") or {}).items() if k in sources}
                         state.update(fingerprint=fingerprint, snapshot=snapshot, source_title=row.get("title"),
-                                     summary=fallback(row, snapshot, title),
+                                     summary=fallback(row, snapshot, title, names), step_names=names,
+                                     step_sources=sources, steps_ready=all(k in names for k in sources),
                                      title_ready=not needs_translation or title is not None)
                     state["row"] = dict(row)
                     rec = cards.sync_auto(session, row["chat"], row["thread"], row["title"], [],
                                           bg=row.get("bg", 0), now=now, summary=state["summary"], refresh=changed,
                                           activity_fingerprint=fingerprint)
-                    if (rec is not None and not initial_only and not state.get("title_ready", False)
-                            and isinstance(row.get("title"), str)):
+                    if (rec is not None and not initial_only and isinstance(row.get("title"), str)
+                            and (not state.get("title_ready", False)
+                                 or (model_on and not state.get("steps_ready", True)))):
                         pending.append((session, row["title"], fingerprint, rec["id"], rec["updated"]))
                 except Exception:
                     continue  # optional progress must never hold up the bridge
@@ -240,8 +277,17 @@ class Watcher:
         # Model work can take the full translation budget. Never hold the watcher lock while it runs:
         # Cockpit state refreshes use this same watcher through initial_only=True.
         for session, title, fingerprint, expected_id, expected_updated in pending:
-            translated = self._cached_translation(title, cfg)
-            if translated is None:
+            with self.lock:
+                held = self.sessions.get(session) or {}
+                sources = list(held.get("step_sources") or [])
+                title_ready, steps_ready = held.get("title_ready", False), held.get("steps_ready", True)
+            names = None
+            if model_on and (not title_ready or not steps_ready):
+                names = self._model_names(title, sources, cfg)
+            translated = (names or {}).get("title")
+            if translated is None and not title_ready:
+                translated = self._cached_translation(title, cfg)  # the offline engine stays the fallback
+            if translated is None and not names:
                 continue
             with self.lock:
                 state = self.sessions.get(session)
@@ -249,13 +295,18 @@ class Watcher:
                         or state.get("source_title") != title):
                     continue
                 row, snapshot = state["row"], state["snapshot"]
-                summary = fallback(row, snapshot, translated)
+                step_names = dict(state.get("step_names") or {})
+                step_names.update((names or {}).get("steps") or {})
+                kept = translated or state.get("translated_title")
+                summary = fallback(row, snapshot, kept, step_names)
                 rec = cards.sync_auto(session, row["chat"], row["thread"], row["title"], [],
                                       bg=row.get("bg", 0), now=now, summary=summary, refresh=True,
                                       expected_id=expected_id, expected_updated=expected_updated,
                                       activity_fingerprint=fingerprint)
                 if rec is not None:
-                    state.update(summary=summary, translated_title=translated, title_ready=True)
+                    state.update(summary=summary, translated_title=kept, step_names=step_names,
+                                 title_ready=state.get("title_ready", False) or translated is not None,
+                                 steps_ready=names is not None or state.get("steps_ready", True))
 
 
 watcher = Watcher()
@@ -273,27 +324,10 @@ def start(cfg, now: float) -> None:
     _scan_at = now
 
     def scan():
+        from .status import transcript_round
         try:
-            if not enabled():
-                watcher.sync([], now)
-                return
-            from .config import home_chat, state_dir
-            from .sessions_menu import collect
-            from .topics import TopicMap
-            from .status import transcript_of
-            from .auto_progress import cached, forget
-            from .usage import background_of
-            entries = collect(TopicMap(state_dir() / "topics.json", None, home_chat(cfg), cfg=cfg), now=now)
-            rows = []
-            for entry in entries:
-                path = transcript_of(entry.session)
-                bg = cached(path, "auto-cards-bg", lambda p: len(background_of(p, now=now)), 0,
-                            now=now, max_age=600) if entry.state != "ended" else 0
-                rows.append({"session": entry.session, "chat": home_chat(cfg) if entry.chat is None else entry.chat,
-                             "thread": entry.thread, "title": entry.name or "התקדמות העבודה",
-                             "state": entry.state, "path": path, "bg": bg})
-            watcher.sync(rows, now, cfg=cfg)
-            forget(r["path"] for r in rows if r["path"])
+            with transcript_round():
+                _scan(cfg, now)
         except Exception:
             pass
         finally:
@@ -303,3 +337,27 @@ def start(cfg, now: float) -> None:
         threading.Thread(target=scan, name="auto-cards-scan", daemon=True).start()
     except Exception:
         _scan_guard.release()
+
+
+def _scan(cfg, now: float) -> None:
+    """One auto-cards scan (in its own thread): the sessions, their transcripts and background agents."""
+    if not enabled():
+        watcher.sync([], now)
+        return
+    from .config import home_chat, state_dir
+    from .sessions_menu import collect
+    from .topics import TopicMap
+    from .status import transcript_of
+    from .auto_progress import cached, forget
+    from .usage import background_of
+    entries = collect(TopicMap(state_dir() / "topics.json", None, home_chat(cfg), cfg=cfg), now=now)
+    rows = []
+    for entry in entries:
+        path = transcript_of(entry.session)
+        bg = cached(path, "auto-cards-bg", lambda p: len(background_of(p, now=now)), 0,
+                    now=now, max_age=600) if entry.state != "ended" else 0
+        rows.append({"session": entry.session, "chat": home_chat(cfg) if entry.chat is None else entry.chat,
+                     "thread": entry.thread, "title": entry.name or "התקדמות העבודה",
+                     "state": entry.state, "path": path, "bg": bg})
+    watcher.sync(rows, now, cfg=cfg)
+    forget(r["path"] for r in rows if r["path"])

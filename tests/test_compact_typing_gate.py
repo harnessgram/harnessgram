@@ -34,6 +34,7 @@ def pane(monkeypatch):
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "recently_moving", lambda s: False)
     monkeypatch.setattr(I, "pane_runs_session", lambda pane, s: True)
+    monkeypatch.setattr(I, "pane_session_process", lambda *a, **k: (7, "Wed Nov 18 13:00:00 2026"))
     monkeypatch.setattr(I, "_pane_from_process", lambda s: "%1")
     from ctb import idle_lines
     monkeypatch.setattr(idle_lines, "_foreground_claude", lambda p, s: True)
@@ -421,6 +422,7 @@ def test_a_nudge_that_stays_unsent_keeps_the_record_until_it_is_taken_out(monkey
     monkeypatch.setattr(I.time, "sleep", lambda _: None)
     monkeypatch.setattr(I, "recently_moving", lambda s: False)
     monkeypatch.setattr(I, "pane_runs_session", lambda pane, s: True)
+    monkeypatch.setattr(I, "pane_session_process", lambda *a, **k: (7, "Wed Nov 18 13:00:00 2026"))
     monkeypatch.setattr(I.time, "monotonic", iter(range(0, 10_000)).__next__)
     assert not I.typed_nudge(SID, "%1")  # Enter was swallowed and our own text was taken back
     assert p.box == "" and not I.nudge_recently_typed(SID)

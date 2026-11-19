@@ -189,6 +189,13 @@ def handle(update, cfg, bot, started, from_owner):
             isinstance(m.get("text"), str) or any(m.get(k) for k in MEDIA))
         if human:
             _notice(bot, binding, REFUSED)
+        if update.get("callback_query") and bot is not None:
+            try:  # a button in this topic acts on nothing here; the tap is answered, never left spinning
+                from .i18n import get_lang, t
+                bot.call("answerCallbackQuery", {"callback_query_id": q.get("id") or "",
+                                                 "text": t("toast_not_available", lang=getattr(cfg, "ui_language", None) or get_lang())})
+            except TelegramError:
+                pass
         return "command-topic-refused"
     try:
         C.private_dir(C.state_dir())

@@ -41,6 +41,13 @@ change live progress, receipts or the footer.
   If you cannot run all of it, at least run the contract tests your change can break: a new panel route or Cockpit
   string needs `tests/test_panel_docs.py` and `tests/test_panel_hebrew.py`; any new host, id or name needs
   `tests/test_public_hygiene.py`.
+- **Every inline button goes through the button QA harness** (`tests/test_button_qa.py`). It reads every
+  `callback_data` in `src/ctb`, taps each one as the owner through the real dispatcher (in the session's topic and
+  in a topic whose session is gone) and fails when a button has no handler, when its handler does not answer the
+  tap, or when its data could pass Telegram's 64 bytes. A new button with a new data prefix fails CI until you add
+  that prefix to `FAMILIES` there (a stale sample and the longest data you build) and route it in
+  `inbox.handle_button`; data computed away from the button goes in `DYNAMIC`. Never make a handler return without
+  answering the callback query: a stale card says it is outdated, it never stays silent.
 - Write commit messages and pull requests in plain English: what changed and why.
 
 ## Licence

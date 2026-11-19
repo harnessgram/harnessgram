@@ -36,7 +36,7 @@
       "blocked": "התרעת נתיב · דרושה בדיקה",
       "shipped": "נחת בהצלחה",
       "age": "עודכן",
-      "details": "פרטים והערה",
+      "details": "פרטים",
       "answers": "תשובות ששלחת",
       "allRequests": "לכל הבקשות",
       "yes": "כן",
@@ -66,7 +66,13 @@
       "contextWhy_briefing_window": "חלון תדריך הבוקר",
       "contextWhy_active_work": "עבודה פעילה ליד המחשב",
       "contextWhy_away_from_mac": "אין פעילות אחרונה במחשב",
-      "contextWhy_no_strong_signal": "אין הקשר בולט כרגע"
+      "contextWhy_no_strong_signal": "אין הקשר בולט כרגע",
+      "picture": "תמונה",
+      "commentPh": "ההערה שלך לסשן, במילים שלך (לא חובה)",
+      "commentOnly": "שליחת הערה בלי להחליט",
+      "commentHint": "עם כן או לא, ההערה נשלחת יחד עם התשובה. הערה לבד היא לא תשובה ולא אישור, וההחלטה נשארת פתוחה.",
+      "commentSent": "ההערה נשלחה. זו לא תשובה ולא אישור",
+      "yourComments": "הערות ששלחת"
     },
     "settings": {
       "title": "טיסת מבחן לקוקפיט החדש",
@@ -75,6 +81,8 @@
       "preview": "טיסת מבחן עבורי",
       "on": "מופעל",
       "subtitle": "כיול מחוונים ושליטה במערכות הטיסה",
+      "theme": "מראה",
+      "themeHint": "אוטומטי מתאים את המראה לטלגרם או למכשיר",
       "notify": "התראות, דיווחי קשר והקלטות",
       "notifyHint": "התראות, דיווחי מגדל, תדריכים והקלטות קשר",
       "auto": "טייס אוטומטי",
@@ -604,6 +612,11 @@
       "scene_clapper": "וידאו",
       "scene_catalog": "קטלוג",
       "scene_generic": "כללי"
+    },
+    "native": {
+      "confirmTitle": "לאשר?",
+      "ask": "לבצע: {action}?",
+      "cleanupAsk": "לסגור {n} נושאים בטלגרם?"
     }
   },
   "en": {
@@ -643,7 +656,7 @@
       "blocked": "Needs a check",
       "shipped": "Completed",
       "age": "Updated",
-      "details": "Details and note",
+      "details": "Details",
       "answers": "Your answers",
       "allRequests": "All requests",
       "yes": "Yes",
@@ -673,7 +686,13 @@
       "contextWhy_briefing_window": "Morning briefing window",
       "contextWhy_active_work": "Active work at the Mac",
       "contextWhy_away_from_mac": "No recent Mac activity",
-      "contextWhy_no_strong_signal": "No strong context signal"
+      "contextWhy_no_strong_signal": "No strong context signal",
+      "picture": "Picture",
+      "commentPh": "Your comment for the session, in your own words (optional)",
+      "commentOnly": "Send the comment without deciding",
+      "commentHint": "With yes or no, the comment goes with the answer. A comment alone is not an answer and approves nothing; the decision stays open.",
+      "commentSent": "Comment sent. It is not an answer and approves nothing",
+      "yourComments": "Your comments"
     },
     "settings": {
       "title": "Preview the new Cockpit",
@@ -682,6 +701,8 @@
       "preview": "Preview for me",
       "on": "On",
       "subtitle": "Personal preferences and control",
+      "theme": "Appearance",
+      "themeHint": "Auto follows Telegram or this device",
       "notify": "Messages and recordings",
       "notifyHint": "Alerts, summaries and voice recordings",
       "auto": "Automatic work",
@@ -1211,6 +1232,11 @@
       "scene_clapper": "Video",
       "scene_catalog": "Catalog",
       "scene_generic": "General"
+    },
+    "native": {
+      "confirmTitle": "Are you sure?",
+      "ask": "{action}?",
+      "cleanupAsk": "Close {n} topics in Telegram?"
     }
   }
 }

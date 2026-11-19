@@ -471,3 +471,24 @@
 .cockpit-v2 .v2-idea-body[hidden]{display:none}
 .cockpit-v2 .v2-idea-text{margin:0;font-size:14px;line-height:1.45;overflow-wrap:anywhere;white-space:pre-wrap}
 .cockpit-v2 .v2-idea-ask{justify-self:start;display:inline-flex;align-items:center;gap:6px;min-block-size:44px}
+/* A decision's whole context: markdown-lite detail, pictures (tap to enlarge), links and the owner's comment. */
+.cockpit-v2 .v2-decision>.v2-decision-pictures,.cockpit-v2 .v2-decision>.v2-decision-links,.cockpit-v2 .v2-decision>.v2-comment-box,.cockpit-v2 .v2-decision>.v2-replies{grid-column:1 / -1;min-inline-size:0}
+.cockpit-v2 .v2-rich p{margin-block:0 6px;white-space:pre-line}
+.cockpit-v2 .v2-rich p:last-child,.cockpit-v2 .v2-rich ul:last-child{margin-block-end:0}
+.cockpit-v2 .v2-rich ul{margin-block:0 6px;margin-inline:0;padding-inline-start:20px}
+.cockpit-v2 .v2-rich li{margin-block:2px}
+.cockpit-v2 .v2-decision-pictures{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,128px),1fr));gap:8px}
+.cockpit-v2 .v2-decision-picture-cell{min-inline-size:0}
+.cockpit-v2 .v2-decision-picture img{max-block-size:40vh}
+.cockpit-v2 .v2-decision-links{display:flex;flex-direction:column;gap:6px}
+.cockpit-v2 .v2-decision-link{display:flex;align-items:center;gap:8px;inline-size:100%;min-inline-size:0;min-block-size:44px;padding-block:6px;padding-inline:10px;border-radius:12px;border:1px solid var(--v2-line);background:var(--field);color:var(--v2-ink);font:inherit;text-align:start}
+.cockpit-v2 .v2-decision-link svg{flex:none}
+.cockpit-v2 .v2-link-text{display:flex;flex-direction:column;min-inline-size:0;overflow-wrap:anywhere}
+.cockpit-v2 .v2-link-text small{color:var(--v2-muted);font-size:12px;text-align:start}
+.cockpit-v2 .v2-comment-box{display:flex;flex-direction:column;gap:6px}
+.cockpit-v2 .v2-comment-hint{color:var(--v2-muted)}
+.cockpit-v2 .v2-comment-only{align-self:flex-end;max-inline-size:100%;min-block-size:44px;padding-block:4px;padding-inline:14px;border-radius:var(--v2-pill);border:1px solid var(--v2-line);background:var(--v2-glass);color:var(--v2-ink);font:inherit;font-weight:700;overflow-wrap:anywhere}
+.cockpit-v2 .v2-comment-only:disabled{opacity:.5}
+.cockpit-v2 .v2-replies{display:flex;flex-direction:column;gap:4px;padding-block:8px;padding-inline:10px;border-radius:10px;background:var(--field)}
+.cockpit-v2 .v2-replies-title{font-size:12px;font-weight:800;color:var(--v2-muted)}
+.cockpit-v2 .v2-reply{margin-block:0;white-space:pre-line;overflow-wrap:anywhere;font-size:14px}

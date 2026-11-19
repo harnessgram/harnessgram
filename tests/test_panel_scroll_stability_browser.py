@@ -133,8 +133,8 @@ SCREENS = (
 def test_three_polls_hold_the_first_visible_card_on_phone(browser, monkeypatch, screen, navigate, ready):
     render_page = panel_page.render_page
 
-    def fixture_page(lang, nonce):
-        html = render_page(lang, nonce).decode()
+    def fixture_page(lang, nonce, native=False):
+        html = render_page(lang, nonce, native=native).decode()
         # Measure Cockpit's own restoration independently of Chromium's native scroll anchoring.
         html = html.replace("</style>", "html{overflow-anchor:none}</style>", 1)
         html = html.replace("function render(d,force){", CARDS + "\nfunction render(d,force){", 1)

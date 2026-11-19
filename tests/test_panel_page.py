@@ -126,7 +126,9 @@ def test_native_touches_are_feature_checked():
     assert 'if(!ver("6.2"))return;' in func("syncClose") and "enableClosingConfirmation" in func("syncClose")
     assert 'ver("6.1")&&wa.BackButton' in code and 'ver("7.0")&&wa.SettingsButton' in code
     assert 'ver("7.10")&&wa.setBottomBarColor' in code and 'ver("6.9")' in func("theme")
-    assert "MainButton" not in code
+    # The bottom buttons belong to the cockpit_native module alone (tests/test_cockpit_native.py checks its wrapper).
+    native = (Path(panel_page.__file__).parent / "cockpit_native.js").read_text(encoding="utf-8").split("\n", 1)[1]
+    assert "MainButton" in native and "MainButton" not in code.replace(native, "")
     css = panel_page.PAGE[panel_page.PAGE.index("<style"):panel_page.PAGE.index("</style>")]
     assert "--tg-content-safe-area-inset-top" in css and "--tg-safe-area-inset-bottom" in css
 

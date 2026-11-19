@@ -12,6 +12,7 @@ def test_defaults_and_coercion():
     cfg = C.from_dict({"bot_token": "  " + GOOD_TOKEN + "\n", "owner_chat_id": "123", "unknown_key": 1})
     assert cfg.bot_token == GOOD_TOKEN  # whitespace stripped
     assert cfg.owner_chat_id == 123 and cfg.target_language == "he" and cfg.translate is False
+    assert cfg.auto_decision_cards is False
     assert cfg.ready
 
 
@@ -28,6 +29,8 @@ def test_bad_values_are_rejected():
         C.from_dict({"translate": "yes"})
     with pytest.raises(C.ConfigError):
         C.from_dict({"engines": "google"})
+    with pytest.raises(C.ConfigError):
+        C.from_dict({"auto_decision_cards": "yes"})
 
 
 def test_original_and_stop_words_validation():

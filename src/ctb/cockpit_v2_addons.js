@@ -49,7 +49,7 @@ function vaPage(d){var page=el("div","vk-page va-page");page.setAttribute("data-
   vaOpen=false;vaSnack=null;vaRerender();window.scrollTo(0,0);});
  page.appendChild(vkHead("gears",vaT("title"),vaT("subtitle"),setHome,"vk-home-head"));
  if(!vaData){var box=el("div","vk-loading");box.setAttribute("data-va-loading","");
-  if(vaError&&!vaLoading){box.appendChild(el("p",null,vaT("loadFailed")));var r=el("button","vk-send",vaT("retry"));r.type="button";r.addEventListener("click",function(){vaLoad();vaRerender();});box.appendChild(r);}
+  if(vaError&&!vaLoading){box.appendChild(el("p",null,vaT("loadFailed")));var r=el("button","vk-send",vaT("retry"));r.type="button";r.setAttribute("data-native-main","");r.addEventListener("click",function(){vaLoad();vaRerender();});box.appendChild(r);}
   else{box.appendChild(el("span","dotpulse"));box.appendChild(el("span",null,vaT("loading")));if(!vaLoading)vaLoad();}
   page.appendChild(box);return;}
  var now=el("div","va-now");now.appendChild(icon("clock"));now.appendChild(el("span",null,vaT("now")));page.appendChild(now);

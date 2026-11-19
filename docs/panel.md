@@ -289,6 +289,13 @@ owner can type a line for it to say now (`POST /api/radio-say {"text"}`, `ctb ra
 The panel offers a guarded **Reload sessions** action for applying changed hook settings, as described below.
 General stop/restart controls remain in the bot. A session's own automatic-compaction threshold can also be set here.
 
+### Native Telegram controls (`cockpit_native`, off by default)
+
+With `"cockpit_native": true` in the config the page uses Telegram's own Mini App controls: theme colours from
+`themeParams`, the bottom button for a screen's primary action,
+fullscreen on phones and CloudStorage for the last tab and opened blocks. Off, or outside Telegram, nothing changes.
+The audit of every Mini App feature and where the Cockpit uses it is in [cockpit-v2.md](cockpit-v2.md#native-telegram-feel-cockpit_native).
+
 ## Hook health and session reload
 
 Every five minutes the heartbeat compares all bridge hook registrations with the installer's desired hooks,
@@ -470,7 +477,7 @@ the body limit is in bytes. The list is the route table in `panel.py`, and
 | Route | Body at most | What it does |
 |---|---|---|
 | `/api/state` | 64 | Returns everything the page shows: decisions, cards, reminders, sessions, quota. |
-| `/api/decide` | 1280 | Answers one decision yes or no, with an optional note of up to 300 characters. Refused with `409` when the decision is closed, its session has ended or the same session asked it again later; age alone does not refuse it. |
+| `/api/decide` | 4400 | Answers one decision yes or no, with an optional note of up to 1000 characters, or (`"choice": "reply"`) sends the note alone as the owner's comment, which answers and approves nothing. Refused with `409` when the decision is closed, its session has ended or the same session asked it again later; age alone does not refuse it. |
 | `/api/card` | 1280 | Answers one choice or question card. |
 | `/api/card-media-token` | 64 | Issues a 10-minute image-only token for one choice image (`{"id":"<image-id>"}`); requires the owner's action login. |
 | `/api/say` | 2600 | Writes up to 600 characters to one live session. |
@@ -559,7 +566,7 @@ owner may also answer it from a HarnessGram phone widget (see "Widget devices");
 decision asked before the flag existed) only the Cockpit or the app after Face ID answers it.
 
 
-    ctb decide ask "Ship the fix?" [--detail TEXT] [--yes LABEL] [--no LABEL] [--routine]
+    ctb decide ask "Ship the fix?" [--detail TEXT] [--image PATH ...] [--link LABEL=URL ...] [--yes LABEL] [--no LABEL] [--routine]
     ctb decide list
     ctb decide cancel <id>
     ctb decide public-key
@@ -574,10 +581,34 @@ tmux pane for a session: it changes nothing unless it runs inside that session's
 is recorded), and it saves only the caller's own pane (the pane's first process must be one of its
 ancestors).
 
+**Give the owner the whole decision.** Always include what the owner needs to decide: the context and the options.
+Rich decision fields and controls require `rich_decisions_enabled: true` in the private configuration. The switch is
+false by default; while it is off, the legacy 1,500-character detail and 300-character note limits remain, attachment
+options are not advertised or accepted, and the comment-only action and decision media routes are unavailable.
+
+When enabled, the owner sees all of the context and pictures in the Cockpit before the buttons and can answer with
+their own words:
+
+- `--detail`: up to 4000 characters of markdown-lite. A blank line starts a new paragraph, a line starting with
+  `- ` (or `• `, `* `) is a bullet and `**text**` is bold. Nothing else is interpreted: the page builds it from text
+  nodes only, so HTML, scripts and links inside the detail stay plain text. Put the options, the trade-offs and your
+  recommendation (`Recommendation: ...`) here.
+- `--image PATH` (repeat, up to 6): a screenshot, a design or a chart. PNG, JPEG or WebP under 20 MiB, checked by
+  content (never by extension), re-encoded without metadata (EXIF, GPS, text chunks), at most 1600 px a side and
+  4 MiB, and stored privately under the state dir's `decision-media/` (folder `0700`, files `0600`, opaque 32-hex
+  names; the source path is never stored or printed). A copy lives while its decision is open and 10 minutes after
+  it closes, then it is removed. The owner sees each picture on its own tile and taps to enlarge (pinch to zoom);
+  tapping a picture never answers.
+- `--link LABEL=URL` (repeat, up to 6; a bare `https://...` works too): pages to check before deciding. https only,
+  with a host, no login part, no spaces or control characters, and nothing that reads as a credential or a private
+  sign-in link (the same rules as a link card). Re-checked every time the record is loaded.
+
 A decision is `{id, session, chat, thread, title, detail, yes, no, created, state}` in
 `decisions.json` in the state dir (private file, file lock, because the CLI and the panel are separate
-processes). The title is at most 200 characters, the detail 1500 and each label 30 (default Yes/No, or
-כן/לא); anything longer is refused, not cut. At most 50 decisions are open at once, at most 5 per session.
+processes), plus `images` (picture ids), `links` (`[{"label", "url"}]`) and `replies` (the owner's comments sent
+without deciding, `[{"at", "text"}]`) only when there are any; a record from before these fields loads unchanged,
+and a malformed one of them is dropped, not trusted. The title is at most 200 characters, the detail 4000, a link
+label 60 and each button label 30 (default Yes/No, or כן/לא); anything longer is refused, not cut. At most 50 decisions are open at once, at most 5 per session.
 A yes label that reads as a no (no, לא, cancel, ...) or a no label that reads as a yes (yes, כן, approve,
 ...) is refused, because the owner only sees the label; matching ignores case, spaces and punctuation.
 `ask` also posts one short line in the session's topic ("a decision is waiting in the control panel").
@@ -585,7 +616,32 @@ A yes label that reads as a no (no, לא, cancel, ...) or a no label that reads 
 (newest 50) so a late tap gets a clear refusal.
 
 The owner taps yes or no in the panel (`POST /api/decide`, body `{"id", "choice": "yes"|"no", "note"}`,
-note at most 300 characters). The answer is recorded once; a second answer, a cancelled decision or an
+note at most 1000 characters, the owner's own words, delivered with the answer as "The owner's note: «...»").
+
+**A comment without deciding.** `{"id", "choice": "reply", "note"}` (the note is required) sends the comment alone.
+The session reads it as the owner's own words, marked "This is NOT an answer and NOT an approval": no button was
+tapped, nothing is approved (not the question's action and no other sensitive action), and the question stays open.
+Nothing is signed, the topic notice stays as it is, and the reply answers `200 {"ok": true, "reply": true, "key",
+"delivery"}`. It needs the same fresh owner login as an answer, is refused for a closed or stale decision (`409`)
+and for a Claude Code permission request (`400`), and at most 20 comments are taken per decision (`400` after
+that). The owner can still answer yes or no afterwards, once.
+
+**What `/api/state` returns for a decision** (the iOS app reads the same shape):
+
+```json
+{"id": "<16 hex>", "title": "Ship the release?", "detail": "Two ways.\n\n- **Today**: ...",
+ "yes": "Ship", "no": "Hold", "topic": "Orbit: game", "age": 120, "stale": "", "old": false,
+ "url": "https://t.me/c/...", "link": "https://t.me/c/.../2", "here": false, "sensitive": true,
+ "images": ["<32 hex>"],
+ "links": [{"label": "Preview", "url": "https://example.com/preview"}],
+ "replies": [{"text": "Which backups exactly?", "age": 60}]}
+```
+
+`images`, `links` and `replies` are present only when there are any (newest 5 replies). A picture's bytes come only
+through `POST /api/card-media-token` `{"id"}` (the owner's fresh login; `404` for an id that is not a picture of an
+open decision or a choice card) and then `GET /card-media/<id>?auth=<token>` (`Cache-Control: private, no-store`);
+there is no public URL. With a translator, `detail_he` and the other `<field>_he` copies come as before; link labels
+and replies are shown as written. The answer is recorded once; a second answer, a cancelled decision or an
 unknown id is refused (`409`, which names the recorded choice, or `404`). The answer is saved as closed
 first and then queued to the session's inbox; if the message was not written the decision is reopened
 under the same lock (an accepted answer is never reopened; a failed trim of the queue is ignored). The
@@ -597,7 +653,8 @@ answer is signed with an Ed25519 key that only the bridge holds: a raw 32-byte s
 logged, printed or written to a file. The answered record gets `answer_sig`: `{"payload", "signature", "key"}`, each
 base64. The payload is the exact signed bytes, `json.dumps(obj, separators=(",", ":"), sort_keys=True,
 ensure_ascii=False)` in UTF-8, of `{"v": 1, "kind": "harnessgram-decision-answer", "id", "title", "detail", "choice",
-"note", "created", "closed", "routine", "by", "via"}`. `by` is the Telegram user id the answering route verified
+"note", "created", "closed", "routine", "by", "via"}`, plus `links` and `images` when the decision has them (a decision
+without them signs exactly the same bytes as before). `by` is the Telegram user id the answering route verified
 (never a value from the request body) and `via` is the route: `panel` (the Cockpit, `POST /api/decide`), `widget` (a
 paired device, `POST /api/widget-decide`) or `chat-widget` (a widget button in the owner's private chat).
 `ctb decide public-key` prints only the base64 raw 32-byte public key a verifier pins. When the package or the

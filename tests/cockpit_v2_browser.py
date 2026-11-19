@@ -365,7 +365,8 @@ def addons_sample():
     return addons.view(Config())
 
 
-def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge=None, schedule=None, addons=None, family=None, height=844, start=""):
+def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge=None, schedule=None, addons=None, family=None, height=844, start="",
+            native=False, stub_extra="", ready=None):
     state = copy.deepcopy(state if state is not None else sample_state(lang))
     calls = []
     kview = knowledge if knowledge is not None else knowledge_sample(lang)
@@ -382,6 +383,7 @@ def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge
     # is separately tested against the real PanelHandler.
     stub = stub.replace('colorScheme: "light"', 'colorScheme: ' + json.dumps(scheme))
     stub += '\nwindow.Telegram.WebApp.close=function(){window.__closed=true;};'
+    stub += stub_extra  # extra Telegram fields a test needs (cockpit_native)
 
     def route(request):
         url = request.request.url
@@ -448,7 +450,7 @@ def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge
             else:
                 request.fulfill(json={"ok": True, "cleared": 1, "restored": 1})
         elif path == "/":
-            request.fulfill(content_type="text/html", body=panel_page.render_page(lang, "fixture"))
+            request.fulfill(content_type="text/html", body=panel_page.render_page(lang, "fixture", native=native))
         else:
             request.fulfill(status=404, body="")
 
@@ -456,7 +458,7 @@ def open_v2(browser, lang="he", scheme="light", state=None, width=390, knowledge
     page.knowledge = kview
     page.addons = aview
     page.goto("http://127.0.0.1/" + ("?tgWebAppStartParam=" + start if start else ""))
-    page.locator(".v2-needs" if state.get("ui_v2_enabled") else "#tabs .tab").first.wait_for()
+    page.locator(ready or (".v2-needs" if state.get("ui_v2_enabled") else "#tabs .tab")).first.wait_for()
     return ctx, page, calls, errors, state
 
 

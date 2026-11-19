@@ -1078,16 +1078,33 @@ def _answer(session: str, pane: str, d: Dialog, num: int) -> bool:
     return _move_to(session, pane, d, ("o", num)) is not None and _keys(pane, "Enter")
 
 
+SETTLE_READS = 20     # screen reads after one key before the walk gives up (about 2 s with SETTLE_PAUSE)
+SETTLE_PAUSE = 0.1
+
+
+def _settled(session: str, d: Dialog, done, waiting) -> Optional[Dialog]:
+    """Read the screen until it shows the result of the key just sent: `done(d2)` is the one screen that lets
+    the walk go on. A screen that still shows the state before the key (`waiting(d2)`), or a frame drawn
+    half-way (no dialog parsed), is read again: a loaded terminal can take longer than one pause to redraw.
+    Any other screen, or no result within SETTLE_READS reads, stops the walk. Waiting never sends a key."""
+    for _ in range(SETTLE_READS):
+        time.sleep(SETTLE_PAUSE)
+        _p, _b, d2, _o = open_screen(session)
+        if d2 is not None and d2.identity == d.identity and done(d2):
+            return d2
+        if d2 is not None and (d2.identity != d.identity or not waiting(d2)):
+            return None
+    return None
+
+
 def _step(session: str, pane: str, d: Dialog, key: str, expect: int) -> Optional[Dialog]:
     """One arrow key, then read the screen again: it must be the same dialog with the selector exactly one
     row further. Anything else stops the whole sequence."""
     if not _keys(pane, key):
         return None
-    time.sleep(0.25)
-    _p, _b, d2, _o = open_screen(session)
-    if d2 is None or d2.identity != d.identity or d2.nav != d.nav or d2.cursor_at != expect:
-        return None
-    return d2
+    return _settled(session, d,
+                    lambda d2: d2.nav == d.nav and d2.cursor_at == expect,
+                    lambda d2: d2.nav == d.nav and d2.cursor_at == d.cursor_at)
 
 
 def _move_to(session: str, pane: str, d: Dialog, target: tuple) -> Optional[Dialog]:
@@ -1111,12 +1128,10 @@ def _toggle(session: str, pane: str, d: Dialog, num: int) -> Optional[Dialog]:
     at = _move_to(session, pane, d, ("o", num))
     if at is None or not _keys(pane, "Space"):
         return None
-    time.sleep(0.25)
-    _p, _b, d2, _o = open_screen(session)
-    now = next((o for o in (d2.options if d2 else []) if o.num == num), None)
-    if d2 is None or d2.identity != d.identity or now is None or now.checked != (not opt.checked):
-        return None
-    return d2
+
+    def box(d2: Dialog):
+        return next((o.checked for o in d2.options if o.num == num), None)
+    return _settled(session, at, lambda d2: box(d2) is (not opt.checked), lambda d2: box(d2) is opt.checked)
 
 
 def _confirm_multi(session: str, pane: str, d: Dialog) -> Optional[Dialog]:

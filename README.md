@@ -280,6 +280,7 @@ Or write `~/.config/claude-telegram-bridge/config.json` yourself and `chmod 600`
 | `source_language` | `"en"` | language Claude writes in when `translate` is on |
 | `translate` | `false` | "reply in English + `Summary:` line" mode, with translation |
 | `mirror` | `true` | `false` turns the bridge off: nothing is sent or received (see [Privacy](#privacy)). A value that is not `true`/`false`, or a config file that exists but cannot be read, also means off |
+| `auto_decision_cards` | `false` | when enabled, conservatively detected questions addressed to you in mirrored replies also become routine Cockpit cards; their answers reply only to that question and never approve a sensitive action |
 | `enforce_language` | `false` | ask Claude to rewrite a reply that is not in `target_language` (scripts with their own alphabet only) |
 | `redact_outgoing` | `true` | replace credential-looking strings with `[redacted]` before text leaves the machine |
 | `original` | `"edit"` | order of a translated reply: `"edit"` (default) sends the reply at once as written and then edits that same message into the translation with the original folded under it (`"edit-off"`: no fold); `"folded-after"` (alias `"after"`) waits up to 12 s and sends the translation first; `"before"` always sends the original first; `"off"` sends the translation only. A slow or failed translation always falls back to the original |
@@ -299,9 +300,11 @@ Or write `~/.config/claude-telegram-bridge/config.json` yourself and `chmod 600`
 | `voice_language` | `""` | language you speak in voice notes (default: `target_language`) |
 | `progress` | `false` | send live progress while working; `progress_details: false` shows tool labels only |
 | `progress_details` | `false` | when enabled, progress can include action details, output previews and assistant text |
+| `plain_step_text` | `false` | put an instant plain-Hebrew explanation above raw tool commands and output; when the routine translation tier is available it may improve the line in the background |
 | `auto_account_switch` | `false` | allow automatic account switching and session moves, which can transfer transcripts between accounts |
 | `quota_auto_continue` | `false` | send a continue instruction when quota is confirmed to have returned |
 | `idle_lines` | `{}` (on, 4 h) | the idle-line nudger: open team items of the owner ledger that did not move for `hours` (default 4) show in the Cockpit's "Idle lines" block and `ctb idle-lines`; a project listed in `leads` (ledger project -> session id) also gets one short fixed line typed into that session when it is quiet and idle, at most once per item per 4 h. `{"on": false}` turns it off. A latest ledger note containing `parked:` (optionally `parked: until YYYY-MM-DD`) parks the item; see docs/panel.md |
+| `helper_agents` | all off | small Haiku helpers, each behind its own switch: `{"card_titles": false, "patrol": false, "ledger_capture": false, "route": "subscription", "api_fallback": false, "daily_usd_cap": 0.5, "api_until": ""}`. They run on your Claude subscription (`route: "subscription"`); the Anthropic API is used only with `api_fallback: true`, up to `daily_usd_cap` USD a day, and never after the `api_until` date (ISO, empty = refused). See [docs/helper-agents.md](docs/helper-agents.md) |
 | `session_auto_revive` | `false` | reopen sessions after reboot or crash; restart the heartbeat after enabling |
 | `context_footer` | `true` | a small italic `🧠 123k` line (context size) under the last message of each reply |
 | `context_hint_tokens` | `400000` | add a `/compact` hint to that line from this many tokens up (`0` = never) |
@@ -324,6 +327,7 @@ Or write `~/.config/claude-telegram-bridge/config.json` yourself and `chmod 600`
 | `topic_project_about` | `{}` | project label -> one line on what it is, so a session started in the projects root is placed well |
 | `panel_funnel_port` | `null` | opt in to restoring public Tailscale Funnel on this HTTPS port (see [security and setup](docs/panel.md)) |
 | `panel_port` | `8765` | local Cockpit listener port used by the panel and Funnel repair |
+| `cockpit_native` | `false` | use Telegram's own Mini App controls in the Cockpit (theme colours, bottom button, fullscreen on phones, preferences in Telegram CloudStorage); only `true` turns it on; restart the panel after changing it. See [docs/cockpit-v2.md](docs/cockpit-v2.md#native-telegram-feel-cockpit_native) |
 | `panel_button` | `null` (auto) | a pinned control-panel button in every session topic; `null` = only when the panel service is installed |
 | `radio` | `{}` (off) | team radio settings, see [docs/radio.md](docs/radio.md) |
 | `share_base_url` | `""` (off) | HTTPS base URL for sharing files over the upload limit as a link |
@@ -508,8 +512,9 @@ Start a new Claude Code session afterwards. The first reply creates its topic.
   replies, translation engines and whether the listener is polling.
 - A message written while a session works gets a small receipt with buttons: deliver between steps, wait for
   the end of the turn, or stop and send. `/more` sets the default. Held messages stay queued during the turn.
-- A voice note's transcript is shown with send / edit / cancel before it reaches the session (off in car mode,
-  for the dispatcher, or with the `/more` switch). Commands pressed while a session works ask whether to run
+- A voice note's transcript is shown with send / edit / cancel before it reaches the session, also for the
+  dispatcher (off with the `/more` switch, during the three-hour **🚗 Driving** window next to it, and in car mode
+  only when the Cockpit setting `voice_confirm_driving` is `send`). Commands pressed while a session works ask whether to run
   them at the end of the turn or to stop now. `/effort` offers the thinking levels as buttons, `/compact` shows
   one self-updating progress message, and `/esc` answers with a short line instead of a screen picture.
 - `echo "hello" | harnessgram mirror --title test` sends a test message; `harnessgram mirror --file report.pdf --title test`

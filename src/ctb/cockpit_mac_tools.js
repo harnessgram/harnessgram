@@ -90,7 +90,8 @@ function mtOpen(opener,cfg){
    var row=el("div","mt-row");
    row.appendChild(button("clean",isArmed?"arm mt-confirm":"mt-clean-btn",isArmed?mtFmt(V2.tools.mtCleanAsk,{size:mtSize(dry.bytes)}):V2.tools.mtCleanBtn,function(){
     if(!freshNow()){disarm();say(V2.tools.mtStale,true);draw();return;}
-    if(armed==="clean"){var id=st.dry.id;disarm();start("clean",id);}else{arm("clean");haptic("sel");draw();}},!can));
+    if(armed==="clean"){var id=st.dry.id;disarm();start("clean",id);return;}
+    arm("clean");haptic("sel");draw();},!can));
    if(isArmed)row.appendChild(button("cancel","sm",V2.tools.mtCancel,function(){disarm();draw();}));
    cl.appendChild(row);
    var why=el("p","mt-hint",!dry?V2.tools.mtCleanNeed:!fresh?V2.tools.mtStale:V2.tools.mtCleanHint);why.setAttribute("data-mt","clean-hint");cl.appendChild(why);body.appendChild(cl);}

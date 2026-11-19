@@ -42,7 +42,7 @@ off there. An add-on that already had a setting keeps it: the switch here is tha
 | `voice_digest` | Voice summaries | The bridge gathers replies into a private voice summary, outside quiet hours. | on | Cockpit setting `voice_digest` | Claude |
 | `car_mode` | Car mode | Summaries arrive with an alert so they are read aloud, and dictations go to the last session. | off | state file `car-mode` | Claude |
 | `car_voice` | Read aloud in car mode | In car mode the summary is also sent as a voice message. | on | config `voice` | Claude |
-| `voice_echo` | Echo when sent without a preview | A recording that goes to the agent without the transcript preview (car mode or a failed preview) gets a quiet reply with what was heard. | on | `addons.json` | Claude |
+| `voice_echo` | Echo when sent without a preview | A recording that goes to the agent without the transcript preview (the driving window, car mode set to send directly, or a preview Telegram never showed) gets a quiet reply with what was heard and why. | on | `addons.json` | Claude |
 | `listen_link` | Listen in Safari | A radio button opens a private link to a listening page in Safari, which keeps playing in the background and on the lock screen. | on | `addons.json` | Claude, Codex |
 | `radio_agent_media` | Agent media on the radio | An agent can put an audio or video file it made in your private radio queue: with one tap, or automatically while car mode is on. | on | `addons.json` | Claude, Codex |
 | `listen_button` | Listen button | A button under a reply plays it aloud. | on | `addons.json` (gate in `feat/listen-button`) | Claude |

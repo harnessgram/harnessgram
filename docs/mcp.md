@@ -30,6 +30,12 @@ claude mcp add --transport stdio harnessgram -- ctb mcp serve --stdio
 * `answer_routine_ask` answers only asks the bridge has already classified as routine, and only the calling
   session's asks. Sensitive asks are refused.
 
+Every tool first resolves its caller and fails closed: with no proven stdio session, no authenticated HTTP session,
+or tools bound to no caller at all, every call is refused before any bridge state is read, and the server refuses to
+start with unbound tools. Sessions, cards, and ledger rows are matched on the full session id, so two sessions that
+share a short id never see each other's rows. A test enumerates the registered tools and calls each one through the
+real HTTP and stdio servers, so a new tool that shows another session's rows fails the suite.
+
 There are deliberately no delete, install, merge, money, account, publication, promotion, or store-submission tools.
 All session, reply, card, and request ledger results are returned inside an `untrusted_data` wrapper. MCP messages
 use their own `<mcp-message>` fence. Suggestions are discarded before owner messages when a queue is full, while

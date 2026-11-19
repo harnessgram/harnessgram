@@ -37,7 +37,7 @@ jobs:
         env: {CTB_SKIP_BENCH: "1"}
         run: |
           command -v tmux >/dev/null
-          uv run -q --with pytest --with pytest-timeout --with pytest-xdist --with pillow --with "cryptography>=42" --with-editable . python -m pytest -q --timeout 20 -n auto tests --ignore=tests/test_live.py
+          uv run -q --with pytest --with pytest-timeout --with pytest-xdist --with pillow --with "cryptography>=42" --with mcp --with-editable . python -m pytest -q --timeout 20 -n auto tests --ignore=tests/test_live.py
       - name: Package
         if: steps.commit.outputs.skip != 'true'
         run: |

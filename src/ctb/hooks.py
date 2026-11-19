@@ -655,6 +655,7 @@ def hook_stop(stdin_text: str) -> int:
         except Exception:
             data["_radio_mark"] = None
         out = {}
+        card_key = None
         if cfg.ready:
             try:
                 spawn(["finish-stop"], text=json.dumps(data, ensure_ascii=False))
@@ -662,6 +663,36 @@ def hook_stop(stdin_text: str) -> int:
                 from .mirror import log
                 log("stop worker launch failed")
                 out["systemMessage"] = "Telegram delivery could not start; this reply remains available in the app."
+        # Delivery is already detached above. This optional backstop is bounded and
+        # fail-open so it can never delay or suppress mirroring.
+        if (cfg.ready and cfg.auto_decision_cards and session and not data.get("agent_id")
+                and not data.get("stop_hook_active")):
+            try:
+                from . import assistant, owner_questions
+                from .topics import TopicMap
+                from .config import home_chat
+                mode = data.get("permission_mode") or data.get("permissionMode") or ""
+                if mode.lower() not in ("dontask", "plan") and TopicMap(
+                        state_dir() / "topics.json", None, home_chat(cfg), cfg=cfg).place_of(session) is not None:
+                    with open(data.get("transcript_path") or "", "rb") as f:
+                        end = min(data.get("_offset", 0), os.fstat(f.fileno()).st_size)
+                        start = max(0, end - 512 * 1024)
+                        f.seek(start)
+                        tail = f.read(end - start)
+                    if start:
+                        tail = tail.partition(b"\n")[2]
+                    lines = tail.decode("utf-8", errors="replace").splitlines(True)
+                    reply = last_reply(lines)
+                    q = owner_questions.question(reply)
+                    key = owner_questions.turn_key(session, lines, q or "")
+                    if (q and owner_questions.has_real_prompt(lines)
+                            and not assistant.is_assistant(session)
+                            and not owner_questions.references_card(reply)
+                            and not owner_questions.turn_used_explicit_card(lines)):
+                        out.update(decision="block", reason="post it with ctb decide ask, then keep working")
+                        card_key = key
+            except Exception:
+                pass
         if cfg.enforce_language and not data.get("stop_hook_active"):
             # Local, bounded display check only: no translation or network in Stop.
             try:
@@ -684,6 +715,10 @@ def hook_stop(stdin_text: str) -> int:
         from . import credit_mode
         if credit_mode.blocked(session):
             out = {"systemMessage": credit_mode.stop_line()}
+        reminder = {"decision": "block", "reason": "post it with ctb decide ask, then keep working"}
+        if card_key and out == reminder and not owner_questions.claim_once(
+                session, card_key, "stop", timeout=0.1):
+            out = {}
     except Exception:
         return 0
     if out:
@@ -996,7 +1031,8 @@ def _finish_stop(data: dict) -> int:
             code = mirror.run_reply(cfg, title, session or title, reply, wants,
                                     data.get("transcript_path") or "" if cfg.context_footer else "",
                                     answer_to=data.get("_answer_to"),
-                                    on_accept=lambda: update_claim(session, turn, accepted=True))
+                                    on_accept=lambda: update_claim(session, turn, accepted=True),
+                                    source_transcript=data.get("transcript_path") or "", source_lines=lines)
             update_claim(session, turn, done=True)  # delivered, queued, or the owner was alerted
             if code:
                 mirror.alert(cfg, session, "Reply delivery failed; the reply is available in the app.", mirror.last_reply_failure())

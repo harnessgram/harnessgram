@@ -79,9 +79,10 @@ class PreviewSim:
             self.done = ["Compact", "Roomy"][self.cur]
 
 
-if __name__ == "__main__":  # python multisim.py <result file> <ticks e.g. 0100 | next | preview>
-    import termios, tty
+if __name__ == "__main__":  # python multisim.py <result file> <ticks e.g. 0100 | next | preview> [redraw delay s]
+    import termios, time, tty
     result, mode = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "0000")
+    lag = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0  # a slow terminal: each key is drawn this much later
     sim = PreviewSim() if mode == "preview" else Sim([c == "1" for c in mode] if mode != "next" else (False,) * 4,
                                                      last=mode != "next")
     fd = sys.stdin.fileno()
@@ -104,5 +105,7 @@ if __name__ == "__main__":  # python multisim.py <result file> <ticks e.g. 0100 
                b"\n": "Enter"}.get(buf, "?")
         buf = b""
         sim.press(key)
+        if lag:
+            time.sleep(lag)
         draw()
     open(result, "w").write(json.dumps(sim.done))

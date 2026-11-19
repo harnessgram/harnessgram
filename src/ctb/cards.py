@@ -190,6 +190,10 @@ def _record(ident, raw) -> Optional[dict]:
            "chat": raw["chat"], "thread": raw["thread"], "created": float(raw["created"]),
            "updated": float(raw["updated"]), "state": state, "pick": None, "text": "", "closed": 0.0,
            "visibility": visibility_of(raw), **body}
+    if kind in ASKS and raw.get("routine") is True:
+        rec["routine"] = True
+    if kind == "ask" and raw.get("automatic_question") is True:
+        rec["automatic_question"] = True
     if type(raw.get("msg")) is int and raw["msg"] > 0:
         rec["msg"] = raw["msg"]
     for key in ("finished_since", "ended_since"):
@@ -623,7 +627,8 @@ def _fields(kind: str, steps=None, at=None, percent=None, options=None, url="", 
 
 
 def publish(session: str, chat: int, thread: int, kind: str, title: str, detail: str = "", ident: str = "",
-            now: Optional[float] = None, images=None, visibility: Optional[str] = None, **fields) -> dict:
+            now: Optional[float] = None, images=None, visibility: Optional[str] = None,
+            routine: bool = False, automatic_question: bool = False, **fields) -> dict:
     """Prepare private copies outside the cards lock; roll them back on any refusal."""
     if images and (kind != "choice" or not isinstance(images, (list, tuple))
                    or len(images) != len(fields.get("options") or [])):
@@ -638,7 +643,7 @@ def publish(session: str, chat: int, thread: int, kind: str, title: str, detail:
         if images:
             copied = card_media.store_many(images)
         return _publish(session, chat, thread, kind, title, detail, ident, now, copied, visibility=visibility,
-                        **fields)
+                        routine=routine, automatic_question=automatic_question, **fields)
     except BaseException as exc:
         card_media.discard(copied)
         if isinstance(exc, card_media.MediaError):
@@ -647,7 +652,8 @@ def publish(session: str, chat: int, thread: int, kind: str, title: str, detail:
 
 
 def _publish(session: str, chat: int, thread: int, kind: str, title: str, detail: str = "", ident: str = "",
-             now: Optional[float] = None, media_ids=None, visibility: Optional[str] = None, **fields) -> dict:
+             now: Optional[float] = None, media_ids=None, visibility: Optional[str] = None,
+             routine: bool = False, automatic_question: bool = False, **fields) -> dict:
     """A new card, or with `ident` this session's own open card of the same kind replaced in place.
     A card that asks the owner something is never changed after it was published."""
     if kind not in KINDS:
@@ -704,6 +710,10 @@ def _publish(session: str, chat: int, thread: int, kind: str, title: str, detail
             raw = {"kind": kind, "session": session, "chat": chat, "thread": thread, "title": title,
                    "detail": detail, "created": now, "updated": now, "state": "open",
                    "visibility": _visibility(visibility), **body}
+            if kind in ASKS and routine is True:
+                raw["routine"] = True
+            if kind == "ask" and automatic_question is True:
+                raw["automatic_question"] = True
             if kind == "progress":
                 raw["step_at"] = [now] * body["at"]
         if kind == "progress" and ident not in data:
@@ -787,7 +797,9 @@ def delivered_text(rec: dict) -> str:
                  f"(button: {D.quoted(rec['options'][rec['pick']])}) on a card in the control panel.")
     else:
         first = f"✍️ The owner answered a card in the control panel: {D.quoted(rec['text'])}"
-    return "\n".join([first, f"The question this session asked: {D.quoted(rec['title'])}", D.PANEL_APPROVES])
+    boundary = ("This is the owner's reply to this question only. It is not approval of any sensitive action."
+                if rec.get("automatic_question") else D.PANEL_APPROVES)
+    return "\n".join([first, f"The question this session asked: {D.quoted(rec['title'])}", boundary])
 
 
 def answer(cfg: Config, inbox, ident: str, pick=None, text: str = "", now: Optional[float] = None) -> dict:

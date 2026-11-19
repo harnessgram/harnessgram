@@ -3,7 +3,7 @@
 // authenticated API with the same payload. Nothing below decides status: the bridge does.
 var v2ProjectKey="",v2ProjectLast="",v2ProjectClose=null,v2ListY=0,v2Seg=null,V2_PLAYER=document.getElementById("radio-player");
 var V2_SEG_ICONS={studio:"layers",radio:"v2radio",more:"v2grid",tower:"mic"},V2_SEG_KEY="ctb-v2-seg";
-var V2_GROUPS=[["notify","bell",["activity","live_activity_cockpit","voice_digest","progress","progress_details","compact_actions","voice_confirm","delivery_end","status_repost","agent_notices"]],
+var V2_GROUPS=[["notify","bell",["activity","live_activity_cockpit","voice_digest","progress","progress_details","compact_actions","voice_confirm","voice_driving","voice_confirm_driving","delivery_end","status_repost","agent_notices"]],
  ["auto","gears",["auto_cards","cold_compact","auto_account_switch","quota_auto_continue","emergency_credit","session_auto_revive","away","auto_topic_names","state_emoji","agents_topic","general_offer","day_briefing","day_nudges","day_auto_plan","brief_home"]],
  ["models","server",["auto_compact"]],["radio","mic",["voice_copilot","radio_every_reply","radio_board","radio_music","radio_room"]],["connect","laptop",[]]];
 // --- shared parts ------------------------------------------------------------------------------------------------
@@ -209,7 +209,7 @@ function v2More(d){var list=el("div","v2-more");list.setAttribute("data-v2-secti
 // --- Settings ----------------------------------------------------------------------------------------------------
 // The classic Settings rows, built by the classic code and found by their own label; same controls, same API.
 function v2SettingRows(d){var out={},box=settingsBox(d),names={};
- SWITCHES.concat(["activity","voice_digest","auto_compact","cold_compact"]).forEach(function(k){if(S["set_"+k])names[S["set_"+k]]=k;});
+ SWITCHES.concat(["activity","voice_digest","voice_confirm_driving","auto_compact","cold_compact"]).forEach(function(k){if(S["set_"+k])names[S["set_"+k]]=k;});
  Array.prototype.forEach.call(box.querySelectorAll(".row"),function(r){if(r.classList.contains("v2-mode-row")){out.ui_v2=r;return;}
   var nm=r.querySelector(".nm"),k=nm&&names[nm.textContent];if(k&&!out[k])out[k]=r;});return out;}
 function v2Settings(d){
@@ -220,6 +220,7 @@ function v2Settings(d){
  // Curated owner-local packs sit beside knowledge and add-ons.
  if(typeof vpOpen!=="undefined"&&vpOpen){vpPage(d);return;}
  v2PageHead(V2.shell.settings,"v2settings",V2.settings.subtitle);app.appendChild(vkEntry());app.appendChild(vaEntry());if(typeof vpEntry==="function")app.appendChild(vpEntry());var rows=v2SettingRows(d),placed={},st=d.settings||{};
+ var themeCard=el("section","v2-card v2-theme-card");themeCard.setAttribute("data-v2-section","settings-theme");themeCard.appendChild(el("h2",null,V2.settings.theme));themeCard.appendChild(el("div","v2-block-hint",V2.settings.themeHint));themeCard.appendChild(themeSettingRow());app.appendChild(themeCard);
  var appBody=el("div","v2-group-body");APP_SWITCHES.forEach(function(spec){var key=spec[0],copy=spec[2];placed[key]=1;if(key in st){var row=switchRow(key,d),nm=row.querySelector(".nm"),hint=row.querySelector(".mt");nm.textContent=V2.settings[copy];hint.textContent=V2.settings[copy+"Hint"];row.querySelector(".sw").setAttribute("aria-label",V2.settings[copy]);row.setAttribute("data-app-switch",spec[1]);appBody.appendChild(row);}});
  if(appBody.children.length){var appGroup=el("section","v2-card v2-app-appearance");appGroup.setAttribute("data-v2-section","settings-app-appearance");appGroup.appendChild(el("h2",null,V2.settings.appAppearance));appGroup.appendChild(el("div","v2-block-hint",V2.settings.appAppearanceHint));appGroup.appendChild(appBody);app.appendChild(appGroup);}
  V2_GROUPS.forEach(function(g){g[2].forEach(function(k){placed[k]=1;});});

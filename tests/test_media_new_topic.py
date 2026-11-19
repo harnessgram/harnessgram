@@ -248,7 +248,12 @@ def test_with_approval_off_or_driving_a_recording_starts_its_task_at_once(cfg, b
     assert write(update, cfg, bot, topics, box, media) == "picker"
     voice.set_confirm(True)
     monkeypatch.setattr(I, "car_mode_active", lambda: True)
+    voice.set_car_choice("send")  # car mode skips the preview only when set to send directly
     assert write(general(None, mid=11, voice={"file_id": "v2"}, message_thread_id=556), cfg, bot, topics, box,
+                 media) == "picker"
+    voice.set_car_choice("preview")
+    voice.set_driving(True)  # the driving window
+    assert write(general(None, mid=12, voice={"file_id": "v3"}, message_thread_id=557), cfg, bot, topics, box,
                  media) == "picker"
 
 

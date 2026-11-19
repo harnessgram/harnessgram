@@ -58,7 +58,7 @@ ctb = "ctb.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"ctb" = ["cockpit_voice_copilot.css", "cockpit_voice_copilot.js", "cockpit_v2.css", "cockpit_v2.js", "cockpit_v2_screens.js", "cockpit_app_request.js", "cockpit_v2_knowledge.js", "cockpit_v2_knowledge.css", "cockpit_v2_addons.js", "cockpit_v2_addons.css", "cockpit_v2_packs.js", "cockpit_v2_packs.css", "cockpit_v2_schedule.js", "cockpit_v2_schedule.css", "cockpit_v2_workmap.js", "cockpit_v2_workmap.css", "cockpit_v2_family.js", "cockpit_v2_family.css", "cockpit_v2_art.js", "cockpit_v2_art.css", "cockpit_mac_tools.js", "cockpit_v2_strings.json", "assets/cockpit/*.webp", "assets/panel/*"]
+"ctb" = ["*.js", "*.css", "*.json", "*.html", "*.svg", "assets/*/*"]
 "ctb.studio" = ["*.css", "*.js", "*.svg"]
 
 [tool.pytest.ini_options]
